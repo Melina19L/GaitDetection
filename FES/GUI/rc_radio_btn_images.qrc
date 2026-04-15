@@ -1,0 +1,10 @@
+<!DOCTYPE RCC><RCC version="1.0">
+    <qresource>
+        <file>gui/images/svg_images/radio_btn_checked.svg</file>
+        <file>gui/images/svg_images/radio_btn_checked_disabled.svg</file>
+        <file>gui/images/svg_images/radio_btn_unchecked.svg</file>
+        <file>gui/images/svg_images/radio_btn_unchecked_disabled.svg</file>
+        <file>gui/images/svg_images/radio_btn_hover.svg</file>
+        <file>gui/images/svg_images/radio_btn_pressed.svg</file>
+    </qresource>
+</RCC>

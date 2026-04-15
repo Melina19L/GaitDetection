@@ -1,0 +1,16 @@
+bleak==0.22.3
+imufusion==1.2.8
+keyboard==0.13.5
+pylsl==1.17.6
+pyside6==6.9.0
+pyside6-addons==6.9.0
+pyside6-essentials==6.9.0
+shiboken6==6.9.0
+winrt-runtime==2.3.0
+winrt-windows-devices-bluetooth==2.3.0
+winrt-windows-devices-bluetooth-advertisement==2.3.0
+winrt-windows-devices-bluetooth-genericattributeprofile==2.3.0
+winrt-windows-devices-enumeration==2.3.0
+winrt-windows-foundation==2.3.0
+winrt-windows-foundation-collections==2.3.0
+winrt-windows-storage-streams==2.3.0

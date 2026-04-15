@@ -1,0 +1,206 @@
+{
+    "No Electrodes": {
+        "buttons": []
+    },
+    "Singlesite": {
+        "buttons": [
+            0
+        ]
+    },
+    "Three Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2
+        ]
+    },
+    "Four Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2,
+            3
+        ]
+    },
+    "Multisite - Six Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2,
+            4,
+            5,
+            6
+        ]
+    },
+    "Multisite - Eight Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+        ]
+    },
+    "Combination - Seven Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+        ]
+    },
+    
+            "FES - 8 Electrodes": {
+        "buttons": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+        ]
+    },
+        "FES - No Stimulation": {
+        "buttons": []
+    },
+    
+    "tasks": {
+        "No Stimulation - tSCS": {
+            "burst_frequency": "10",
+            "burst_duration": "1000",
+            "pulse_deadtime": "19",
+            "interpulse_interval": "10",
+            "carrier_frequency": "5000",
+            "electrode_placement": "No Electrodes",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": true,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": true,
+            "fes_toggle": false
+        },
+        "Task 2 - Open Loop Multisite": {
+            "burst_frequency": "30",
+            "burst_duration": "1000",
+            "pulse_deadtime": "19",
+            "interpulse_interval": "10",
+            "carrier_frequency": "5000",
+            "electrode_placement": "Multisite - Six Electrodes",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": true,
+            "fes_toggle": false
+        },
+        "Task 4 - Open Loop Singlesite": {
+            "burst_frequency": "30",
+            "burst_duration": "1000",
+            "pulse_deadtime": "19",
+            "interpulse_interval": "10",
+            "carrier_frequency": "5000",
+            "electrode_placement": "Singlesite",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": true,
+            "fes_toggle": false
+        },
+        "Task 6 - OL Single + Multisite": {
+            "burst_frequency": "30",
+            "burst_duration": "1000",
+            "pulse_deadtime": "19",
+            "interpulse_interval": "10",
+            "carrier_frequency": "5000",
+            "electrode_placement": "Combination - Seven Electrodes",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": true,
+            "fes_toggle": false
+        },
+
+        "No Stimulation - FES": {
+            "burst_frequency": "50", 
+            "burst_duration": "560",
+            "pulse_deadtime": "0",
+            "interpulse_interval": "0",
+            "carrier_frequency": "0",
+            "electrode_placement": "FES - No Stimulation",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": false,
+            "fes_toggle": true
+        },
+
+        "CL FES": {
+            "burst_frequency": "50",
+            "burst_duration": "560",
+            "pulse_deadtime": "0",
+            "interpulse_interval": "0",
+            "carrier_frequency": "0",
+            "electrode_placement": "FES - 8 Electrodes",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "do_closed_loop": true,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": false,
+            "fes_toggle": true
+        },
+
+        "SS tSCS + FES": {
+            "burst_frequency_tscs": "30",
+            "burst_duration_tscs": "1000",
+            "pulse_deadtime_tscs": "19",
+            "interpulse_interval_tscs": "10",
+            "carrier_frequency_tscs": "5000",
+            "burst_frequency_fes": "50",
+            "burst_duration_fes": "560",
+            "pulse_deadtime_fes": "0",
+            "interpulse_interval_fes": "0",
+            "carrier_frequency_fes": "0",
+            "electrode_placement": "FES - 8 Electrodes",
+            "gait_detection_toggle": true,
+            "imu_toggle": true,
+            "walking_speed_toggle": false,
+            "use_4_imus": false,
+            "fsr_toggle": false,
+            "phase_detection_toggle": true,
+            "use_subphases": false,
+            "tscs_toggle": true,
+            "fes_toggle": true
+        },
+        "New Task": {}
+    }
+}
