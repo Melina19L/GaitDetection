@@ -17,3 +17,5 @@
 # PY PUSH BUTTON
 # ///////////////////////////////////////////////////////////////
 from .py_angle_plot import PyAnglePlot
+from .py_ankle_plot import PyAnklePlot
+from .plot_dialog import PlotDialog

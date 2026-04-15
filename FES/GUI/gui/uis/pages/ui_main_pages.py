@@ -1261,38 +1261,83 @@ class Ui_MainPages(object):
         self.page_09.setObjectName(u"page_09")
         self.verticalLayout_2 = QVBoxLayout(self.page_09)
         self.verticalLayout_2.setObjectName(u"verticalLayout_2")
+        self.verticalLayout_2.setSpacing(6)
+        self.verticalLayout_2.setContentsMargins(8, 6, 8, 6)
+
+        # ── ROW 1: Title ──
         self.title_label_9 = QLabel(self.page_09)
         self.title_label_9.setObjectName(u"title_label_9")
-        self.title_label_9.setMaximumSize(QSize(16777215, 80))
-        self.title_label_9.setStyleSheet(u"font-size:16pt")
+        self.title_label_9.setMaximumSize(QSize(16777215, 36))
+        self.title_label_9.setStyleSheet(u"font-size: 16pt; font-weight: bold;")
         self.title_label_9.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
         self.verticalLayout_2.addWidget(self.title_label_9)
 
-        self.imu_calibration_widget = QWidget(self.page_09)
-        self.imu_calibration_widget.setObjectName(u"imu_calibration_widget")
-        self.imu_calibration_layout = QGridLayout(self.imu_calibration_widget)
-        self.imu_calibration_layout.setObjectName(u"imu_calibration_layout")
-        self.imu_calibration_layout.setContentsMargins(0, 0, 0, 0)
+        # ── ROW 2: Toggles bar ──
+        self.toggle_bar_widget = QWidget(self.page_09)
+        self.toggle_bar_widget.setObjectName(u"toggle_bar_widget")
+        self.toggle_bar_widget.setMaximumSize(QSize(16777215, 36))
+        self.toggle_bar_layout = QHBoxLayout(self.toggle_bar_widget)
+        self.toggle_bar_layout.setObjectName(u"toggle_bar_layout")
+        self.toggle_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.toggle_bar_layout.setSpacing(12)
+        self.verticalLayout_2.addWidget(self.toggle_bar_widget)
 
-        self.verticalLayout_2.addWidget(self.imu_calibration_widget)
+        # ── ROW 3: Buttons bar ──
+        self.btn_bar_widget = QWidget(self.page_09)
+        self.btn_bar_widget.setObjectName(u"btn_bar_widget")
+        self.btn_bar_widget.setMaximumSize(QSize(16777215, 40))
+        self.btn_bar_layout = QHBoxLayout(self.btn_bar_widget)
+        self.btn_bar_layout.setObjectName(u"btn_bar_layout")
+        self.btn_bar_layout.setContentsMargins(0, 0, 0, 0)
+        self.btn_bar_layout.setSpacing(10)
+        self.verticalLayout_2.addWidget(self.btn_bar_widget)
 
-        self.angle_plot_widget = QWidget(self.page_09)
-        self.angle_plot_widget.setObjectName(u"angle_plot_widget")
-        self.angle_plot_widget.setMaximumSize(QSize(16777215, 16777215))
-        self.angle_plot_layout = QVBoxLayout(self.angle_plot_widget)
-        self.angle_plot_layout.setSpacing(0)
-        self.angle_plot_layout.setObjectName(u"angle_plot_layout")
-        self.angle_plot_layout.setContentsMargins(0, 0, 0, 0)
+        # ── ROW 4: Status box ──
+        self.status_widget = QWidget(self.page_09)
+        self.status_widget.setObjectName(u"status_widget")
+        self.status_widget.setMaximumSize(QSize(16777215, 90))
+        self.status_layout = QVBoxLayout(self.status_widget)
+        self.status_layout.setObjectName(u"status_layout")
+        self.status_layout.setContentsMargins(0, 0, 0, 0)
+        self.verticalLayout_2.addWidget(self.status_widget)
 
-        self.verticalLayout_2.addWidget(self.angle_plot_widget)
+        # ── ROW 5: Two-column parameters (Knee | Ankle) ──
+        self.params_widget = QWidget(self.page_09)
+        self.params_widget.setObjectName(u"params_widget")
+        self.params_layout = QHBoxLayout(self.params_widget)
+        self.params_layout.setObjectName(u"params_layout")
+        self.params_layout.setContentsMargins(0, 0, 0, 0)
+        self.params_layout.setSpacing(16)
 
+        # Left column: Knee
+        self.knee_params_widget = QWidget(self.params_widget)
+        self.knee_params_widget.setObjectName(u"knee_params_widget")
+        self.knee_params_layout = QGridLayout(self.knee_params_widget)
+        self.knee_params_layout.setObjectName(u"knee_params_layout")
+        self.knee_params_layout.setContentsMargins(4, 4, 4, 4)
+        self.knee_params_layout.setSpacing(4)
+        self.params_layout.addWidget(self.knee_params_widget)
+
+        # Right column: Ankle
+        self.ankle_params_widget = QWidget(self.params_widget)
+        self.ankle_params_widget.setObjectName(u"ankle_params_widget")
+        self.ankle_params_layout = QGridLayout(self.ankle_params_widget)
+        self.ankle_params_layout.setObjectName(u"ankle_params_layout")
+        self.ankle_params_layout.setContentsMargins(4, 4, 4, 4)
+        self.ankle_params_layout.setSpacing(4)
+        self.params_layout.addWidget(self.ankle_params_widget)
+
+        self.verticalLayout_2.addWidget(self.params_widget)
+
+        # ── Spacer to push Finish down ──
+        self.verticalLayout_2.addStretch(1)
+
+        # ── ROW 6: Finish button ──
         self.finish_btn_widget_6 = QWidget(self.page_09)
         self.finish_btn_widget_6.setObjectName(u"finish_btn_widget_6")
-        self.finish_btn_widget_6.setMaximumSize(QSize(16777215, 60))
+        self.finish_btn_widget_6.setMaximumSize(QSize(16777215, 45))
         self.finish_btn_layout_6 = QHBoxLayout(self.finish_btn_widget_6)
         self.finish_btn_layout_6.setObjectName(u"finish_btn_layout_6")
-
         self.verticalLayout_2.addWidget(self.finish_btn_widget_6)
 
         self.pages.addWidget(self.page_09)

@@ -89,6 +89,8 @@ from . py_dropbox import PyDropbox
 # PY ANGLE PLOT
 # ///////////////////////////////////////////////////////////////
 from . py_angle_plot import PyAnglePlot
+from . py_angle_plot import PyAnklePlot
+from . py_angle_plot import PlotDialog
 
 # PY TEXT BROWSER
 # ///////////////////////////////////////////////////////////////

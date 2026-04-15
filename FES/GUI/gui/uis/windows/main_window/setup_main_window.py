@@ -662,7 +662,8 @@ class SetupMainWindow:
 
         def start_clicked():
             # Stop timer (don't want it running during experiment)
-            self.timer_plot.stop()
+            if self.plot_dialog is not None:
+                self.plot_dialog.timer.stop()
             self.angle_calibrator.stop()
 
             # Deselect all left menu buttons
@@ -6093,279 +6094,423 @@ class SetupMainWindow:
         # PAGE 9 - IMU SETUP
         # ///////////////////////////////////////////////////////////////
         self.process: subprocess.Popen = None
+        self.plot_dialog = None  # Will be created when "Start Graph" is pressed
 
-        # PUSH BUTTON 1
+        # ── BUTTONS ──
         self.imu_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Open IMU GUI")
         self.imu_btn.setMinimumHeight(LINE_HEIGHT)
         self.imu_btn.setToolTip("Open the IMU GUI to connect to the IMU sensors.")
 
-        # PUSH BUTTON 2
         self.calibrate_offset_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Calibrate Offsets")
         self.calibrate_offset_btn.setMinimumHeight(LINE_HEIGHT)
-        self.calibrate_offset_btn.setToolTip("Calibrate the angle offset of the connected legs (toggle on) in neutral pose.")
+        self.calibrate_offset_btn.setToolTip("Calibrate the angle offset of the connected legs in neutral pose.")
 
-        # PUSH BUTTON 3
-        self.reset_graph_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Start/Reset Graph")
-        self.reset_graph_btn.setMinimumHeight(LINE_HEIGHT)
-        self.reset_graph_btn.setToolTip("Start or reset the angle graph.")
+        self.start_graph_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Start Graph")
+        self.start_graph_btn.setMinimumHeight(LINE_HEIGHT)
+        self.start_graph_btn.setToolTip("Open the real-time angle plot window.")
 
-        # PUSH BUTTON 4
-        self.invert_left_angle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert Left Angle")
-        self.invert_left_angle_btn.setMinimumHeight(LINE_HEIGHT)
-        self.invert_left_angle_btn.setToolTip("Invert the values of left angle.")
-
-        # PUSH BUTTON 5
-        self.invert_right_angle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert Right Angle")
-        self.invert_right_angle_btn.setMinimumHeight(LINE_HEIGHT)
-        self.invert_right_angle_btn.setToolTip("Invert the values of right angle.")
-
-        # PUSH BUTTON 6
         self.finish_btn_7 = SetupMainWindow.create_std_push_btn(self.themes, text="Finish")
 
-        # SMALL TOGGLE 1
+        # ── TOGGLES (all 6 independent) ──
+        self.left_leg_toggle = PyToggleSmall(
+            text="Left Leg",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
+        )
+        self.right_leg_toggle = PyToggleSmall(
+            text="Right Leg",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
+        )
         self.left_knee_toggle = PyToggleSmall(
             text="Left Knee",
             bg_color=self.themes["app_color"]["dark_two"],
             circle_color=self.themes["app_color"]["icon_color"],
             active_color=self.themes["app_color"]["context_color"],
-            text_color=self.themes["app_color"]["text_foreground"],
-            text_disabled_color=self.themes["app_color"]["text_foreground"],
-            bg_color_disabled=self.themes["app_color"]["bg_one"],
-            text_color_active=self.themes["app_color"]["text_active"],
         )
-        self.left_knee_toggle.setToolTip("Connect to the left knee IMU sensors and display the angle in the plot.")
-
-        # SMALL TOGGLE 2
         self.right_knee_toggle = PyToggleSmall(
             text="Right Knee",
             bg_color=self.themes["app_color"]["dark_two"],
             circle_color=self.themes["app_color"]["icon_color"],
             active_color=self.themes["app_color"]["context_color"],
-            text_color=self.themes["app_color"]["text_foreground"],
-            text_disabled_color=self.themes["app_color"]["text_foreground"],
-            bg_color_disabled=self.themes["app_color"]["bg_one"],
-            text_color_active=self.themes["app_color"]["text_active"],
         )
-        self.right_knee_toggle.setToolTip("Connect to the right knee IMU sensors and display the angle in the plot.")
-
-        # TEXT BROWSER 1
-        self.imu_status_box = PyTextBrowser(
-            text_color=self.themes["app_color"]["text_foreground"],
-            bg_color=self.themes["app_color"]["dark_one"],
+        self.left_ankle_toggle = PyToggleSmall(
+            text="Left Ankle",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
+        )
+        self.right_ankle_toggle = PyToggleSmall(
+            text="Right Ankle",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
         )
 
-        # SPIN BOX 1
+        # ── STATUS BOX ──
+        self.imu_status_box = QTextBrowser()
+        self.imu_status_box.setStyleSheet(
+            f"font-size: 9pt; background: {self.themes['app_color']['dark_one']}; "
+            f"color: {self.themes['app_color']['text_foreground']}; border-radius: 4px;"
+        )
+        self.imu_status_box.setMaximumHeight(80)
+
+        # ── KNEE PARAMETER WIDGETS ──
+        lbl_style = f"font-size: 10pt; font-weight: bold; color: {self.themes['app_color']['text_foreground']};"
+        lbl_sub_style = f"font-size: 9pt; color: {self.themes['app_color']['text_foreground']};"
+
+        self.knee_header = QLabel("KNEE")
+        self.knee_header.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {self.themes['app_color']['text_foreground']};")
+        self.knee_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.invert_left_angle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert L")
+        self.invert_left_angle_btn.setMinimumHeight(LINE_HEIGHT)
+        self.invert_right_angle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert R")
+        self.invert_right_angle_btn.setMinimumHeight(LINE_HEIGHT)
+
+        self.scale_label = QLabel("Scale:")
+        self.scale_label.setStyleSheet(lbl_sub_style)
         self.scale_left_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.1, 4.0),
-            step_size=0.1,
-            value=1.0,
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
         )
-        self.scale_left_spin_box.setToolTip("Scale factor for left knee angle.")
-
-        # SPIN BOX 2
         self.scale_right_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.1, 4.0),
-            step_size=0.1,
-            value=1.0,
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
         )
-        self.scale_right_spin_box.setToolTip("Scale factor for right knee angle.")
 
-        # SPIN BOX 3
+        self.targets_label = QLabel("Targets (Ext. – Flex.):")
+        self.targets_label.setStyleSheet(lbl_sub_style)
         self.extension_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-50, 100),
-            step_size=1,
-            value=0,
+            value_range=(-30, 30), value=0,
         )
-        self.extension_left_spin_box.setToolTip("Target angle for left knee extension in degrees.")
-
-        # SPIN BOX 4
-        self.extension_right_spin_box = PySpinBox(
-            text_color=self.themes["app_color"]["text_foreground"],
-            bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-50, 100),
-            step_size=1,
-            value=0,
-        )
-        self.extension_right_spin_box.setToolTip("Target angle for right knee extension in degrees.")
-
-        # SPIN BOX 5
         self.flexion_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-50, 100),
-            step_size=1,
-            value=60,
+            value_range=(0, 120), value=60,
         )
-        self.flexion_left_spin_box.setToolTip("Target angle for left knee flexion in degrees.")
-
-        # SPIN BOX 6
+        self.extension_right_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 30), value=0,
+        )
         self.flexion_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-50, 100),
-            step_size=1,
-            value=60,
+            value_range=(0, 120), value=60,
         )
-        self.flexion_right_spin_box.setToolTip("Target angle for right knee flexion in degrees.")
-        
-        # SPIN BOX 7
+
+        self.pi_param_label = QLabel("PI (Kp – Ki):")
+        self.pi_param_label.setStyleSheet(lbl_sub_style)
         self.pi_kp_left_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.0, 10.0),
-            decimals= 2,
-            step_size=0.01,
-            value=0.1,
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.10,
         )
-        self.pi_kp_left_spin_box.setToolTip("Kp parameter for left knee angle control.")
-        
-        # SPIN BOX 8
         self.pi_ki_left_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.0, 10.0),
-            decimals= 2,
-            step_size=0.01,
-            value=0.01,
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.01,
         )
-        self.pi_ki_left_spin_box.setToolTip("Ki parameter for left knee angle control.")
-        
-        # SPIN BOX 9
         self.pi_kp_right_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.0, 10.0),
-            decimals= 2,
-            step_size=0.01,
-            value=0.1,
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.10,
         )
-        self.pi_kp_right_spin_box.setToolTip("Kp parameter for right knee angle control.")
-        
-        # SPIN BOX 10
         self.pi_ki_right_spin_box = PyDoubleSpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(0.0, 10.0),
-            decimals= 2,
-            step_size=0.01,
-            value=0.01,
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.01,
         )
-        self.pi_ki_right_spin_box.setToolTip("Ki parameter for right knee angle control.")
 
-        # LABEL 1
-        self.scale_label = QLabel("Scale Factor:")
-        self.scale_label.setStyleSheet("font-size: 12pt;")
+        # ── ANKLE PARAMETER WIDGETS ──
+        self.ankle_header = QLabel("ANKLE")
+        self.ankle_header.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {self.themes['app_color']['text_foreground']};")
+        self.ankle_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # LABEL 2
-        self.targets_label = QLabel("Target Angle:\n  Extension - Flexion")
-        self.targets_label.setStyleSheet("font-size: 12pt;")
+        self.invert_left_ankle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert L")
+        self.invert_left_ankle_btn.setMinimumHeight(LINE_HEIGHT)
+        self.invert_right_ankle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert R")
+        self.invert_right_ankle_btn.setMinimumHeight(LINE_HEIGHT)
 
-        # LABEL 3
-        self.left_color = QLabel("Left Knee Angle Color")
-        self.left_color.setStyleSheet(f"font-size: 12pt; color: {self.themes["app_color"]["yellow"]};")
-        
-        # LABEL 4
-        self.right_color = QLabel("Right Knee Angle Color")
-        self.right_color.setStyleSheet(f"font-size: 12pt; color: {self.themes["app_color"]["red"]};")
-        
-        # LABEL 5
-        self.pi_param_label = QLabel("PI Paramters:\n              Kp - Ki")
-        self.pi_param_label.setStyleSheet("font-size: 12pt;")
-
-        # TIMER - PLOT UPDATE
-        self.timer_plot = QTimer()
-
-        # Create the angle calibrator and angle plot
-        self.angle_calibrator = AngleCalibrator(self.left_knee_toggle, self.right_knee_toggle, self.extension_left_spin_box, self.extension_right_spin_box, self)
-        self.angle_plot = PyAnglePlot(
-            self.angle_calibrator,
-            axis_color=self.themes["app_color"]["text_foreground"],
-            background_color=self.themes["app_color"]["dark_three"],
-            line_color_left=self.themes["app_color"]["yellow"],
-            line_color_right=self.themes["app_color"]["red"],
-            max_points= 1000,
+        self.ankle_scale_label = QLabel("Scale:")
+        self.ankle_scale_label.setStyleSheet(lbl_sub_style)
+        self.ankle_scale_left_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
         )
-        self.ui.load_pages.angle_plot_widget.setMaximumHeight(300)
-        self.ui.load_pages.angle_plot_layout.addWidget(self.angle_plot)
+        self.ankle_scale_right_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
+        )
 
-        # BUTTON CLICKED
-        # NOTE Could be embedded in the main window using createWindowContainer, but has problems with drawing
+        self.ankle_targets_label = QLabel("Targets (Dorsi. – Plant.):")
+        self.ankle_targets_label.setStyleSheet(lbl_sub_style)
+        self.dorsiflexion_left_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 30), value=-10,
+        )
+        self.plantarflexion_left_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 60), value=20,
+        )
+        self.dorsiflexion_right_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 30), value=-10,
+        )
+        self.plantarflexion_right_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 60), value=20,
+        )
+
+        self.ankle_pi_param_label = QLabel("PI (Kp – Ki):")
+        self.ankle_pi_param_label.setStyleSheet(lbl_sub_style)
+        self.ankle_pi_kp_left_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.10,
+        )
+        self.ankle_pi_ki_left_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.01,
+        )
+        self.ankle_pi_kp_right_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.10,
+        )
+        self.ankle_pi_ki_right_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.01,
+        )
+
+        # ── ANGLE CALIBRATOR ──
+        self.angle_calibrator = AngleCalibrator(
+            self.left_leg_toggle, self.right_leg_toggle,
+            self.extension_left_spin_box, self.extension_right_spin_box, self
+        )
+
+        # ── CALLBACKS ──
         def open_imu_gui():
             if self.process is not None:
                 retcode = self.process.poll()
                 if retcode is None:
-                    # Process is still running
                     return
             self.process = subprocess.Popen(["./DeployDir/MovellaGUI"])
 
         def update_imu_status(status: str):
+            """Show a normal message in the status box."""
             self.imu_status_box.append(status)
 
-        def left_knee_state_changed(state: Qt.CheckState):
+        def update_imu_error(status: str):
+            """Show an error message in RED in the status box."""
+            self.imu_status_box.append(f'<span style="color: #ff5555;">{status}</span>')
+
+        def open_plot_dialog():
+            """Create (or re-open) the floating plot window — only if sensors are connected."""
+            if not self.angle_calibrator.has_any_sensor():
+                update_imu_error("No sensors connected. Cannot start graph.")
+                return
+
+            if self.plot_dialog is None:
+                self.plot_dialog = PlotDialog(self.angle_calibrator, self.themes, parent=self)
+                # Wire toggles → plot visibility
+                def _sync_knee_left(st):
+                    self.plot_dialog.knee_plot.show_left_knee_angle(st == Qt.CheckState.Checked)
+                def _sync_knee_right(st):
+                    self.plot_dialog.knee_plot.show_right_knee_angle(st == Qt.CheckState.Checked)
+                def _sync_ankle_left(st):
+                    self.plot_dialog.ankle_plot.show_left_ankle_angle(st == Qt.CheckState.Checked)
+                def _sync_ankle_right(st):
+                    self.plot_dialog.ankle_plot.show_right_ankle_angle(st == Qt.CheckState.Checked)
+                self.left_knee_toggle.checkStateChanged.connect(_sync_knee_left)
+                self.right_knee_toggle.checkStateChanged.connect(_sync_knee_right)
+                self.left_ankle_toggle.checkStateChanged.connect(_sync_ankle_left)
+                self.right_ankle_toggle.checkStateChanged.connect(_sync_ankle_right)
+                # Wire spin boxes → plot
+                self.scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, LEFT))
+                self.scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, RIGHT))
+                self.extension_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_target_extension_angle(v, LEFT))
+                self.flexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_target_flexion_angle(v, LEFT))
+                self.extension_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_target_extension_angle(v, RIGHT))
+                self.flexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_target_flexion_angle(v, RIGHT))
+                self.ankle_scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_scale_factor(v, LEFT))
+                self.ankle_scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_scale_factor(v, RIGHT))
+                self.dorsiflexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_dorsiflexion_angle(v, LEFT))
+                self.plantarflexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_plantarflexion_angle(v, LEFT))
+                self.dorsiflexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_dorsiflexion_angle(v, RIGHT))
+                self.plantarflexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_plantarflexion_angle(v, RIGHT))
+                # Wire invert buttons
+                self.invert_left_angle_btn.clicked.connect(lambda: self.plot_dialog.knee_plot.invert_angle(LEFT))
+                self.invert_right_angle_btn.clicked.connect(lambda: self.plot_dialog.knee_plot.invert_angle(RIGHT))
+                self.invert_left_ankle_btn.clicked.connect(lambda: self.plot_dialog.ankle_plot.invert_angle(LEFT))
+                self.invert_right_ankle_btn.clicked.connect(lambda: self.plot_dialog.ankle_plot.invert_angle(RIGHT))
+            self.plot_dialog.start()
+
+        # ── Toggle callbacks ──
+        def left_leg_state_changed(state: Qt.CheckState):
             show: bool = state == Qt.CheckState.Checked
-            # Show or hide the left knee angle in the plot
-            self.angle_plot.show_left_knee_angle(show)
-            # Start or stop the lsl stream for the left knee angle
             self.angle_calibrator.handle_left_inlet(show)
 
-        def right_knee_state_changed(state: Qt.CheckState):
+        def right_leg_state_changed(state: Qt.CheckState):
             show: bool = state == Qt.CheckState.Checked
-            # Show or hide the right knee angle in the plot
-            self.angle_plot.show_right_knee_angle(show)
-            # Start or stop the lsl stream for the right knee angle
             self.angle_calibrator.handle_right_inlet(show)
 
-        # CONNECT BUTTONS
+        def left_knee_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.left_shank_inlet and cal.left_thigh_inlet:
+                    update_imu_status("Left Knee: sensors connected (Thigh + Shank).")
+                else:
+                    update_imu_error("Left Knee: Thigh or Shank sensor not connected. Enable Left Leg first.")
+                    self.left_knee_toggle.setChecked(False)
+
+        def right_knee_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.right_shank_inlet and cal.right_thigh_inlet:
+                    update_imu_status("Right Knee: sensors connected (Thigh + Shank).")
+                else:
+                    update_imu_error("Right Knee: Thigh or Shank sensor not connected. Enable Right Leg first.")
+                    self.right_knee_toggle.setChecked(False)
+
+        def left_ankle_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.left_shank_inlet and cal.left_foot_inlet:
+                    update_imu_status("Left Ankle: sensors connected (Shank + Foot).")
+                else:
+                    update_imu_error("Left Ankle: Shank or Foot sensor not connected. Enable Left Leg first.")
+                    self.left_ankle_toggle.setChecked(False)
+
+        def right_ankle_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.right_shank_inlet and cal.right_foot_inlet:
+                    update_imu_status("Right Ankle: sensors connected (Shank + Foot).")
+                else:
+                    update_imu_error("Right Ankle: Shank or Foot sensor not connected. Enable Right Leg first.")
+                    self.right_ankle_toggle.setChecked(False)
+
+        # ── CONNECT BUTTONS ──
         self.imu_btn.clicked.connect(open_imu_gui)
-        self.invert_left_angle_btn.clicked.connect(lambda: self.angle_plot.invert_angle(LEFT))
-        self.invert_right_angle_btn.clicked.connect(lambda: self.angle_plot.invert_angle(RIGHT))
-        self.reset_graph_btn.clicked.connect(self.angle_plot.reset_plot)
-        self.reset_graph_btn.clicked.connect(lambda: self.timer_plot.start(10))
+        self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
+        self.start_graph_btn.clicked.connect(open_plot_dialog)
+        self.left_leg_toggle.checkStateChanged.connect(left_leg_state_changed)
+        self.right_leg_toggle.checkStateChanged.connect(right_leg_state_changed)
         self.left_knee_toggle.checkStateChanged.connect(left_knee_state_changed)
         self.right_knee_toggle.checkStateChanged.connect(right_knee_state_changed)
-        self.scale_left_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_scale_factor(value, LEFT))
-        self.scale_right_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_scale_factor(value, RIGHT))
-        self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
-        self.extension_left_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_target_extension_angle(value, LEFT))
-        self.flexion_left_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_target_flexion_angle(value, LEFT))
-        self.extension_right_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_target_extension_angle(value, RIGHT))
-        self.flexion_right_spin_box.valueChanged.connect(lambda value: self.angle_plot.set_target_flexion_angle(value, RIGHT))
+        self.left_ankle_toggle.checkStateChanged.connect(left_ankle_state_changed)
+        self.right_ankle_toggle.checkStateChanged.connect(right_ankle_state_changed)
         self.finish_btn_7.clicked.connect(finish_btn_clicked)
 
         # CONNECT SIGNALS
         self.angle_calibrator.message_signal.connect(update_imu_status)
-        self.timer_plot.timeout.connect(self.angle_plot.update_plot)
+        self.angle_calibrator.error_signal.connect(update_imu_error)
 
-        # ADD WIDGETS
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.imu_status_box, 0, 0, 8, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.imu_btn, 0, 1, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.calibrate_offset_btn, 1, 1, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.reset_graph_btn, 2, 1, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.left_knee_toggle, 3, 1, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.right_knee_toggle, 4, 1, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.invert_left_angle_btn, 0, 2, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.invert_right_angle_btn, 1, 2, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.scale_label, 2, 2, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.scale_left_spin_box, 3, 2, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.scale_right_spin_box, 4, 2, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.targets_label, 0, 3, 1, 2)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.extension_left_spin_box, 1, 3, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.flexion_left_spin_box, 1, 4, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.extension_right_spin_box, 2, 3, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.flexion_right_spin_box, 2, 4, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.left_color, 3, 3, 1, 2)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.right_color, 4, 3, 1, 2)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.pi_param_label, 0, 5, 1, 2)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.pi_kp_left_spin_box, 1, 5, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.pi_ki_left_spin_box, 1, 6, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.pi_kp_right_spin_box, 2, 5, 1, 1)
-        self.ui.load_pages.imu_calibration_layout.addWidget(self.pi_ki_right_spin_box, 2, 6, 1, 1)
+        # ============================================================
+        # POPULATE LAYOUT
+        # ============================================================
+
+        # ── Toggle bar ──
+        tbar = self.ui.load_pages.toggle_bar_layout
+        tbar.addStretch(1)
+        tbar.addWidget(self.left_leg_toggle)
+        tbar.addWidget(self.right_leg_toggle)
+        tbar.addWidget(self.left_knee_toggle)
+        tbar.addWidget(self.right_knee_toggle)
+        tbar.addWidget(self.left_ankle_toggle)
+        tbar.addWidget(self.right_ankle_toggle)
+        tbar.addStretch(1)
+
+        # ── Button bar ──
+        bbar = self.ui.load_pages.btn_bar_layout
+        bbar.addStretch(1)
+        bbar.addWidget(self.imu_btn)
+        bbar.addWidget(self.calibrate_offset_btn)
+        bbar.addWidget(self.start_graph_btn)
+        bbar.addStretch(1)
+
+        # ── Status box ──
+        self.ui.load_pages.status_layout.addWidget(self.imu_status_box)
+
+        # ── Knee parameters grid ──
+        kg = self.ui.load_pages.knee_params_layout
+        kg.addWidget(self.knee_header,             0, 0, 1, 4)
+        kg.addWidget(self.invert_left_angle_btn,   1, 0, 1, 2)
+        kg.addWidget(self.invert_right_angle_btn,  1, 2, 1, 2)
+        #
+        lbl_l = QLabel("Left")
+        lbl_l.setStyleSheet(lbl_sub_style)
+        lbl_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_r = QLabel("Right")
+        lbl_r.setStyleSheet(lbl_sub_style)
+        lbl_r.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        kg.addWidget(lbl_l,                        2, 1, 1, 1)
+        kg.addWidget(lbl_r,                        2, 2, 1, 1)
+        #
+        kg.addWidget(self.scale_label,             3, 0, 1, 1)
+        kg.addWidget(self.scale_left_spin_box,     3, 1, 1, 1)
+        kg.addWidget(self.scale_right_spin_box,    3, 2, 1, 1)
+        #
+        kg.addWidget(self.targets_label,           4, 0, 1, 1)
+        kg.addWidget(self.extension_left_spin_box, 4, 1, 1, 1)
+        kg.addWidget(self.extension_right_spin_box,4, 2, 1, 1)
+        kg.addWidget(self.flexion_left_spin_box,   5, 1, 1, 1)
+        kg.addWidget(self.flexion_right_spin_box,  5, 2, 1, 1)
+        #
+        kg.addWidget(self.pi_param_label,          6, 0, 1, 1)
+        kg.addWidget(self.pi_kp_left_spin_box,     6, 1, 1, 1)
+        kg.addWidget(self.pi_kp_right_spin_box,    6, 2, 1, 1)
+        kg.addWidget(self.pi_ki_left_spin_box,     7, 1, 1, 1)
+        kg.addWidget(self.pi_ki_right_spin_box,    7, 2, 1, 1)
+
+        # ── Ankle parameters grid ──
+        ag = self.ui.load_pages.ankle_params_layout
+        ag.addWidget(self.ankle_header,                0, 0, 1, 4)
+        ag.addWidget(self.invert_left_ankle_btn,       1, 0, 1, 2)
+        ag.addWidget(self.invert_right_ankle_btn,      1, 2, 1, 2)
+        #
+        lbl_la = QLabel("Left")
+        lbl_la.setStyleSheet(lbl_sub_style)
+        lbl_la.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_ra = QLabel("Right")
+        lbl_ra.setStyleSheet(lbl_sub_style)
+        lbl_ra.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ag.addWidget(lbl_la,                           2, 1, 1, 1)
+        ag.addWidget(lbl_ra,                           2, 2, 1, 1)
+        #
+        ag.addWidget(self.ankle_scale_label,           3, 0, 1, 1)
+        ag.addWidget(self.ankle_scale_left_spin_box,   3, 1, 1, 1)
+        ag.addWidget(self.ankle_scale_right_spin_box,  3, 2, 1, 1)
+        #
+        ag.addWidget(self.ankle_targets_label,         4, 0, 1, 1)
+        ag.addWidget(self.dorsiflexion_left_spin_box,  4, 1, 1, 1)
+        ag.addWidget(self.dorsiflexion_right_spin_box, 4, 2, 1, 1)
+        ag.addWidget(self.plantarflexion_left_spin_box, 5, 1, 1, 1)
+        ag.addWidget(self.plantarflexion_right_spin_box,5, 2, 1, 1)
+        #
+        ag.addWidget(self.ankle_pi_param_label,        6, 0, 1, 1)
+        ag.addWidget(self.ankle_pi_kp_left_spin_box,   6, 1, 1, 1)
+        ag.addWidget(self.ankle_pi_kp_right_spin_box,  6, 2, 1, 1)
+        ag.addWidget(self.ankle_pi_ki_left_spin_box,   7, 1, 1, 1)
+        ag.addWidget(self.ankle_pi_ki_right_spin_box,  7, 2, 1, 1)
+
+        # ── Finish ──
         self.ui.load_pages.finish_btn_layout_6.addWidget(self.finish_btn_7)
 
         # # RIGHT COLUMN

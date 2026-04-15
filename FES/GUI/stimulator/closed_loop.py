@@ -11,6 +11,10 @@ DEG_TO_CURRENT = 0.1  # Example conversion factor from degrees to current
 FLEXION_ANGLE = 60.0  # Example target knee bend angle in degrees
 EXTENSION_ANGLE = 10.0  # Example target knee extension angle in degrees
 
+# Ankle angle constants (typical gait cycle values)
+PLANTARFLEXION_ANGLE = 20.0  # Target ankle plantarflexion angle in degrees (toe-off)
+DORSIFLEXION_ANGLE = -10.0   # Target ankle dorsiflexion angle in degrees (mid-stance)
+
 TIME_TOLERANCE = 0.02  # Time tolerance in seconds for matching timestamps (20 ms)
 
 

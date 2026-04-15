@@ -24,6 +24,7 @@ class SIDE(Enum):
 
 class AngleCalibrator(QObject):
     message_signal = Signal(str)
+    error_signal = Signal(str)
 
     def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None):
         super().__init__(parent)
@@ -36,11 +37,17 @@ class AngleCalibrator(QObject):
         self.right_shank_inlet = None
         self.left_thigh_inlet = None
         self.right_thigh_inlet = None
+        self.left_foot_inlet = None
+        self.right_foot_inlet = None
         self.left_angle_data = np.array([])
         self.right_angle_data = np.array([])
+        self.left_ankle_data = np.array([])
+        self.right_ankle_data = np.array([])
 
         self.left_angle_offset = 0.0
         self.right_angle_offset = 0.0
+        self.left_ankle_offset = 0.0
+        self.right_ankle_offset = 0.0
 
         # Setup timer
         self.timer = QTimer(self)
@@ -54,6 +61,14 @@ class AngleCalibrator(QObject):
         self.stream_resolver.message_signal.connect(self.message_signal.emit)
         self.resolving = SIDE.NONE
 
+    def has_any_sensor(self) -> bool:
+        """Return True if at least one sensor pair is connected."""
+        left_knee = self.left_shank_inlet is not None and self.left_thigh_inlet is not None
+        right_knee = self.right_shank_inlet is not None and self.right_thigh_inlet is not None
+        left_ankle = self.left_shank_inlet is not None and self.left_foot_inlet is not None
+        right_ankle = self.right_shank_inlet is not None and self.right_foot_inlet is not None
+        return left_knee or right_knee or left_ankle or right_ankle
+
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
         self.timer.stop()
@@ -66,9 +81,14 @@ class AngleCalibrator(QObject):
             self.worker_thread.quit()
             self.worker_thread.wait()
             self.worker_thread.deleteLater()
-        self.message_signal.emit("Angle calibration stopped.")
+        self.message_signal.emit("Angle calibration stopped (knee + ankle).")
 
     def calibration(self):
+        # Guard: refuse calibration if no sensors are connected
+        if not self.has_any_sensor():
+            self.error_signal.emit("Calibration failed: no sensors connected.")
+            return
+
         # Start the calibration if the calibration step is START
         if self.calibration_step == CalibrationStep.READY:
             # Disable the checkboxes to prevent multiple clicks
@@ -89,40 +109,66 @@ class AngleCalibrator(QObject):
             self.message_signal.emit("Collecting data, please wait...")
 
     def get_offset(self) -> tuple[float, float]:
-        """Return the angle offsets for both legs.
+        """Return the knee angle offsets for both legs.
 
-        :return: Left and right angle offsets
+        :return: Left and right knee angle offsets
         :rtype: tuple[float, float]
         """
         return self.left_angle_offset, self.right_angle_offset
 
-    def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the angle data for both legs.
+    def get_ankle_offset(self) -> tuple[float, float]:
+        """Return the ankle angle offsets for both legs.
 
-        :return: Left and right angle data
+        :return: Left and right ankle angle offsets
+        :rtype: tuple[float, float]
+        """
+        return self.left_ankle_offset, self.right_ankle_offset
+
+    def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the knee angle data for both legs.
+
+        :return: Left and right knee angle data
         :rtype: tuple[np.ndarray, np.ndarray]
         """
         return self.left_angle_data, self.right_angle_data
 
-    def get_latest_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return the latest angle data for both legs.
+    def get_ankle_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the ankle angle data for both legs.
 
-        :return: Latest left and right angle data
+        :return: Left and right ankle angle data
+        :rtype: tuple[np.ndarray, np.ndarray]
+        """
+        return self.left_ankle_data, self.right_ankle_data
+
+    def get_latest_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the latest knee angle data for both legs.
+
+        :return: Latest left and right knee angle data
         :rtype: tuple[np.ndarray, np.ndarray]
         """
         left_angle = self.left_angle_data[-1] if self.left_angle_data.size > 0 else np.array([])
         right_angle = self.right_angle_data[-1] if self.right_angle_data.size > 0 else np.array([])
         return left_angle, right_angle
 
+    def get_latest_ankle_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the latest ankle angle data for both legs.
+
+        :return: Latest left and right ankle angle data
+        :rtype: tuple[np.ndarray, np.ndarray]
+        """
+        left_ankle = self.left_ankle_data[-1] if self.left_ankle_data.size > 0 else np.array([])
+        right_ankle = self.right_ankle_data[-1] if self.right_ankle_data.size > 0 else np.array([])
+        return left_ankle, right_ankle
+
     @Slot(bool)
     def handle_left_inlet(self, checked: bool):
         if checked:
-            self.message_signal.emit("Connecting to left leg streams...")
+            self.message_signal.emit("Connecting to left leg sensors...")
             self.__connect_to_streams_for_left()
-            # Disable the checkboxes to prevent multiple clicks
-            self.__set_checkboxes_enabled(False)
+            # Disable only the Left checkbox during connection
+            self.left_checkbox.setEnabled(False)
         else:
-            self.message_signal.emit("Disconnecting from left leg streams...")
+            self.message_signal.emit("Disconnecting from left leg sensors...")
             self.__disconnect_from_streams_left()
             # Stop the timer if both checkboxes are unchecked
             if not self.right_checkbox.isChecked():
@@ -131,12 +177,12 @@ class AngleCalibrator(QObject):
     @Slot(bool)
     def handle_right_inlet(self, checked: bool):
         if checked:
-            self.message_signal.emit("Connecting to right leg streams...")
+            self.message_signal.emit("Connecting to right leg sensors...")
             self.__connect_to_streams_for_right()
-            # Disable the checkboxes to prevent multiple clicks
-            self.__set_checkboxes_enabled(False)
+            # Disable only the Right checkbox during connection
+            self.right_checkbox.setEnabled(False)
         else:
-            self.message_signal.emit("Disconnecting from right leg streams...")
+            self.message_signal.emit("Disconnecting from right leg sensors...")
             self.__disconnect_from_streams_right()
             # Stop the timer if both checkboxes are unchecked
             if not self.left_checkbox.isChecked():
@@ -144,39 +190,72 @@ class AngleCalibrator(QObject):
 
     @Slot()
     def record_data(self):
+        # Knee angle: thigh + shank
         if self.left_shank_inlet and self.left_thigh_inlet:
             angles = self.__calculate_angles(self.left_shank_inlet, self.left_thigh_inlet, self.left_angle_offset)
             self.left_angle_data = np.append(self.left_angle_data, angles)
         if self.right_shank_inlet and self.right_thigh_inlet:
             angles = self.__calculate_angles(self.right_shank_inlet, self.right_thigh_inlet, self.right_angle_offset)
             self.right_angle_data = np.append(self.right_angle_data, angles)
+        # Ankle angle: shank + foot
+        if self.left_shank_inlet and self.left_foot_inlet:
+            ankle_angles = self.__calculate_angles(self.left_shank_inlet, self.left_foot_inlet, self.left_ankle_offset)
+            self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+        if self.right_shank_inlet and self.right_foot_inlet:
+            ankle_angles = self.__calculate_angles(self.right_shank_inlet, self.right_foot_inlet, self.right_ankle_offset)
+            self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
 
     @Slot(tuple)
-    def handle_found_inlets(self, inlets: tuple[StreamInlet, StreamInlet]):
-        """Handle the found inlets from the stream resolver."""
+    def handle_found_inlets(self, inlets: tuple):
+        """Handle the found inlets from the stream resolver.
+        inlets is a tuple of (shank_inlet, thigh_inlet, foot_inlet).
+        foot_inlet may be None if no foot IMU is available.
+        """
         # Clean up the worker thread
         self.worker_thread.quit()
         self.worker_thread.wait()
         self.worker_thread.deleteLater()
         self.worker_thread = None
         
-        # Re-enable the checkboxes
-        self.__set_checkboxes_enabled(True)
+        # Re-enable the checkbox that was being connected
+        if self.resolving == SIDE.LEFT:
+            self.left_checkbox.setEnabled(True)
+        elif self.resolving == SIDE.RIGHT:
+            self.right_checkbox.setEnabled(True)
 
         if inlets[0] is None or inlets[1] is None:
-            # Message is handeled in the LSLStreamResolver
+            # Connection failed — uncheck the toggle that was trying to connect
+            self.error_signal.emit("Connection failed: sensors not found.")
+            if self.resolving == SIDE.LEFT:
+                self.left_checkbox.setChecked(False)
+            elif self.resolving == SIDE.RIGHT:
+                self.right_checkbox.setChecked(False)
+            self.resolving = SIDE.NONE
             return
+
+        # Extract foot inlet (may be None)
+        foot_inlet = inlets[2] if len(inlets) > 2 else None
 
         if self.resolving == SIDE.LEFT:
             # Store the inlets and start the timer
-            self.left_shank_inlet, self.left_thigh_inlet = inlets
+            self.left_shank_inlet, self.left_thigh_inlet = inlets[0], inlets[1]
+            self.left_foot_inlet = foot_inlet
             self.message_signal.emit("Left leg streams connected successfully.")
+            if foot_inlet:
+                self.message_signal.emit("Left foot IMU connected (ankle angle enabled).")
+            else:
+                self.message_signal.emit("Left foot IMU not found (ankle angle disabled).")
             self.timer.start()
 
         elif self.resolving == SIDE.RIGHT:
             # Store the inlets and start the timer
-            self.right_shank_inlet, self.right_thigh_inlet = inlets
+            self.right_shank_inlet, self.right_thigh_inlet = inlets[0], inlets[1]
+            self.right_foot_inlet = foot_inlet
             self.message_signal.emit("Right leg streams connected successfully.")
+            if foot_inlet:
+                self.message_signal.emit("Right foot IMU connected (ankle angle enabled).")
+            else:
+                self.message_signal.emit("Right foot IMU not found (ankle angle disabled).")
             self.timer.start()
         
         self.resolving = SIDE.NONE
@@ -257,7 +336,7 @@ class AngleCalibrator(QObject):
     #         self.right_angle_offset = ROM.functional_calibration(q_thigh, q_shank) - self.extension_target_right.value()
 
     def __functional_calibration(self):
-        def _one_side(shank_inlet, thigh_inlet, target_spinbox):
+        def _one_side_knee(shank_inlet, thigh_inlet, target_spinbox):
             if not (shank_inlet and thigh_inlet):
                 return None
             max_tries = 10  # retry up to ~10×timeout
@@ -269,19 +348,47 @@ class AngleCalibrator(QObject):
                 QCoreApplication.processEvents()  # keep UI alive
             return None
 
+        def _one_side_ankle(shank_inlet, foot_inlet):
+            if not (shank_inlet and foot_inlet):
+                return None
+            max_tries = 10
+            for _ in range(max_tries):
+                q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
+                q_foot = self.__get_latest_quaternion_nonblocking(foot_inlet)
+                if q_shank is not None and q_foot is not None:
+                    return ROM.functional_calibration(q_shank, q_foot)
+                QCoreApplication.processEvents()
+            return None
+
         if self.left_checkbox.isChecked():
-            off = _one_side(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
+            # Knee calibration
+            off = _one_side_knee(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
             if off is not None:
                 self.left_angle_offset = off
             else:
-                self.message_signal.emit("Left: no data yet. Try again when streams are active.")
+                self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
+            # Ankle calibration
+            ankle_off = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
+            if ankle_off is not None:
+                self.left_ankle_offset = ankle_off
+                self.message_signal.emit("Left ankle offset calibrated.")
+            elif self.left_foot_inlet:
+                self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
 
         if self.right_checkbox.isChecked():
-            off = _one_side(self.right_shank_inlet, self.right_thigh_inlet, self.extension_target_right)
+            # Knee calibration
+            off = _one_side_knee(self.right_shank_inlet, self.right_thigh_inlet, self.extension_target_right)
             if off is not None:
                 self.right_angle_offset = off
             else:
-                self.message_signal.emit("Right: no data yet. Try again when streams are active.")
+                self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
+            # Ankle calibration
+            ankle_off = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
+            if ankle_off is not None:
+                self.right_ankle_offset = ankle_off
+                self.message_signal.emit("Right ankle offset calibrated.")
+            elif self.right_foot_inlet:
+                self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
     
 
     def __set_checkboxes_enabled(self, enabled: bool):
@@ -345,6 +452,10 @@ class AngleCalibrator(QObject):
             self.left_thigh_inlet.close_stream()
             del self.left_thigh_inlet
             self.left_thigh_inlet = None
+        if self.left_foot_inlet is not None:
+            self.left_foot_inlet.close_stream()
+            del self.left_foot_inlet
+            self.left_foot_inlet = None
 
     def __disconnect_from_streams_right(self):
         # Close the streams for the right leg
@@ -356,6 +467,10 @@ class AngleCalibrator(QObject):
             self.right_thigh_inlet.close_stream()
             del self.right_thigh_inlet
             self.right_thigh_inlet = None
+        if self.right_foot_inlet is not None:
+            self.right_foot_inlet.close_stream()
+            del self.right_foot_inlet
+            self.right_foot_inlet = None
 
     def __calculate_angles(self, shank_inlet: StreamInlet, thigh_inlet: StreamInlet, angle_offset: float) -> np.ndarray:
         # Get the latest samples from the inlets
@@ -419,30 +534,38 @@ class LSLStreamResolver(QObject):
     @Slot()
     def resolve_streams_for_left(self):
         print("Resolving streams for left leg...")
-        # Resolve the LSL streams for the left leg
+        # Resolve the LSL streams for the left leg (shank + thigh + foot)
         stream_shank = resolve_byprop("name", "Left Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Left Thigh", timeout=TIMEOUT)
         if not stream_shank or not stream_thigh:
             self.message_signal.emit("Left leg streams not found. Please check the LSL streams.")
-            self.found_inlets.emit((None, None))
+            self.found_inlets.emit((None, None, None))
         else:
             self.message_signal.emit("Left leg streams found. Connecting...")
-            # Create StreamInlets for the left leg streams and emit them for the AngleCalibrator
-            self.found_inlets.emit((StreamInlet(stream_shank[0]), StreamInlet(stream_thigh[0])))
+            shank_inlet = StreamInlet(stream_shank[0])
+            thigh_inlet = StreamInlet(stream_thigh[0])
+            # Try to resolve foot stream (optional — ankle angle)
+            stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
+            foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
+            self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet))
 
     @Slot()
     def resolve_streams_for_right(self):
         print("Resolving streams for right leg...")
-        # Resolve the LSL streams for the right leg
+        # Resolve the LSL streams for the right leg (shank + thigh + foot)
         stream_shank = resolve_byprop("name", "Right Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Right Thigh", timeout=TIMEOUT)
         if not stream_shank or not stream_thigh:
             self.message_signal.emit("Right leg streams not found. Please check the LSL streams.")
-            self.found_inlets.emit((None, None))
+            self.found_inlets.emit((None, None, None))
         else:
             self.message_signal.emit("Right leg streams found. Connecting...")
-            # Create StreamInlets for the right leg streams and emit them for the AngleCalibrator
-            self.found_inlets.emit((StreamInlet(stream_shank[0]), StreamInlet(stream_thigh[0])))
+            shank_inlet = StreamInlet(stream_shank[0])
+            thigh_inlet = StreamInlet(stream_thigh[0])
+            # Try to resolve foot stream (optional — ankle angle)
+            stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
+            foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
+            self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet))
             
     @Slot()            
     def move_to_main(self):

@@ -97,8 +97,8 @@ PySocks
 python-dateutil
 python-json-logger
 pytz
-pywin32==307
-pywinpty
+# pywin32==307
+# pywinpty
 PyYAML
 pyzmq
 referencing
@@ -131,14 +131,14 @@ wcwidth
 webcolors
 webencodings
 websocket-client
-win_inet_pton
-winrt-runtime==2.3.0
-winrt-Windows.Devices.Bluetooth==2.3.0
-winrt-Windows.Devices.Bluetooth.Advertisement==2.3.0
-winrt-Windows.Devices.Bluetooth.GenericAttributeProfile==2.3.0
-winrt-Windows.Devices.Enumeration==2.3.0
-winrt-Windows.Foundation==2.3.0
-winrt-Windows.Foundation.Collections==2.3.0
-winrt-Windows.Storage.Streams==2.3.0
+# win_inet_pton
+# winrt-runtime==2.3.0
+# winrt-Windows.Devices.Bluetooth==2.3.0
+# winrt-Windows.Devices.Bluetooth.Advertisement==2.3.0
+# winrt-Windows.Devices.Bluetooth.GenericAttributeProfile==2.3.0
+# winrt-Windows.Devices.Enumeration==2.3.0
+# winrt-Windows.Foundation==2.3.0
+# winrt-Windows.Foundation.Collections==2.3.0
+# winrt-Windows.Storage.Streams==2.3.0
 zipp
 zstandard==0.23.0
