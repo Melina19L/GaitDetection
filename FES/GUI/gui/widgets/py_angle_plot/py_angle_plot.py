@@ -21,6 +21,7 @@ from qt_core import *
 # IMPORT NUMPY
 # ///////////////////////////////////////////////////////////////
 import numpy as np
+from collections import deque
 
 # IMPORT PYQTGRAPH
 # ///////////////////////////////////////////////////////////////
@@ -55,9 +56,10 @@ class PyAnglePlot(pg.PlotWidget):
         self.ptr = 0
         self.scale_factor_left = 1.0
         self.scale_factor_right = 1.0
-        self.left_knee_angle = np.array([])
-        self.right_knee_angle = np.array([])
-        self.time = np.array([])
+        # Use deques for O(1) append and automatic size limiting
+        self._time = deque(maxlen=max_points)
+        self._left_knee = deque(maxlen=max_points)
+        self._right_knee = deque(maxlen=max_points)
         self.left_knee_enabled = False
         self.right_knee_enabled = False
         self.calibrator = calibrator
@@ -153,42 +155,44 @@ class PyAnglePlot(pg.PlotWidget):
 
     def reset_plot(self):
         self.ptr = 0
-        self.left_knee_angle = np.array([])
-        self.right_knee_angle = np.array([])
-        self.time = np.array([])
+        self._time.clear()
+        self._left_knee.clear()
+        self._right_knee.clear()
         self.left_knee_curve.clear()
         self.right_knee_curve.clear()
         self.upper_line_left.setVisible(True)
         self.lower_line_left.setVisible(True)
         self.upper_line_right.setVisible(True)
         self.lower_line_right.setVisible(True)
+        self.setXRange(0, self.max_points, padding=0)
 
     def update_plot(self):
         # Get the latest angles from the calibrator
         left_knee_angle, right_knee_angle = self.calibrator.get_latest_data()
 
         self.ptr += 1
-        self.time = np.append(self.time, self.ptr)
+        self._time.append(self.ptr)
 
-        if self.left_knee_enabled and left_knee_angle.size > 0:
-            self.left_knee_angle = np.append(self.left_knee_angle, left_knee_angle)
+        if self.left_knee_enabled and np.ndim(left_knee_angle) == 0 and left_knee_angle.size > 0:
+            self._left_knee.append(float(left_knee_angle))
+        elif self.left_knee_enabled and np.asarray(left_knee_angle).size > 0:
+            self._left_knee.append(float(np.asarray(left_knee_angle).flat[0]))
         else:
-            self.left_knee_angle = np.append(self.left_knee_angle, 0)
+            self._left_knee.append(self._left_knee[-1] if self._left_knee else 0.0)
 
-        if self.right_knee_enabled and right_knee_angle.size > 0:
-            self.right_knee_angle = np.append(self.right_knee_angle, right_knee_angle)
+        if self.right_knee_enabled and np.asarray(right_knee_angle).size > 0:
+            self._right_knee.append(float(np.asarray(right_knee_angle).flat[0]))
         else:
-            self.right_knee_angle = np.append(self.right_knee_angle, 0)
+            self._right_knee.append(self._right_knee[-1] if self._right_knee else 0.0)
 
-        if self.time.size > self.max_points:
-            self.time = self.time[-self.max_points :]
-            self.left_knee_angle = self.left_knee_angle[-self.max_points :]
-            self.right_knee_angle = self.right_knee_angle[-self.max_points :]
+        t = np.array(self._time, dtype=float)
+        lk = np.array(self._left_knee, dtype=float) * self.scale_factor_left
+        rk = np.array(self._right_knee, dtype=float) * self.scale_factor_right
 
-        self.left_knee_curve.setData(self.time, self.left_knee_angle * self.scale_factor_left)
-        self.right_knee_curve.setData(self.time, self.right_knee_angle * self.scale_factor_right)
+        self.left_knee_curve.setData(t, lk)
+        self.right_knee_curve.setData(t, rk)
 
-        # Dynamic X range to follow data
+        # Dynamic X range: always follows the newest ptr
         if self.ptr > self.max_points:
             self.setXRange(self.ptr - self.max_points, self.ptr, padding=0)
         else:

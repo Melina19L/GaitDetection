@@ -150,20 +150,29 @@ class PlotDialog(QDialog):
         """Show the dialog and start the plot timer."""
         self.knee_plot.reset_plot()
         self.ankle_plot.reset_plot()
+        self.timer.stop()   # ensure no double-fire if already running
         self.timer.start()
         self.show()
         self.raise_()
 
     def _reset(self):
         """Reset both plots and restart plotting from zero."""
+        self.timer.stop()
         self.knee_plot.reset_plot()
         self.ankle_plot.reset_plot()
+        self.timer.start()
 
     # ────────────────────────────────────
     # Overrides
     # ────────────────────────────────────
 
     def closeEvent(self, event):
-        """Stop the timer when the dialog is closed."""
+        """Hide instead of closing so the dialog can be re-opened without crashes."""
         self.timer.stop()
-        super().closeEvent(event)
+        event.ignore()   # don't destroy the widget
+        self.hide()
+
+    def reject(self):
+        """Intercept Escape key (QDialog default) — same behaviour as X button."""
+        self.timer.stop()
+        self.hide()

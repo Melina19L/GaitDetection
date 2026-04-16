@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 TIMEOUT = 3.0  # seconds
+MAX_BUFFER = 5000  # max samples kept in memory per channel (≈50 s at 100 Hz)
 
 
 class CalibrationStep(Enum):
@@ -204,6 +205,15 @@ class AngleCalibrator(QObject):
         if self.right_shank_inlet and self.right_foot_inlet:
             ankle_angles = self.__calculate_angles(self.right_shank_inlet, self.right_foot_inlet, self.right_ankle_offset)
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+        # Trim to MAX_BUFFER to avoid unbounded memory growth (OOM crash)
+        if self.left_angle_data.size > MAX_BUFFER:
+            self.left_angle_data = self.left_angle_data[-MAX_BUFFER:]
+        if self.right_angle_data.size > MAX_BUFFER:
+            self.right_angle_data = self.right_angle_data[-MAX_BUFFER:]
+        if self.left_ankle_data.size > MAX_BUFFER:
+            self.left_ankle_data = self.left_ankle_data[-MAX_BUFFER:]
+        if self.right_ankle_data.size > MAX_BUFFER:
+            self.right_ankle_data = self.right_ankle_data[-MAX_BUFFER:]
 
     @Slot(tuple)
     def handle_found_inlets(self, inlets: tuple):
