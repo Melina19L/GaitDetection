@@ -6341,6 +6341,11 @@ class SetupMainWindow:
                 self.right_knee_toggle.checkStateChanged.connect(_sync_knee_right)
                 self.left_ankle_toggle.checkStateChanged.connect(_sync_ankle_left)
                 self.right_ankle_toggle.checkStateChanged.connect(_sync_ankle_right)
+                # ── Sync current toggle state immediately (toggles may already be ON) ──
+                self.plot_dialog.knee_plot.show_left_knee_angle(self.left_knee_toggle.isChecked())
+                self.plot_dialog.knee_plot.show_right_knee_angle(self.right_knee_toggle.isChecked())
+                self.plot_dialog.ankle_plot.show_left_ankle_angle(self.left_ankle_toggle.isChecked())
+                self.plot_dialog.ankle_plot.show_right_ankle_angle(self.right_ankle_toggle.isChecked())
                 # Wire spin boxes → plot
                 self.scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, LEFT))
                 self.scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, RIGHT))

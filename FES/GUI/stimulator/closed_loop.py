@@ -15,7 +15,7 @@ EXTENSION_ANGLE = 10.0  # Example target knee extension angle in degrees
 PLANTARFLEXION_ANGLE = 20.0  # Target ankle plantarflexion angle in degrees (toe-off)
 DORSIFLEXION_ANGLE = -10.0   # Target ankle dorsiflexion angle in degrees (mid-stance)
 
-TIME_TOLERANCE = 0.02  # Time tolerance in seconds for matching timestamps (20 ms)
+TIME_TOLERANCE = 0.10  # Time tolerance in seconds for matching timestamps (100 ms)
 
 
     
@@ -175,6 +175,8 @@ class ROM:
                 q_thigh = q_thigh_array[i, 1:5]
                 q_shank = q_shank_array[closest_index, 1:5]
                 return ROM.calculate_joint_angle(q_thigh, q_shank, offset)
+        # No matching timestamp pair found within tolerance
+        return None
 
     def get_pi_angle(self) -> float:
         """Get the last calculated joint angle from the angles array.
