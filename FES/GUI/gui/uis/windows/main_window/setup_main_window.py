@@ -6426,6 +6426,13 @@ class SetupMainWindow:
         # CONNECT SIGNALS
         self.angle_calibrator.message_signal.connect(update_imu_status)
         self.angle_calibrator.error_signal.connect(update_imu_error)
+        # Diagnostic signal: HTML content, so we use insertHtml directly
+        self.angle_calibrator.diagnostic_signal.connect(
+            lambda html: (
+                self.imu_status_box.append(""),          # blank line separator
+                self.imu_status_box.insertHtml(html),
+            )
+        )
 
         # ============================================================
         # POPULATE LAYOUT

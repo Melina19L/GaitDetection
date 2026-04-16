@@ -3,7 +3,7 @@ from pylsl import StreamInlet, resolve_byprop
 from qt_core import *
 from enum import Enum
 import numpy as np
-from stimulator.closed_loop import ROM
+from stimulator.closed_loop import ROM, TIME_TOLERANCE
 import time
 from typing import Optional
 
@@ -26,6 +26,8 @@ class SIDE(Enum):
 class AngleCalibrator(QObject):
     message_signal = Signal(str)
     error_signal = Signal(str)
+    # Carries HTML-formatted diagnostic lines for display in the status box
+    diagnostic_signal = Signal(str)
 
     def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None):
         super().__init__(parent)
@@ -50,10 +52,24 @@ class AngleCalibrator(QObject):
         self.left_ankle_offset = 0.0
         self.right_ankle_offset = 0.0
 
-        # Setup timer
+        # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
+        # for the 50 ms plot refresh to always have fresh data.
         self.timer = QTimer(self)
-        self.timer.setInterval(50)
+        self.timer.setInterval(20)
         self.timer.timeout.connect(self.record_data)
+
+        # ── Per-inlet sample counters for diagnostic rate measurement ──
+        # Each entry is [total_samples_in_window, last_chunk_timestamp]
+        self._diag: dict[str, dict] = {
+            name: {"count": 0, "last_ts": 0.0, "sync_gap_sum": 0.0, "sync_gap_n": 0}
+            for name in ("left_shank", "left_thigh", "left_foot",
+                          "right_shank", "right_thigh", "right_foot")
+        }
+
+        # Diagnostic timer — fires every 2 s, reads the counters and emits
+        self._diag_timer = QTimer(self)
+        self._diag_timer.setInterval(2000)
+        self._diag_timer.timeout.connect(self._run_diagnostics)
 
         # Setup thread for resolving streams
         self.stream_resolver = LSLStreamResolver()
@@ -73,6 +89,7 @@ class AngleCalibrator(QObject):
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
         self.timer.stop()
+        self._diag_timer.stop()
         if self.left_shank_inlet:
             self.__disconnect_from_streams_left()
         if self.right_shank_inlet:
@@ -191,19 +208,40 @@ class AngleCalibrator(QObject):
 
     @Slot()
     def record_data(self):
+        now = time.time()
         # Knee angle: thigh + shank
         if self.left_shank_inlet and self.left_thigh_inlet:
-            angles = self.__calculate_angles(self.left_shank_inlet, self.left_thigh_inlet, self.left_angle_offset)
+            angles, ts_info = self.__calculate_angles_diag(
+                self.left_shank_inlet, self.left_thigh_inlet,
+                self.left_angle_offset,
+                diag_proximal=self._diag["left_thigh"],
+                diag_distal=self._diag["left_shank"],
+            )
             self.left_angle_data = np.append(self.left_angle_data, angles)
         if self.right_shank_inlet and self.right_thigh_inlet:
-            angles = self.__calculate_angles(self.right_shank_inlet, self.right_thigh_inlet, self.right_angle_offset)
+            angles, ts_info = self.__calculate_angles_diag(
+                self.right_shank_inlet, self.right_thigh_inlet,
+                self.right_angle_offset,
+                diag_proximal=self._diag["right_thigh"],
+                diag_distal=self._diag["right_shank"],
+            )
             self.right_angle_data = np.append(self.right_angle_data, angles)
         # Ankle angle: shank + foot
         if self.left_shank_inlet and self.left_foot_inlet:
-            ankle_angles = self.__calculate_angles(self.left_shank_inlet, self.left_foot_inlet, self.left_ankle_offset)
+            ankle_angles, _ = self.__calculate_angles_diag(
+                self.left_shank_inlet, self.left_foot_inlet,
+                self.left_ankle_offset,
+                diag_proximal=self._diag["left_shank"],
+                diag_distal=self._diag["left_foot"],
+            )
             self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
         if self.right_shank_inlet and self.right_foot_inlet:
-            ankle_angles = self.__calculate_angles(self.right_shank_inlet, self.right_foot_inlet, self.right_ankle_offset)
+            ankle_angles, _ = self.__calculate_angles_diag(
+                self.right_shank_inlet, self.right_foot_inlet,
+                self.right_ankle_offset,
+                diag_proximal=self._diag["right_shank"],
+                diag_distal=self._diag["right_foot"],
+            )
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
         # Trim to MAX_BUFFER to avoid unbounded memory growth (OOM crash)
         if self.left_angle_data.size > MAX_BUFFER:
@@ -214,6 +252,7 @@ class AngleCalibrator(QObject):
             self.left_ankle_data = self.left_ankle_data[-MAX_BUFFER:]
         if self.right_ankle_data.size > MAX_BUFFER:
             self.right_ankle_data = self.right_ankle_data[-MAX_BUFFER:]
+
 
     @Slot(tuple)
     def handle_found_inlets(self, inlets: tuple):
@@ -256,6 +295,7 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Left foot IMU not found (ankle angle disabled).")
             self.timer.start()
+            self.start_diagnostics()   # start live stream-quality monitor
 
         elif self.resolving == SIDE.RIGHT:
             # Store the inlets and start the timer
@@ -267,8 +307,10 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Right foot IMU not found (ankle angle disabled).")
             self.timer.start()
-        
+            self.start_diagnostics()   # start live stream-quality monitor
+
         self.resolving = SIDE.NONE
+
 
     ################################
     """ PRIVATE METHODS """
@@ -483,55 +525,209 @@ class AngleCalibrator(QObject):
             self.right_foot_inlet = None
 
     def __calculate_angles(self, shank_inlet: StreamInlet, thigh_inlet: StreamInlet, angle_offset: float) -> np.ndarray:
-        # Get the latest samples from the inlets
-        angle = None
-        samples_thigh, ts_thigh = thigh_inlet.pull_chunk()
-        samples_shank, ts_shank = shank_inlet.pull_chunk()
-        # if thigh_inlet.samples_available() > 0 and shank_inlet.samples_available() > 0:
-        #     samples_thigh, ts_thigh = thigh_inlet.pull_chunk(timeout=0.0, max_samples=64)
-        #     samples_shank, ts_shank = shank_inlet.pull_chunk(timeout=0.0, max_samples=64)
-        # else:
-        #     return np.array([])
+        """Compute joint angles for ALL synchronized sample pairs in the current chunk.
 
-        quat_thigh = deque(maxlen=10)
-        quat_shank = deque(maxlen=10)
-        # Check if both samples are available
-        if samples_thigh and samples_shank:
-            # Take the smallest sample size to avoid index errors
-            min_samples = min(len(samples_thigh), len(samples_shank))
-            samples_shank = samples_shank[-min_samples:]
-            samples_thigh = samples_thigh[-min_samples:]
-            quat_shank.extend([timestamp] + sample[6:10] for sample, timestamp in zip(samples_shank, ts_shank))
-            quat_thigh.extend([timestamp] + sample[6:10] for sample, timestamp in zip(samples_thigh, ts_thigh))
-            # Calculate the angle and append to the angles array
-            angle = ROM.static_compute_from_list(np.array(quat_thigh), np.array(quat_shank), angle_offset)
+        Pulls the latest chunk from both inlets and returns one angle value per
+        matching sample pair.  Using all pairs (instead of just the latest one)
+        ensures the data buffer in the calibrator updates at the full IMU sample
+        rate rather than once-per-timer-tick.
 
-        return np.array(angle) if angle is not None else np.array([])
-    
-    
-    def __calculate_angles_old(self, shank_inlet: StreamInlet, thigh_inlet: StreamInlet, angle_offset: float) -> np.ndarray:
-        angles = np.array([])
-        # Get the latest samples from the inlets
-        samples_thigh, _ = thigh_inlet.pull_chunk()
-        samples_shank, _ = shank_inlet.pull_chunk()
-        # Check if both samples are available
-        if samples_thigh and samples_shank:
-            # Take the smallest sample size to avoid index errors
-            min_samples = min(len(samples_thigh), len(samples_shank))
-            samples_shank = samples_shank[-min_samples:]
-            samples_thigh = samples_thigh[-min_samples:]
-            for i in range(min_samples):
-                # Extract the quaternion data from the samples
-                q_shank = np.array(samples_shank[i][6:10])
-                q_thigh = np.array(samples_thigh[i][6:10])
-                # Calculate the angle and append to the angles array
-                angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
-                angles = np.append(angles, angle)
+        NOTE: the argument order matches the call sites — ``shank_inlet`` is the
+        *distal* segment and ``thigh_inlet`` is the *proximal* one for the knee,
+        OR *shank* / *foot* for the ankle.  ``static_compute_from_list`` already
+        handles this correctly.
+        """
+        # Pull with timeout=0.0 so we never block the main Qt thread
+        samples_thigh, ts_thigh = thigh_inlet.pull_chunk(timeout=0.0, max_samples=128)
+        samples_shank, ts_shank = shank_inlet.pull_chunk(timeout=0.0, max_samples=128)
+
+        if not samples_thigh or not samples_shank:
+            return np.array([])
+
+        # Convert timestamp lists to numpy once for vectorised nearest-neighbour search
+        ts_shank_arr = np.array(ts_shank, dtype=np.float64)
+
+        angles = []
+        for sample_thigh, t_thigh in zip(samples_thigh, ts_thigh):
+            # Find the shank sample whose timestamp is closest to this thigh timestamp
+            closest_idx = int(np.argmin(np.abs(ts_shank_arr - t_thigh)))
+            if np.abs(ts_shank_arr[closest_idx] - t_thigh) < TIME_TOLERANCE:
+                q_thigh = np.array(sample_thigh[6:10], dtype=np.float64)
+                q_shank = np.array(samples_shank[closest_idx][6:10], dtype=np.float64)
+                try:
+                    angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
+                    angles.append(float(angle))
+                except Exception:
+                    pass  # skip numerically degenerate quaternions
 
         return angles
 
+    # ─────────────────────────────────────────────────
+    # Diagnostics
+    # ─────────────────────────────────────────────────
+
+    def __calculate_angles_diag(
+        self,
+        shank_inlet: StreamInlet,
+        thigh_inlet: StreamInlet,
+        angle_offset: float,
+        diag_proximal: dict,
+        diag_distal: dict,
+    ) -> tuple[np.ndarray, None]:
+        """Wrapper around the computation that also updates the diagnostic counters.
+
+        Updates:
+        - ``count``: number of raw samples seen in this call
+        - ``last_ts``: wall-clock time of this call (for dropout detection)
+        - ``sync_gap_sum`` / ``sync_gap_n``: running sum of |Δts| between paired
+          sensors, used to estimate synchronisation quality.
+        """
+        now = time.time()
+        samples_thigh, ts_thigh = thigh_inlet.pull_chunk(timeout=0.0, max_samples=128)
+        samples_shank, ts_shank = shank_inlet.pull_chunk(timeout=0.0, max_samples=128)
+
+        # Update sample counts and last-seen timestamps
+        if samples_thigh:
+            diag_proximal["count"] += len(samples_thigh)
+            diag_proximal["last_ts"] = now
+        if samples_shank:
+            diag_distal["count"] += len(samples_shank)
+            diag_distal["last_ts"] = now
+
+        if not samples_thigh or not samples_shank:
+            return np.array([]), None
+
+        ts_shank_arr = np.array(ts_shank, dtype=np.float64)
+
+        angles = []
+        for sample_thigh, t_thigh in zip(samples_thigh, ts_thigh):
+            closest_idx = int(np.argmin(np.abs(ts_shank_arr - t_thigh)))
+            gap = float(np.abs(ts_shank_arr[closest_idx] - t_thigh))
+            if gap < TIME_TOLERANCE:
+                # Update synchronisation gap statistics
+                diag_proximal["sync_gap_sum"] += gap
+                diag_proximal["sync_gap_n"] += 1
+                q_thigh = np.array(sample_thigh[6:10], dtype=np.float64)
+                q_shank = np.array(samples_shank[closest_idx][6:10], dtype=np.float64)
+                try:
+                    angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
+                    angles.append(float(angle))
+                except Exception:
+                    pass
+        return np.array(angles) if angles else np.array([]), None
+
+    @Slot()
+    def _run_diagnostics(self):
+        """Called every 2 s — measures sample rate, sync quality and dropout.
+
+        Emits ``diagnostic_signal`` with an HTML summary string.
+        Resets the per-inlet counters after reading them.
+
+        Thresholds
+        ----------
+        Sample rate   good ≥ 60 Hz | warning 30–60 Hz | error < 30 Hz (or 0 = stream frozen)
+        Sync gap      good < 2 ms  | warning 2–10 ms  | error > 10 ms (likely not synced)
+        Dropout       error if last sample > 500 ms ago
+        """
+        WINDOW = 2.0   # diagnostic timer interval (seconds)
+        MIN_HZ_GOOD    = 60
+        MIN_HZ_WARN    = 30
+        MAX_GAP_GOOD   = 0.002   # 2 ms
+        MAX_GAP_WARN   = 0.010   # 10 ms
+        DROPOUT_THRESH = 0.500   # 500 ms
+
+        now = time.time()
+
+        # Map (label, diag_key, is_connected)
+        sensors = [
+            ("L-Thigh",  "left_thigh",  self.left_thigh_inlet  is not None),
+            ("L-Shank",  "left_shank",  self.left_shank_inlet  is not None),
+            ("L-Foot",   "left_foot",   self.left_foot_inlet   is not None),
+            ("R-Thigh",  "right_thigh", self.right_thigh_inlet is not None),
+            ("R-Shank",  "right_shank", self.right_shank_inlet is not None),
+            ("R-Foot",   "right_foot",  self.right_foot_inlet  is not None),
+        ]
+
+        # ── Pairing for sync-gap check (proximal diag key → label) ──
+        pairs = [
+            ("left_thigh",  "left_shank",  "L Knee"),
+            ("left_shank",  "left_foot",   "L Ankle"),
+            ("right_thigh", "right_shank", "R Knee"),
+            ("right_shank", "right_foot",  "R Ankle"),
+        ]
+
+        lines = ["<b>─── IMU Stream Diagnostic ───</b>"]
+
+        any_active = False
+        for label, key, connected in sensors:
+            if not connected:
+                continue
+            any_active = True
+            d = self._diag[key]
+            hz = d["count"] / WINDOW
+
+            if hz == 0:
+                col = "#ff5555"
+                tag = "FROZEN / BLE LOST"
+            elif hz < MIN_HZ_WARN:
+                col = "#ff5555"
+                tag = f"{hz:.0f} Hz ⚠ too low"
+            elif hz < MIN_HZ_GOOD:
+                col = "#ffb86c"
+                tag = f"{hz:.0f} Hz (warn: < {MIN_HZ_GOOD} Hz)"
+            else:
+                col = "#50fa7b"
+                tag = f"{hz:.0f} Hz ✓"
+
+            # Dropout check
+            dropout = ""
+            if d["last_ts"] > 0 and (now - d["last_ts"]) > DROPOUT_THRESH:
+                dropout = f' <span style="color:#ff5555;">⚠ DROPOUT {(now - d["last_ts"])*1000:.0f} ms</span>'
+
+            lines.append(
+                f'<span style="color:{col};">[{label}] {tag}</span>{dropout}'
+            )
+
+            # Reset counter for next window
+            d["count"] = 0
+
+        if not any_active:
+            return  # nothing connected yet
+
+        # ── Synchronisation quality ──
+        lines.append("<b>─── Sync quality ───</b>")
+        for prox_key, dist_key, pair_label in pairs:
+            dp = self._diag[prox_key]
+            if dp["sync_gap_n"] == 0:
+                continue
+            avg_gap_ms = (dp["sync_gap_sum"] / dp["sync_gap_n"]) * 1000
+            if avg_gap_ms < MAX_GAP_GOOD * 1000:
+                col = "#50fa7b"
+                tag = f"{avg_gap_ms:.1f} ms ✓ synced"
+            elif avg_gap_ms < MAX_GAP_WARN * 1000:
+                col = "#ffb86c"
+                tag = f"{avg_gap_ms:.1f} ms ⚠ marginal sync"
+            else:
+                col = "#ff5555"
+                tag = f"{avg_gap_ms:.1f} ms ✗ NOT SYNCED — re-sync sensors"
+            lines.append(f'<span style="color:{col};">[{pair_label}] Δts avg: {tag}</span>')
+            # Reset
+            dp["sync_gap_sum"] = 0.0
+            dp["sync_gap_n"] = 0
+
+        self.diagnostic_signal.emit("<br>".join(lines))
+
+    def start_diagnostics(self):
+        """Start the 2-second diagnostic loop. Call after sensors are connected."""
+        self._diag_timer.start()
+
+    def stop_diagnostics(self):
+        """Stop the diagnostic loop."""
+        self._diag_timer.stop()
+
 
 class LSLStreamResolver(QObject):
+
     """A class to resolve LSL streams for angle calibration in a separate thread."""
 
     message_signal = Signal(str)

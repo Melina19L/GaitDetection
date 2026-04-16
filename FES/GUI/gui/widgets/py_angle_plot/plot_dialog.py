@@ -134,8 +134,10 @@ class PlotDialog(QDialog):
         layout.addWidget(ankle_legend)
 
         # ── Timer for plot updates ──
+        # 50 ms = 20 Hz refresh — enough for smooth gait visualization,
+        # and safe for pyqtgraph rendering 1000 points without stacking callbacks.
         self.timer = QTimer(self)
-        self.timer.setInterval(10)
+        self.timer.setInterval(50)
         self.timer.timeout.connect(self.knee_plot.update_plot)
         self.timer.timeout.connect(self.ankle_plot.update_plot)
 

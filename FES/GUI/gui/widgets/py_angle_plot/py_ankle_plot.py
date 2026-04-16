@@ -154,31 +154,37 @@ class PyAnklePlot(pg.PlotWidget):
         self.setXRange(0, self.max_points, padding=0)
 
     def update_plot(self):
-        # Get the latest ankle angles from the calibrator
-        left_ankle_angle, right_ankle_angle = self.calibrator.get_latest_ankle_data()
+        try:
+            # Get the latest ankle angles from the calibrator
+            left_ankle_angle, right_ankle_angle = self.calibrator.get_latest_ankle_data()
 
-        self.ptr += 1
-        self._time.append(self.ptr)
+            self.ptr += 1
+            self._time.append(self.ptr)
 
-        if self.left_ankle_enabled and np.asarray(left_ankle_angle).size > 0:
-            self._left_ankle.append(float(np.asarray(left_ankle_angle).flat[0]))
-        else:
-            self._left_ankle.append(self._left_ankle[-1] if self._left_ankle else 0.0)
+            laa = np.asarray(left_ankle_angle)
+            if self.left_ankle_enabled and laa.size > 0:
+                self._left_ankle.append(float(laa.flat[0]))
+            else:
+                self._left_ankle.append(self._left_ankle[-1] if self._left_ankle else 0.0)
 
-        if self.right_ankle_enabled and np.asarray(right_ankle_angle).size > 0:
-            self._right_ankle.append(float(np.asarray(right_ankle_angle).flat[0]))
-        else:
-            self._right_ankle.append(self._right_ankle[-1] if self._right_ankle else 0.0)
+            raa = np.asarray(right_ankle_angle)
+            if self.right_ankle_enabled and raa.size > 0:
+                self._right_ankle.append(float(raa.flat[0]))
+            else:
+                self._right_ankle.append(self._right_ankle[-1] if self._right_ankle else 0.0)
 
-        t = np.array(self._time, dtype=float)
-        la = np.array(self._left_ankle, dtype=float) * self.scale_factor_left
-        ra = np.array(self._right_ankle, dtype=float) * self.scale_factor_right
+            t = np.array(self._time, dtype=float)
+            la = np.array(self._left_ankle, dtype=float) * self.scale_factor_left
+            ra = np.array(self._right_ankle, dtype=float) * self.scale_factor_right
 
-        self.left_ankle_curve.setData(t, la)
-        self.right_ankle_curve.setData(t, ra)
+            self.left_ankle_curve.setData(t, la)
+            self.right_ankle_curve.setData(t, ra)
 
-        # Dynamic X range: always follows the newest ptr
-        if self.ptr > self.max_points:
-            self.setXRange(self.ptr - self.max_points, self.ptr, padding=0)
-        else:
-            self.setXRange(0, self.max_points, padding=0)
+            # Dynamic X range: always follows the newest ptr
+            if self.ptr > self.max_points:
+                self.setXRange(self.ptr - self.max_points, self.ptr, padding=0)
+            else:
+                self.setXRange(0, self.max_points, padding=0)
+        except Exception as exc:
+            print(f"[AnklePlot] update_plot error: {exc}")
+

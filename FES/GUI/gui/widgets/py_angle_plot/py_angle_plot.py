@@ -167,33 +167,36 @@ class PyAnglePlot(pg.PlotWidget):
         self.setXRange(0, self.max_points, padding=0)
 
     def update_plot(self):
-        # Get the latest angles from the calibrator
-        left_knee_angle, right_knee_angle = self.calibrator.get_latest_data()
+        try:
+            # Get the latest angles from the calibrator
+            left_knee_angle, right_knee_angle = self.calibrator.get_latest_data()
 
-        self.ptr += 1
-        self._time.append(self.ptr)
+            self.ptr += 1
+            self._time.append(self.ptr)
 
-        if self.left_knee_enabled and np.ndim(left_knee_angle) == 0 and left_knee_angle.size > 0:
-            self._left_knee.append(float(left_knee_angle))
-        elif self.left_knee_enabled and np.asarray(left_knee_angle).size > 0:
-            self._left_knee.append(float(np.asarray(left_knee_angle).flat[0]))
-        else:
-            self._left_knee.append(self._left_knee[-1] if self._left_knee else 0.0)
+            lka = np.asarray(left_knee_angle)
+            if self.left_knee_enabled and lka.size > 0:
+                self._left_knee.append(float(lka.flat[0]))
+            else:
+                self._left_knee.append(self._left_knee[-1] if self._left_knee else 0.0)
 
-        if self.right_knee_enabled and np.asarray(right_knee_angle).size > 0:
-            self._right_knee.append(float(np.asarray(right_knee_angle).flat[0]))
-        else:
-            self._right_knee.append(self._right_knee[-1] if self._right_knee else 0.0)
+            rka = np.asarray(right_knee_angle)
+            if self.right_knee_enabled and rka.size > 0:
+                self._right_knee.append(float(rka.flat[0]))
+            else:
+                self._right_knee.append(self._right_knee[-1] if self._right_knee else 0.0)
 
-        t = np.array(self._time, dtype=float)
-        lk = np.array(self._left_knee, dtype=float) * self.scale_factor_left
-        rk = np.array(self._right_knee, dtype=float) * self.scale_factor_right
+            t = np.array(self._time, dtype=float)
+            lk = np.array(self._left_knee, dtype=float) * self.scale_factor_left
+            rk = np.array(self._right_knee, dtype=float) * self.scale_factor_right
 
-        self.left_knee_curve.setData(t, lk)
-        self.right_knee_curve.setData(t, rk)
+            self.left_knee_curve.setData(t, lk)
+            self.right_knee_curve.setData(t, rk)
 
-        # Dynamic X range: always follows the newest ptr
-        if self.ptr > self.max_points:
-            self.setXRange(self.ptr - self.max_points, self.ptr, padding=0)
-        else:
-            self.setXRange(0, self.max_points, padding=0)
+            # Dynamic X range: always follows the newest ptr
+            if self.ptr > self.max_points:
+                self.setXRange(self.ptr - self.max_points, self.ptr, padding=0)
+            else:
+                self.setXRange(0, self.max_points, padding=0)
+        except Exception as exc:
+            print(f"[KneePlot] update_plot error: {exc}")
