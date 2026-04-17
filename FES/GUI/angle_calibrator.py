@@ -66,6 +66,18 @@ class AngleCalibrator(QObject):
                           "right_shank", "right_thigh", "right_foot")
         }
 
+        # ── Per-inlet accumulation buffers ────────────────────────────────────
+        # BLE delivers shank and foot samples at different host-clock times.
+        # Accumulating independently and matching when both have data ensures we
+        # never miss a pair just because they didn't arrive in the same 20 ms tick.
+        # Max 300 samples ≈ 3 s at 100 Hz — enough headroom without memory risk.
+        _BUF = 300
+        self._acc = {
+            name: deque(maxlen=_BUF)
+            for name in ("left_thigh", "left_shank", "left_foot",
+                          "right_thigh", "right_shank", "right_foot")
+        }
+
         # Diagnostic timer — fires every 2 s, reads the counters and emits
         self._diag_timer = QTimer(self)
         self._diag_timer.setInterval(2000)
@@ -208,102 +220,109 @@ class AngleCalibrator(QObject):
 
     @Slot()
     def record_data(self):
-        """Pull raw samples from every connected inlet exactly ONCE per call.
+        """Accumulate raw samples from every inlet and drain matched pairs.
 
-        IMPORTANT: ``pull_chunk()`` is destructive — it drains the LSL buffer.
-        If the same inlet (e.g. left_shank) were pulled twice (once for the knee
-        and once for the ankle), the second call would always return an empty list,
-        making the ankle angle permanently frozen.
+        Each inlet has an independent ``deque`` (``self._acc[key]``).  New samples
+        are appended on every 20 ms tick.  Angle computation only runs when BOTH
+        paired inlets have data — but because the deques persist between ticks, a
+        sample that arrived without its partner will still be used on the next tick.
 
-        The fix: pull all inlets first, cache the results, then pass the cached
-        arrays to the angle-computation helper.
+        Shank data is needed for BOTH knee (thigh↔shank) and ankle (shank↔foot).
+        To avoid double-consuming the deque, we keep a **separate copy** of the
+        shank samples drained for knee matching and reuse them for ankle matching.
         """
         now = time.time()
 
-        # ── Pull each inlet once — cache (samples, timestamps) ──────────────
-        def _pull(inlet):
-            if inlet is None:
-                return [], []
-            s, t = inlet.pull_chunk(timeout=0.0, max_samples=128)
-            return s, t
-
-        l_thigh_s, l_thigh_t = _pull(self.left_thigh_inlet)
-        l_shank_s, l_shank_t = _pull(self.left_shank_inlet)
-        l_foot_s,  l_foot_t  = _pull(self.left_foot_inlet)
-        r_thigh_s, r_thigh_t = _pull(self.right_thigh_inlet)
-        r_shank_s, r_shank_t = _pull(self.right_shank_inlet)
-        r_foot_s,  r_foot_t  = _pull(self.right_foot_inlet)
-
-        # ── Update diagnostic counters ───────────────────────────────────────
-        for key, samples in (
-            ("left_thigh",  l_thigh_s),
-            ("left_shank",  l_shank_s),
-            ("left_foot",   l_foot_s),
-            ("right_thigh", r_thigh_s),
-            ("right_shank", r_shank_s),
-            ("right_foot",  r_foot_s),
+        # ── 1. Pull each inlet once and push into accumulation deques ──────────
+        for inlet, key in (
+            (self.left_thigh_inlet,  "left_thigh"),
+            (self.left_shank_inlet,  "left_shank"),
+            (self.left_foot_inlet,   "left_foot"),
+            (self.right_thigh_inlet, "right_thigh"),
+            (self.right_shank_inlet, "right_shank"),
+            (self.right_foot_inlet,  "right_foot"),
         ):
+            if inlet is None:
+                continue
+            samples, _ = inlet.pull_chunk(timeout=0.0, max_samples=128)
             if samples:
-                self._diag[key]["count"]   += len(samples)
-                self._diag[key]["last_ts"]  = now
+                self._acc[key].extend(samples)
+                self._diag[key]["count"]  += len(samples)
+                self._diag[key]["last_ts"] = now
 
-        # ── Knee angles: proximal=thigh, distal=shank ────────────────────────
+        # ── 2. helper: drain N matched pairs from two deques ───────────────────
+        def _drain_pairs(deq_a, deq_b):
+            """Pop min(len(a), len(b)) items from both deques and return as lists."""
+            n = min(len(deq_a), len(deq_b))
+            a = [deq_a.popleft() for _ in range(n)]
+            b = [deq_b.popleft() for _ in range(n)]
+            return a, b
+
+        # ── 3. Knee LEFT: thigh ↔ shank ────────────────────────────────────────
         if self.left_thigh_inlet and self.left_shank_inlet:
+            l_thigh_s, l_shank_for_knee = _drain_pairs(
+                self._acc["left_thigh"], self._acc["left_shank"]
+            )
             angles = self.__compute_angles_from_data(
-                l_thigh_s, l_thigh_t, l_shank_s, l_shank_t,
+                l_thigh_s, [], l_shank_for_knee, [],
                 self.left_angle_offset, self._diag["left_thigh"],
             )
             self.left_angle_data = np.append(self.left_angle_data, angles)
 
+            # Ankle LEFT: re-use the same shank samples (already drained from deque)
+            if self.left_foot_inlet:
+                n_ankle = min(len(l_shank_for_knee), len(self._acc["left_foot"]))
+                l_foot_s = [self._acc["left_foot"].popleft() for _ in range(n_ankle)]
+                ankle_angles = self.__compute_angles_from_data(
+                    l_shank_for_knee[:n_ankle], [], l_foot_s, [],
+                    self.left_ankle_offset, self._diag["left_shank"],
+                )
+                self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+
+        elif self.left_shank_inlet and self.left_foot_inlet:
+            # No thigh — only ankle
+            l_shank_s, l_foot_s = _drain_pairs(
+                self._acc["left_shank"], self._acc["left_foot"]
+            )
+            ankle_angles = self.__compute_angles_from_data(
+                l_shank_s, [], l_foot_s, [],
+                self.left_ankle_offset, self._diag["left_shank"],
+            )
+            self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+
+        # ── 4. Knee RIGHT: thigh ↔ shank ───────────────────────────────────────
         if self.right_thigh_inlet and self.right_shank_inlet:
+            r_thigh_s, r_shank_for_knee = _drain_pairs(
+                self._acc["right_thigh"], self._acc["right_shank"]
+            )
             angles = self.__compute_angles_from_data(
-                r_thigh_s, r_thigh_t, r_shank_s, r_shank_t,
+                r_thigh_s, [], r_shank_for_knee, [],
                 self.right_angle_offset, self._diag["right_thigh"],
             )
             self.right_angle_data = np.append(self.right_angle_data, angles)
 
-        # ── Ankle angles: proximal=shank, distal=foot ────────────────────────
-        # Uses the ALREADY CACHED shank data — no second pull needed.
-        if self.left_shank_inlet and self.left_foot_inlet:
-            ankle_angles = self.__compute_angles_from_data(
-                l_shank_s, l_shank_t, l_foot_s, l_foot_t,
-                self.left_ankle_offset, self._diag["left_shank"],
-            )
-            self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
-            # DEBUG — remove after diagnosis is complete
-            if not hasattr(self, "_dbg_n"):
-                self._dbg_n = 0
-            self._dbg_n += 1
-            if self._dbg_n % 50 == 0:
-                print(
-                    f"[ANKLE DBG] shank={len(l_shank_s)} foot={len(l_foot_s)} "
-                    f"→ angles={len(ankle_angles)} "
-                    f"offset={self.left_ankle_offset:.2f} "
-                    f"foot_inlet={'OK' if self.left_foot_inlet else 'NONE'} "
-                    f"ankle_data_size={self.left_ankle_data.size}"
+            # Ankle RIGHT: re-use the same shank samples
+            if self.right_foot_inlet:
+                n_ankle = min(len(r_shank_for_knee), len(self._acc["right_foot"]))
+                r_foot_s = [self._acc["right_foot"].popleft() for _ in range(n_ankle)]
+                ankle_angles = self.__compute_angles_from_data(
+                    r_shank_for_knee[:n_ankle], [], r_foot_s, [],
+                    self.right_ankle_offset, self._diag["right_shank"],
                 )
+                self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
 
-        if self.right_shank_inlet and self.right_foot_inlet:
+        elif self.right_shank_inlet and self.right_foot_inlet:
+            # No thigh — only ankle
+            r_shank_s, r_foot_s = _drain_pairs(
+                self._acc["right_shank"], self._acc["right_foot"]
+            )
             ankle_angles = self.__compute_angles_from_data(
-                r_shank_s, r_shank_t, r_foot_s, r_foot_t,
+                r_shank_s, [], r_foot_s, [],
                 self.right_ankle_offset, self._diag["right_shank"],
             )
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
-            # DEBUG — remove after diagnosis is complete
-            if not hasattr(self, "_dbg_n_r"):
-                self._dbg_n_r = 0
-            self._dbg_n_r += 1
-            if self._dbg_n_r % 50 == 0:
-                print(
-                    f"[ANKLE RIGHT DBG] shank={len(r_shank_s)} foot={len(r_foot_s)} "
-                    f"→ angles={len(ankle_angles)} "
-                    f"offset={self.right_ankle_offset:.2f} "
-                    f"foot_inlet={'OK' if self.right_foot_inlet else 'NONE'} "
-                    f"ankle_data_size={self.right_ankle_data.size}"
-                )
 
-
-        # ── Trim buffers to prevent unbounded memory growth ──────────────────
+        # ── 5. Trim angle buffers ───────────────────────────────────────────────
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data = self.left_angle_data[-MAX_BUFFER:]
         if self.right_angle_data.size > MAX_BUFFER:
@@ -312,7 +331,6 @@ class AngleCalibrator(QObject):
             self.left_ankle_data = self.left_ankle_data[-MAX_BUFFER:]
         if self.right_ankle_data.size > MAX_BUFFER:
             self.right_ankle_data = self.right_ankle_data[-MAX_BUFFER:]
-
 
 
 
