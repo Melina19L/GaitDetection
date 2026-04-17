@@ -208,42 +208,77 @@ class AngleCalibrator(QObject):
 
     @Slot()
     def record_data(self):
+        """Pull raw samples from every connected inlet exactly ONCE per call.
+
+        IMPORTANT: ``pull_chunk()`` is destructive — it drains the LSL buffer.
+        If the same inlet (e.g. left_shank) were pulled twice (once for the knee
+        and once for the ankle), the second call would always return an empty list,
+        making the ankle angle permanently frozen.
+
+        The fix: pull all inlets first, cache the results, then pass the cached
+        arrays to the angle-computation helper.
+        """
         now = time.time()
-        # Knee angle: thigh + shank
-        if self.left_shank_inlet and self.left_thigh_inlet:
-            angles, ts_info = self.__calculate_angles_diag(
-                self.left_shank_inlet, self.left_thigh_inlet,
-                self.left_angle_offset,
-                diag_proximal=self._diag["left_thigh"],
-                diag_distal=self._diag["left_shank"],
+
+        # ── Pull each inlet once — cache (samples, timestamps) ──────────────
+        def _pull(inlet):
+            if inlet is None:
+                return [], []
+            s, t = inlet.pull_chunk(timeout=0.0, max_samples=128)
+            return s, t
+
+        l_thigh_s, l_thigh_t = _pull(self.left_thigh_inlet)
+        l_shank_s, l_shank_t = _pull(self.left_shank_inlet)
+        l_foot_s,  l_foot_t  = _pull(self.left_foot_inlet)
+        r_thigh_s, r_thigh_t = _pull(self.right_thigh_inlet)
+        r_shank_s, r_shank_t = _pull(self.right_shank_inlet)
+        r_foot_s,  r_foot_t  = _pull(self.right_foot_inlet)
+
+        # ── Update diagnostic counters ───────────────────────────────────────
+        for key, samples in (
+            ("left_thigh",  l_thigh_s),
+            ("left_shank",  l_shank_s),
+            ("left_foot",   l_foot_s),
+            ("right_thigh", r_thigh_s),
+            ("right_shank", r_shank_s),
+            ("right_foot",  r_foot_s),
+        ):
+            if samples:
+                self._diag[key]["count"]   += len(samples)
+                self._diag[key]["last_ts"]  = now
+
+        # ── Knee angles: proximal=thigh, distal=shank ────────────────────────
+        if self.left_thigh_inlet and self.left_shank_inlet:
+            angles = self.__compute_angles_from_data(
+                l_thigh_s, l_thigh_t, l_shank_s, l_shank_t,
+                self.left_angle_offset, self._diag["left_thigh"],
             )
             self.left_angle_data = np.append(self.left_angle_data, angles)
-        if self.right_shank_inlet and self.right_thigh_inlet:
-            angles, ts_info = self.__calculate_angles_diag(
-                self.right_shank_inlet, self.right_thigh_inlet,
-                self.right_angle_offset,
-                diag_proximal=self._diag["right_thigh"],
-                diag_distal=self._diag["right_shank"],
+
+        if self.right_thigh_inlet and self.right_shank_inlet:
+            angles = self.__compute_angles_from_data(
+                r_thigh_s, r_thigh_t, r_shank_s, r_shank_t,
+                self.right_angle_offset, self._diag["right_thigh"],
             )
             self.right_angle_data = np.append(self.right_angle_data, angles)
-        # Ankle angle: shank + foot
+
+        # ── Ankle angles: proximal=shank, distal=foot ────────────────────────
+        # Uses the ALREADY CACHED shank data — no second pull needed.
         if self.left_shank_inlet and self.left_foot_inlet:
-            ankle_angles, _ = self.__calculate_angles_diag(
-                self.left_shank_inlet, self.left_foot_inlet,
-                self.left_ankle_offset,
-                diag_proximal=self._diag["left_shank"],
-                diag_distal=self._diag["left_foot"],
+            ankle_angles = self.__compute_angles_from_data(
+                l_shank_s, l_shank_t, l_foot_s, l_foot_t,
+                self.left_ankle_offset, self._diag["left_shank"],
             )
             self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+
         if self.right_shank_inlet and self.right_foot_inlet:
-            ankle_angles, _ = self.__calculate_angles_diag(
-                self.right_shank_inlet, self.right_foot_inlet,
-                self.right_ankle_offset,
-                diag_proximal=self._diag["right_shank"],
-                diag_distal=self._diag["right_foot"],
+            ankle_angles = self.__compute_angles_from_data(
+                r_shank_s, r_shank_t, r_foot_s, r_foot_t,
+                self.right_ankle_offset, self._diag["right_shank"],
             )
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
-        # Trim to MAX_BUFFER to avoid unbounded memory growth (OOM crash)
+
+        # ── Trim buffers to prevent unbounded memory growth ──────────────────
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data = self.left_angle_data[-MAX_BUFFER:]
         if self.right_angle_data.size > MAX_BUFFER:
@@ -252,6 +287,8 @@ class AngleCalibrator(QObject):
             self.left_ankle_data = self.left_ankle_data[-MAX_BUFFER:]
         if self.right_ankle_data.size > MAX_BUFFER:
             self.right_ankle_data = self.right_ankle_data[-MAX_BUFFER:]
+
+
 
 
     @Slot(tuple)
@@ -563,58 +600,57 @@ class AngleCalibrator(QObject):
         return angles
 
     # ─────────────────────────────────────────────────
-    # Diagnostics
+    # Diagnostics / angle computation helpers
     # ─────────────────────────────────────────────────
 
-    def __calculate_angles_diag(
+    def __compute_angles_from_data(
         self,
-        shank_inlet: StreamInlet,
-        thigh_inlet: StreamInlet,
+        samples_proximal: list,
+        ts_proximal: list,
+        samples_distal: list,
+        ts_distal: list,
         angle_offset: float,
         diag_proximal: dict,
-        diag_distal: dict,
-    ) -> tuple[np.ndarray, None]:
-        """Wrapper around the computation that also updates the diagnostic counters.
+    ) -> np.ndarray:
+        """Compute joint angles from pre-fetched sample lists.
 
-        Updates:
-        - ``count``: number of raw samples seen in this call
-        - ``last_ts``: wall-clock time of this call (for dropout detection)
-        - ``sync_gap_sum`` / ``sync_gap_n``: running sum of |Δts| between paired
-          sensors, used to estimate synchronisation quality.
+        Both lists must have already been pulled from their respective inlets
+        (in ``record_data``) so that no inlet is drained more than once per tick.
+
+        Parameters
+        ----------
+        samples_proximal / ts_proximal : pre-fetched chunk from the proximal segment
+            (thigh for knee; shank for ankle).
+        samples_distal / ts_distal : pre-fetched chunk from the distal segment
+            (shank for knee; foot for ankle).
+        angle_offset : calibration offset to subtract from the raw joint angle.
+        diag_proximal : diagnostic counter dict for the proximal inlet (updated here
+            with sync-gap statistics).
         """
-        now = time.time()
-        samples_thigh, ts_thigh = thigh_inlet.pull_chunk(timeout=0.0, max_samples=128)
-        samples_shank, ts_shank = shank_inlet.pull_chunk(timeout=0.0, max_samples=128)
+        if not samples_proximal or not samples_distal:
+            return np.array([])
 
-        # Update sample counts and last-seen timestamps
-        if samples_thigh:
-            diag_proximal["count"] += len(samples_thigh)
-            diag_proximal["last_ts"] = now
-        if samples_shank:
-            diag_distal["count"] += len(samples_shank)
-            diag_distal["last_ts"] = now
-
-        if not samples_thigh or not samples_shank:
-            return np.array([]), None
-
-        ts_shank_arr = np.array(ts_shank, dtype=np.float64)
+        ts_distal_arr = np.array(ts_distal, dtype=np.float64)
 
         angles = []
-        for sample_thigh, t_thigh in zip(samples_thigh, ts_thigh):
-            closest_idx = int(np.argmin(np.abs(ts_shank_arr - t_thigh)))
-            gap = float(np.abs(ts_shank_arr[closest_idx] - t_thigh))
+        for sample_prox, t_prox in zip(samples_proximal, ts_proximal):
+            closest_idx = int(np.argmin(np.abs(ts_distal_arr - t_prox)))
+            gap = float(np.abs(ts_distal_arr[closest_idx] - t_prox))
             if gap < TIME_TOLERANCE:
-                # Update synchronisation gap statistics
+                # Accumulate sync-gap statistics for the diagnostic report
                 diag_proximal["sync_gap_sum"] += gap
-                diag_proximal["sync_gap_n"] += 1
-                q_thigh = np.array(sample_thigh[6:10], dtype=np.float64)
-                q_shank = np.array(samples_shank[closest_idx][6:10], dtype=np.float64)
+                diag_proximal["sync_gap_n"]   += 1
+                q_prox = np.array(sample_prox[6:10], dtype=np.float64)
+                q_dist = np.array(samples_distal[closest_idx][6:10], dtype=np.float64)
                 try:
-                    angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
+                    angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                     angles.append(float(angle))
                 except Exception:
-                    pass
-        return np.array(angles) if angles else np.array([]), None
+                    pass  # skip numerically degenerate quaternions
+
+        return np.array(angles) if angles else np.array([])
+
+
 
     @Slot()
     def _run_diagnostics(self):
