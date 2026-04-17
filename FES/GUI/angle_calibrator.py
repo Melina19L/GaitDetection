@@ -270,6 +270,18 @@ class AngleCalibrator(QObject):
                 self.left_ankle_offset, self._diag["left_shank"],
             )
             self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+            # DEBUG — remove after diagnosis is complete
+            if not hasattr(self, "_dbg_n"):
+                self._dbg_n = 0
+            self._dbg_n += 1
+            if self._dbg_n % 50 == 0:
+                print(
+                    f"[ANKLE DBG] shank={len(l_shank_s)} foot={len(l_foot_s)} "
+                    f"→ angles={len(ankle_angles)} "
+                    f"offset={self.left_ankle_offset:.2f} "
+                    f"foot_inlet={'OK' if self.left_foot_inlet else 'NONE'} "
+                    f"ankle_data_size={self.left_ankle_data.size}"
+                )
 
         if self.right_shank_inlet and self.right_foot_inlet:
             ankle_angles = self.__compute_angles_from_data(
@@ -277,6 +289,19 @@ class AngleCalibrator(QObject):
                 self.right_ankle_offset, self._diag["right_shank"],
             )
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+            # DEBUG — remove after diagnosis is complete
+            if not hasattr(self, "_dbg_n_r"):
+                self._dbg_n_r = 0
+            self._dbg_n_r += 1
+            if self._dbg_n_r % 50 == 0:
+                print(
+                    f"[ANKLE RIGHT DBG] shank={len(r_shank_s)} foot={len(r_foot_s)} "
+                    f"→ angles={len(ankle_angles)} "
+                    f"offset={self.right_ankle_offset:.2f} "
+                    f"foot_inlet={'OK' if self.right_foot_inlet else 'NONE'} "
+                    f"ankle_data_size={self.right_ankle_data.size}"
+                )
+
 
         # ── Trim buffers to prevent unbounded memory growth ──────────────────
         if self.left_angle_data.size > MAX_BUFFER:
@@ -612,43 +637,45 @@ class AngleCalibrator(QObject):
         angle_offset: float,
         diag_proximal: dict,
     ) -> np.ndarray:
-        """Compute joint angles from pre-fetched sample lists.
+        """Compute joint angles from pre-fetched sample lists using index-based matching.
 
-        Both lists must have already been pulled from their respective inlets
-        (in ``record_data``) so that no inlet is drained more than once per tick.
+        Since Xsens Dot sensors are hardware-synchronized (same BLE clock, same
+        sample rate), the Nth sample from the proximal sensor corresponds to the
+        Nth sample from the distal sensor BY CONSTRUCTION — no timestamp matching
+        is needed, and in fact timestamp matching is unreliable because LSL applies
+        host-clock timestamps on BLE reception, which can vary per device by more
+        than the TIME_TOLERANCE threshold.
 
-        Parameters
-        ----------
-        samples_proximal / ts_proximal : pre-fetched chunk from the proximal segment
-            (thigh for knee; shank for ankle).
-        samples_distal / ts_distal : pre-fetched chunk from the distal segment
-            (shank for knee; foot for ankle).
-        angle_offset : calibration offset to subtract from the raw joint angle.
-        diag_proximal : diagnostic counter dict for the proximal inlet (updated here
-            with sync-gap statistics).
+        Timestamps are still compared and reported in the diagnostic for monitoring
+        sync quality, but are NOT used as a filter for angle computation.
         """
         if not samples_proximal or not samples_distal:
             return np.array([])
 
-        ts_distal_arr = np.array(ts_distal, dtype=np.float64)
+        # Pair samples by index (hardware-synced sensors: same position = same time)
+        n_pairs = min(len(samples_proximal), len(samples_distal))
+        ts_prox_arr = np.array(ts_proximal[:n_pairs], dtype=np.float64)
+        ts_dist_arr = np.array(ts_distal[:n_pairs],   dtype=np.float64)
+
+        # Record average timestamp gap for diagnostics (informational only)
+        gaps = np.abs(ts_prox_arr - ts_dist_arr)
+        if gaps.size > 0:
+            diag_proximal["sync_gap_sum"] += float(gaps.mean())
+            diag_proximal["sync_gap_n"]   += 1
 
         angles = []
-        for sample_prox, t_prox in zip(samples_proximal, ts_proximal):
-            closest_idx = int(np.argmin(np.abs(ts_distal_arr - t_prox)))
-            gap = float(np.abs(ts_distal_arr[closest_idx] - t_prox))
-            if gap < TIME_TOLERANCE:
-                # Accumulate sync-gap statistics for the diagnostic report
-                diag_proximal["sync_gap_sum"] += gap
-                diag_proximal["sync_gap_n"]   += 1
-                q_prox = np.array(sample_prox[6:10], dtype=np.float64)
-                q_dist = np.array(samples_distal[closest_idx][6:10], dtype=np.float64)
-                try:
-                    angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
-                    angles.append(float(angle))
-                except Exception:
-                    pass  # skip numerically degenerate quaternions
+        for i in range(n_pairs):
+            q_prox = np.array(samples_proximal[i][6:10], dtype=np.float64)
+            q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
+            try:
+                angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
+                angles.append(float(angle))
+            except Exception:
+                pass  # skip numerically degenerate quaternions
 
         return np.array(angles) if angles else np.array([])
+
+
 
 
 
