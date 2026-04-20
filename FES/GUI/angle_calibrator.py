@@ -47,6 +47,16 @@ class AngleCalibrator(QObject):
         self.left_ankle_data = np.array([])
         self.right_ankle_data = np.array([])
 
+        # Timestamps (wall-clock seconds, time.time()) aligned sample-by-sample
+        # with the four angle arrays above.  Populated in record_data.
+        self.left_angle_timestamps  = np.array([])
+        self.right_angle_timestamps = np.array([])
+        self.left_ankle_timestamps  = np.array([])
+        self.right_ankle_timestamps = np.array([])
+
+        # Session bookkeeping
+        self._session_start: float | None = None
+
         self.left_angle_offset = 0.0
         self.right_angle_offset = 0.0
         self.left_ankle_offset = 0.0
@@ -268,6 +278,11 @@ class AngleCalibrator(QObject):
                 self.left_angle_offset, self._diag["left_thigh"],
             )
             self.left_angle_data = np.append(self.left_angle_data, angles)
+            if len(angles):
+                self.left_angle_timestamps = np.append(
+                    self.left_angle_timestamps,
+                    np.full(len(angles), now)
+                )
 
             # Ankle LEFT: re-use the same shank samples (already drained from deque)
             if self.left_foot_inlet:
@@ -278,6 +293,11 @@ class AngleCalibrator(QObject):
                     self.left_ankle_offset, self._diag["left_shank"],
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+                if len(ankle_angles):
+                    self.left_ankle_timestamps = np.append(
+                        self.left_ankle_timestamps,
+                        np.full(len(ankle_angles), now)
+                    )
 
         elif self.left_shank_inlet and self.left_foot_inlet:
             # No thigh — only ankle
@@ -289,6 +309,11 @@ class AngleCalibrator(QObject):
                 self.left_ankle_offset, self._diag["left_shank"],
             )
             self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+            if len(ankle_angles):
+                self.left_ankle_timestamps = np.append(
+                    self.left_ankle_timestamps,
+                    np.full(len(ankle_angles), now)
+                )
 
         # ── 4. Knee RIGHT: thigh ↔ shank ───────────────────────────────────────
         if self.right_thigh_inlet and self.right_shank_inlet:
@@ -300,6 +325,11 @@ class AngleCalibrator(QObject):
                 self.right_angle_offset, self._diag["right_thigh"],
             )
             self.right_angle_data = np.append(self.right_angle_data, angles)
+            if len(angles):
+                self.right_angle_timestamps = np.append(
+                    self.right_angle_timestamps,
+                    np.full(len(angles), now)
+                )
 
             # Ankle RIGHT: re-use the same shank samples
             if self.right_foot_inlet:
@@ -310,6 +340,11 @@ class AngleCalibrator(QObject):
                     self.right_ankle_offset, self._diag["right_shank"],
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+                if len(ankle_angles):
+                    self.right_ankle_timestamps = np.append(
+                        self.right_ankle_timestamps,
+                        np.full(len(ankle_angles), now)
+                    )
 
         elif self.right_shank_inlet and self.right_foot_inlet:
             # No thigh — only ankle
@@ -321,17 +356,94 @@ class AngleCalibrator(QObject):
                 self.right_ankle_offset, self._diag["right_shank"],
             )
             self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+            if len(ankle_angles):
+                self.right_ankle_timestamps = np.append(
+                    self.right_ankle_timestamps,
+                    np.full(len(ankle_angles), now)
+                )
 
-        # ── 5. Trim angle buffers ───────────────────────────────────────────────
         if self.left_angle_data.size > MAX_BUFFER:
-            self.left_angle_data = self.left_angle_data[-MAX_BUFFER:]
+            self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
+            self.left_angle_timestamps = self.left_angle_timestamps[-MAX_BUFFER:]
         if self.right_angle_data.size > MAX_BUFFER:
-            self.right_angle_data = self.right_angle_data[-MAX_BUFFER:]
+            self.right_angle_data       = self.right_angle_data[-MAX_BUFFER:]
+            self.right_angle_timestamps = self.right_angle_timestamps[-MAX_BUFFER:]
         if self.left_ankle_data.size > MAX_BUFFER:
-            self.left_ankle_data = self.left_ankle_data[-MAX_BUFFER:]
+            self.left_ankle_data       = self.left_ankle_data[-MAX_BUFFER:]
+            self.left_ankle_timestamps = self.left_ankle_timestamps[-MAX_BUFFER:]
         if self.right_ankle_data.size > MAX_BUFFER:
-            self.right_ankle_data = self.right_ankle_data[-MAX_BUFFER:]
+            self.right_ankle_data       = self.right_ankle_data[-MAX_BUFFER:]
+            self.right_ankle_timestamps = self.right_ankle_timestamps[-MAX_BUFFER:]
 
+
+    def save_data(self, path: str) -> bool:
+        """Save all angle data and metadata to a .pkl file.
+
+        The file contains a single dict with keys:
+
+        Angles (numpy arrays, degrees)
+        ──────────────────────────────
+        left_knee_angles, right_knee_angles   — knee flexion/extension
+        left_ankle_angles, right_ankle_angles — ankle dorsi/plantar-flexion
+
+        Timestamps (numpy arrays, wall-clock seconds from time.time())
+        ──────────────────────────────────────────────────────────────
+        left_knee_timestamps, right_knee_timestamps
+        left_ankle_timestamps, right_ankle_timestamps
+
+        Calibration
+        ───────────
+        left_knee_offset, right_knee_offset   — subtracted angle at neutral pose
+        left_ankle_offset, right_ankle_offset
+
+        Session metadata
+        ────────────────
+        session_start_unix, session_end_unix  — float seconds
+        session_start_iso, session_end_iso    — ISO-8601 strings
+        session_duration_s                    — total wall-clock seconds
+
+        :param path: Full path to destination file (should end in .pkl).
+        :returns: True on success, False on IOError.
+        """
+        import pickle
+        from datetime import datetime
+
+        now = time.time()
+        start = self._session_start if self._session_start is not None else now
+
+        def _iso(ts):
+            return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+
+        data = {
+            # ── Angles ───────────────────────────────────────────────────────
+            "left_knee_angles":    self.left_angle_data.copy(),
+            "right_knee_angles":   self.right_angle_data.copy(),
+            "left_ankle_angles":   self.left_ankle_data.copy(),
+            "right_ankle_angles":  self.right_ankle_data.copy(),
+            # ── Timestamps ───────────────────────────────────────────────────
+            "left_knee_timestamps":   self.left_angle_timestamps.copy(),
+            "right_knee_timestamps":  self.right_angle_timestamps.copy(),
+            "left_ankle_timestamps":  self.left_ankle_timestamps.copy(),
+            "right_ankle_timestamps": self.right_ankle_timestamps.copy(),
+            # ── Calibration offsets ──────────────────────────────────────────
+            "left_knee_offset":   self.left_angle_offset,
+            "right_knee_offset":  self.right_angle_offset,
+            "left_ankle_offset":  self.left_ankle_offset,
+            "right_ankle_offset": self.right_ankle_offset,
+            # ── Session metadata ─────────────────────────────────────────────
+            "session_start_unix": start,
+            "session_end_unix":   now,
+            "session_start_iso":  _iso(start),
+            "session_end_iso":    _iso(now),
+            "session_duration_s": now - start,
+        }
+        try:
+            with open(path, "wb") as f:
+                pickle.dump(data, f)
+            return True
+        except Exception as e:
+            print(f"[AngleCalibrator] save_data failed: {e}")
+            return False
 
 
     @Slot(tuple)

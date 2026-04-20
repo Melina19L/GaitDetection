@@ -36,10 +36,11 @@ class PlotDialog(QDialog):
         bg = themes["app_color"]["bg_one"]
         self.setStyleSheet(f"background-color: {bg};")
 
-        # ── Reset button ──
+        # ── Reset & Save buttons ──
         self.reset_btn = QPushButton("Reset Graph")
-        self.reset_btn.setStyleSheet(
-            f"""
+        self.save_btn = QPushButton("Save Data...")
+        
+        btn_style = f"""
             QPushButton {{
                 background-color: {themes["app_color"]["dark_three"]};
                 color: {themes["app_color"]["text_foreground"]};
@@ -52,14 +53,20 @@ class PlotDialog(QDialog):
             QPushButton:hover {{
                 background-color: {themes["app_color"]["dark_four"]};
             }}
-            """
-        )
+        """
+        self.reset_btn.setStyleSheet(btn_style)
+        self.save_btn.setStyleSheet(btn_style)
+        
         self.reset_btn.setMaximumWidth(200)
+        self.save_btn.setMaximumWidth(200)
+        
         btn_container = QWidget()
         btn_layout = QHBoxLayout(btn_container)
         btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(20)
         btn_layout.addStretch(1)
         btn_layout.addWidget(self.reset_btn)
+        btn_layout.addWidget(self.save_btn)
         btn_layout.addStretch(1)
         btn_container.setMaximumHeight(40)
         layout.addWidget(btn_container)
@@ -141,8 +148,9 @@ class PlotDialog(QDialog):
         self.timer.timeout.connect(self.knee_plot.update_plot)
         self.timer.timeout.connect(self.ankle_plot.update_plot)
 
-        # ── Reset wiring ──
+        # ── Button wiring ──
         self.reset_btn.clicked.connect(self._reset)
+        self.save_btn.clicked.connect(self._save_data)
 
     # ────────────────────────────────────
     # Public API (called from setup_main_window)
@@ -162,7 +170,35 @@ class PlotDialog(QDialog):
         self.timer.stop()
         self.knee_plot.reset_plot()
         self.ankle_plot.reset_plot()
+        # Reset session timestamp in calibrator to align with visually reset data
+        self.calibrator._session_start = __import__('time').time()
         self.timer.start()
+
+    def _save_data(self):
+        import os
+        from functools import partial
+        default_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save IMU Angles Data",
+            default_dir,
+            "Pickle Files (*.pkl)",
+        )
+        if file_name:
+            if not file_name.endswith(".pkl"):
+                file_name += ".pkl"
+            
+            # Pause timer during save
+            was_active = self.timer.isActive()
+            self.timer.stop()
+            success = self.calibrator.save_data(file_name)
+            if was_active:
+                self.timer.start()
+                
+            if success:
+                QMessageBox.information(self, "Success", f"Data saved successfully to:\n{file_name}")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to save data. See console for details.")
 
     # ────────────────────────────────────
     # Overrides
