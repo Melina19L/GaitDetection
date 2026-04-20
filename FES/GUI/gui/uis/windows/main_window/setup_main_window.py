@@ -7065,8 +7065,11 @@ class SetupMainWindow:
         offset_left, offset_right = main_window.angle_calibrator.get_offset()
         offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
 
-        # Get the scale factors from the angle plot
-        scale_left, scale_right = main_window.angle_plot.get_scale_factors()
+        # Get the scale factors securely (fallback to 1.0 if not opened yet)
+        try:
+            scale_left, scale_right = main_window.plot_dialog.knee_plot.get_scale_factors()
+        except AttributeError:
+            scale_left, scale_right = 1.0, 1.0
 
     
 
