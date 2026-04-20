@@ -352,8 +352,10 @@ class IMUGaitFSM(QObject):
             
             self.timestamps_rom.extend(timestamps)
             
-    def get_quaternion(self) -> np.ndarray[float]:
+    def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
+        if last_n is not None and last_n > 0:
+            return np.array(self.quaternion[-last_n:])
         return np.array(self.quaternion)
 
     def imu_phase_detection(self):
@@ -1106,8 +1108,10 @@ class IMUGaitFSM_2(QObject):
                 # self.data_magy_rom.extend(sample[11] for sample in samples)
                 # self.data_magz_rom.extend(sample[12] for sample in samples)
             
-    def get_quaternion(self) -> np.ndarray[float]:
+    def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
+        if last_n is not None and last_n > 0:
+            return np.array(self.quaternion[-last_n:])
         return np.array(self.quaternion)
     
 
@@ -1572,8 +1576,10 @@ class IMUGaitFSM_DUMMY(QObject):
     def update_imu(self):
         pass
             
-    def get_quaternion(self) -> np.ndarray[float]:
+    def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
+        if last_n is not None and last_n > 0:
+            return np.array(self.quaternion[-last_n:])
         return np.array(self.quaternion)
     
 

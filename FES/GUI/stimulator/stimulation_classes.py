@@ -1236,13 +1236,13 @@ class StimulationIMUs(StimulationBasic):
         if left_ready:
             try:
                 if left_ready_fsm1:
-                    q_shank_left_array = self.left_leg_shank_fsm1.get_quaternion()
-                    q_thigh_left_array = self.left_leg_thigh_fsm1.get_quaternion() if left_thigh_ready_fsm1 else None
-                    q_foot_left_array = self.left_leg_foot_fsm1.get_quaternion() if left_foot_ready_fsm1 else None
+                    q_shank_left_array = self.left_leg_shank_fsm1.get_quaternion(last_n=150)
+                    q_thigh_left_array = self.left_leg_thigh_fsm1.get_quaternion(last_n=150) if left_thigh_ready_fsm1 else None
+                    q_foot_left_array = self.left_leg_foot_fsm1.get_quaternion(last_n=150) if left_foot_ready_fsm1 else None
                 elif left_ready_fsm2:
-                    q_shank_left_array = self.left_leg_shank_fsm2.get_quaternion()
-                    q_thigh_left_array = self.left_leg_thigh_fsm2.get_quaternion() if left_thigh_ready_fsm2 else None
-                    q_foot_left_array = self.left_leg_foot_fsm2.get_quaternion() if left_foot_ready_fsm2 else None
+                    q_shank_left_array = self.left_leg_shank_fsm2.get_quaternion(last_n=150)
+                    q_thigh_left_array = self.left_leg_thigh_fsm2.get_quaternion(last_n=150) if left_thigh_ready_fsm2 else None
+                    q_foot_left_array = self.left_leg_foot_fsm2.get_quaternion(last_n=150) if left_foot_ready_fsm2 else None
                 else:
                     pass
             except Exception as e:
@@ -1283,13 +1283,13 @@ class StimulationIMUs(StimulationBasic):
             #print("Debug: right leg ready")
             try:
                 if right_ready_fsm1:
-                    q_shank_right_array = self.right_leg_shank_fsm1.get_quaternion()
-                    q_thigh_right_array = self.right_leg_thigh_fsm1.get_quaternion() if right_thigh_ready_fsm1 else None
-                    q_foot_right_array = self.right_leg_foot_fsm1.get_quaternion() if right_foot_ready_fsm1 else None
+                    q_shank_right_array = self.right_leg_shank_fsm1.get_quaternion(last_n=150)
+                    q_thigh_right_array = self.right_leg_thigh_fsm1.get_quaternion(last_n=150) if right_thigh_ready_fsm1 else None
+                    q_foot_right_array = self.right_leg_foot_fsm1.get_quaternion(last_n=150) if right_foot_ready_fsm1 else None
                 elif right_ready_fsm2:
-                    q_shank_right_array = self.right_leg_shank_fsm2.get_quaternion()
-                    q_thigh_right_array = self.right_leg_thigh_fsm2.get_quaternion() if right_thigh_ready_fsm2 else None
-                    q_foot_right_array = self.right_leg_foot_fsm2.get_quaternion() if right_foot_ready_fsm2 else None
+                    q_shank_right_array = self.right_leg_shank_fsm2.get_quaternion(last_n=150)
+                    q_thigh_right_array = self.right_leg_thigh_fsm2.get_quaternion(last_n=150) if right_thigh_ready_fsm2 else None
+                    q_foot_right_array = self.right_leg_foot_fsm2.get_quaternion(last_n=150) if right_foot_ready_fsm2 else None
                 else:
                     q_shank_right_array = q_thigh_right_array = q_foot_right_array = None
                 
