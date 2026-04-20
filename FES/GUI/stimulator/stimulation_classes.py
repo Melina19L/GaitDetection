@@ -924,6 +924,8 @@ class StimulationIMUs(StimulationBasic):
 
         self.left_knee_rom = ROM(kwargs.get("offset_left", 0.0), kwargs.get("scale_left", 1.0))
         self.right_knee_rom = ROM(kwargs.get("offset_right", 0.0), kwargs.get("scale_right", 1.0))
+        self.left_ankle_rom = ROM(kwargs.get("offset_left_ankle", 0.0), kwargs.get("scale_left", 1.0))
+        self.right_ankle_rom = ROM(kwargs.get("offset_right_ankle", 0.0), kwargs.get("scale_right", 1.0))
 
         dt = self.timer.interval() / 1000.0  # Convert milliseconds to seconds
 
@@ -1103,6 +1105,12 @@ class StimulationIMUs(StimulationBasic):
             "imu_left_knee_timestamps_algo2": getattr(self.left_knee_rom, "angles_algo2", None)[:, 0] if hasattr(self.left_knee_rom, "angles_algo2") else None,
             "imu_right_knee_timestamps_algo2": getattr(self.right_knee_rom, "angles_algo2", None)[:, 0] if hasattr(self.right_knee_rom, "angles_algo2") else None,
             
+            # --- add ankle ROM data ---
+            "imu_left_ankle_angles": getattr(self.left_ankle_rom, "angles", None)[:, 1] if hasattr(self.left_ankle_rom, "angles") else None,
+            "imu_right_ankle_angles": getattr(self.right_ankle_rom, "angles", None)[:, 1] if hasattr(self.right_ankle_rom, "angles") else None,
+            "imu_left_ankle_timestamps": getattr(self.left_ankle_rom, "angles", None)[:, 0] if hasattr(self.left_ankle_rom, "angles") else None,
+            "imu_right_ankle_timestamps": getattr(self.right_ankle_rom, "angles", None)[:, 0] if hasattr(self.right_ankle_rom, "angles") else None,
+            
             "imu_left_pi_timestamps": getattr(self.left_pi_controller, "timestamps", None),
             "imu_right_pi_timestamps": getattr(self.right_pi_controller, "timestamps", None),
             "imu_left_pi_errors": getattr(self.left_pi_controller, "errors", None),
@@ -1197,17 +1205,28 @@ class StimulationIMUs(StimulationBasic):
             return
         
 
-        # Availability checks (thigh + shank per side)
-        left_ready_fsm1  = (getattr(self, "left_leg_shank_fsm1",  None) is not None and
-                    getattr(self, "left_leg_thigh_fsm1",  None) is not None)
-        right_ready_fsm1 = (getattr(self, "right_leg_shank_fsm1", None) is not None and
-                    getattr(self, "right_leg_thigh_fsm1", None) is not None)
+        # Availability checks (shank + at least one between thigh and foot)
+        left_shank_ready_fsm1 = getattr(self, "left_leg_shank_fsm1", None) is not None
+        left_thigh_ready_fsm1 = getattr(self, "left_leg_thigh_fsm1", None) is not None
+        left_foot_ready_fsm1 = getattr(self, "left_leg_foot_fsm1", None) is not None
         
-        left_ready_fsm2  = (getattr(self, "left_leg_shank_fsm2",  None) is not None and
-                    getattr(self, "left_leg_thigh_fsm2",  None) is not None)
-        right_ready_fsm2 = (getattr(self, "right_leg_shank_fsm2", None) is not None and
-                    getattr(self, "right_leg_thigh_fsm2", None) is not None)
-        
+        left_shank_ready_fsm2 = getattr(self, "left_leg_shank_fsm2", None) is not None
+        left_thigh_ready_fsm2 = getattr(self, "left_leg_thigh_fsm2", None) is not None
+        left_foot_ready_fsm2 = getattr(self, "left_leg_foot_fsm2", None) is not None
+
+        right_shank_ready_fsm1 = getattr(self, "right_leg_shank_fsm1", None) is not None
+        right_thigh_ready_fsm1 = getattr(self, "right_leg_thigh_fsm1", None) is not None
+        right_foot_ready_fsm1 = getattr(self, "right_leg_foot_fsm1", None) is not None
+
+        right_shank_ready_fsm2 = getattr(self, "right_leg_shank_fsm2", None) is not None
+        right_thigh_ready_fsm2 = getattr(self, "right_leg_thigh_fsm2", None) is not None
+        right_foot_ready_fsm2 = getattr(self, "right_leg_foot_fsm2", None) is not None
+
+        left_ready_fsm1 = left_shank_ready_fsm1 and (left_thigh_ready_fsm1 or left_foot_ready_fsm1)
+        left_ready_fsm2 = left_shank_ready_fsm2 and (left_thigh_ready_fsm2 or left_foot_ready_fsm2)
+        right_ready_fsm1 = right_shank_ready_fsm1 and (right_thigh_ready_fsm1 or right_foot_ready_fsm1)
+        right_ready_fsm2 = right_shank_ready_fsm2 and (right_thigh_ready_fsm2 or right_foot_ready_fsm2)
+
         left_ready = True if left_ready_fsm1 or left_ready_fsm2 else False
         right_ready = True if right_ready_fsm1 or right_ready_fsm2 else False
 
@@ -1218,25 +1237,31 @@ class StimulationIMUs(StimulationBasic):
             try:
                 if left_ready_fsm1:
                     q_shank_left_array = self.left_leg_shank_fsm1.get_quaternion()
-                    q_thigh_left_array = self.left_leg_thigh_fsm1.get_quaternion()
+                    q_thigh_left_array = self.left_leg_thigh_fsm1.get_quaternion() if left_thigh_ready_fsm1 else None
+                    q_foot_left_array = self.left_leg_foot_fsm1.get_quaternion() if left_foot_ready_fsm1 else None
                 elif left_ready_fsm2:
                     q_shank_left_array = self.left_leg_shank_fsm2.get_quaternion()
-                    q_thigh_left_array = self.left_leg_thigh_fsm2.get_quaternion()
+                    q_thigh_left_array = self.left_leg_thigh_fsm2.get_quaternion() if left_thigh_ready_fsm2 else None
+                    q_foot_left_array = self.left_leg_foot_fsm2.get_quaternion() if left_foot_ready_fsm2 else None
                 else:
                     pass
             except Exception as e:
                 print(f"[Left] Failed to read quaternions: {e}")
-                q_shank_left_array = q_thigh_left_array = None
+                q_shank_left_array = q_thigh_left_array = q_foot_left_array = None
 
-            if (getattr(q_shank_left_array, "size", 0) > 0 and
-                getattr(q_thigh_left_array, "size", 0) > 0):
+            if getattr(q_shank_left_array, "size", 0) > 0 and (getattr(q_thigh_left_array, "size", 0) > 0 or getattr(q_foot_left_array, "size", 0) > 0):
                 # Prefer device time from shank array (assuming first column = timestamp)
 
                 ts_left = time.time()
 
 
-                # Compute ROM from full buffer (your ROM handles it)
-                self.left_knee_rom.compute_from_list(q_thigh_left_array, q_shank_left_array, ts_left)
+                # Compute Knee ROM if thigh is available
+                if getattr(q_thigh_left_array, "size", 0) > 0:
+                    self.left_knee_rom.compute_from_list(q_thigh_left_array, q_shank_left_array, ts_left)
+                
+                # Compute Ankle ROM if foot is available
+                if getattr(q_foot_left_array, "size", 0) > 0:
+                    self.left_ankle_rom.compute_from_list(q_shank_left_array, q_foot_left_array, ts_left)
 
                 # Choose phase/subphase
                 left_fsm = self.get_first_available_fsm(side="left")
@@ -1259,24 +1284,31 @@ class StimulationIMUs(StimulationBasic):
             try:
                 if right_ready_fsm1:
                     q_shank_right_array = self.right_leg_shank_fsm1.get_quaternion()
-                    q_thigh_right_array = self.right_leg_thigh_fsm1.get_quaternion()
+                    q_thigh_right_array = self.right_leg_thigh_fsm1.get_quaternion() if right_thigh_ready_fsm1 else None
+                    q_foot_right_array = self.right_leg_foot_fsm1.get_quaternion() if right_foot_ready_fsm1 else None
                 elif right_ready_fsm2:
                     q_shank_right_array = self.right_leg_shank_fsm2.get_quaternion()
-                    q_thigh_right_array = self.right_leg_thigh_fsm2.get_quaternion()
+                    q_thigh_right_array = self.right_leg_thigh_fsm2.get_quaternion() if right_thigh_ready_fsm2 else None
+                    q_foot_right_array = self.right_leg_foot_fsm2.get_quaternion() if right_foot_ready_fsm2 else None
                 else:
-                    q_shank_right_array = q_thigh_right_array = None
+                    q_shank_right_array = q_thigh_right_array = q_foot_right_array = None
                 
             except Exception as e:
                 #print(f"[Right] Failed to read quaternions: {e}")
-                q_shank_right_array = q_thigh_right_array = None
+                q_shank_right_array = q_thigh_right_array = q_foot_right_array = None
 
-            if (getattr(q_shank_right_array, "size", 0) > 0 and
-                getattr(q_thigh_right_array, "size", 0) > 0):
+            if getattr(q_shank_right_array, "size", 0) > 0 and (getattr(q_thigh_right_array, "size", 0) > 0 or getattr(q_foot_right_array, "size", 0) > 0):
                 # Prefer device time from shank array
 
                 ts_right = time.time()
 
-                self.right_knee_rom.compute_from_list(q_thigh_right_array, q_shank_right_array, ts_right)
+                # Compute Knee ROM if thigh is available
+                if getattr(q_thigh_right_array, "size", 0) > 0:
+                    self.right_knee_rom.compute_from_list(q_thigh_right_array, q_shank_right_array, ts_right)
+                
+                # Compute Ankle ROM if foot is available
+                if getattr(q_foot_right_array, "size", 0) > 0:
+                    self.right_ankle_rom.compute_from_list(q_shank_right_array, q_foot_right_array, ts_right)
 
                 right_fsm = self.get_first_available_fsm(side="right")
                 phase_right = right_fsm.active_phase if right_fsm is not None else None

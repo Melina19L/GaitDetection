@@ -5,10 +5,88 @@ import os
 import argparse
 from tkinter import Tk, filedialog
 
+# Attempt to import ROM for offline ankle computation fallback
+try:
+    from stimulator.closed_loop import ROM
+except ImportError:
+    ROM = None
+
+def _compute_angle_offline(data_dict, proxy_1_key, proxy_2_key):
+    """Calcola l'angolo in batch tra due sensori (es: shank e foot) usando i quaternioni salvati."""
+    if ROM is None or "rom_data" not in data_dict:
+        return None, None
+    rom_data = data_dict["rom_data"]
+    if proxy_1_key not in rom_data or proxy_2_key not in rom_data:
+        return None, None
+    
+    # Prendi il numero minimo di campioni tra i due sensori
+    p1 = rom_data[proxy_1_key]
+    p2 = rom_data[proxy_2_key]
+    n = min(len(p1["timestamps"]), len(p2["timestamps"]))
+    if n == 0:
+        return None, None
+        
+    timestamps = p1["timestamps"][:n]
+    
+    # Ricostruisci i sample come si aspetta ROM
+    # format: [[0, 0, 0, 0, qw, qx, qy, qz], ...] 
+    # l'indice 4,5,6,7 sono i quaternioni in __compute_angles_from_data
+    fake_samples_1 = []
+    fake_samples_2 = []
+    for i in range(n):
+        s1 = [0]*8
+        s1[4] = p1["qw"][i]
+        s1[5] = p1["qx"][i]
+        s1[6] = p1["qy"][i]
+        s1[7] = p1["qz"][i]
+        fake_samples_1.append(s1)
+        
+        s2 = [0]*8
+        s2[4] = p2["qw"][i]
+        s2[5] = p2["qx"][i]
+        s2[6] = p2["qy"][i]
+        s2[7] = p2["qz"][i]
+        fake_samples_2.append(s2)
+        
+    temp_rom = ROM()
+    angles = []
+    for i in range(n):
+        ang = temp_rom.calculate_joint_angle(False, [fake_samples_1[i]], [fake_samples_2[i]])
+        angles.append(ang[0] if ang.size else 0.0)
+    
+    return np.array(timestamps), np.array(angles)
+
 def load_data(file_path):
-    print(f"Caricamento file: {file_path}")
+    print(f"\nCaricamento file: {file_path}")
     with open(file_path, "rb") as f:
         data = pickle.load(f)
+        
+    print("Contenuto trovato nel file:")
+    has_knee = any("knee_angles" in k for k in data.keys())
+    has_ankle = any("ankle_angles" in k for k in data.keys())
+    has_events = any("peaks" in k or "hs" in k.lower() or "toe" in k.lower() for k in data.keys())
+    
+    print(f" - Angoli Ginocchio pre-calcolati: {'SI' if has_knee else 'NO'}")
+    print(f" - Angoli Caviglia pre-calcolati: {'SI' if has_ankle else 'NO'}")
+    print(f" - Makers Fasi del Passo: {'SI' if has_events else 'NO'}")
+    
+    # Se mancano le caviglie ma abbiamo i dati RAW (Salvataggio della finestra principale)
+    if not has_ankle and "rom_data" in data:
+        print(" - Ricostruzione angoli caviglia offline dai quaternioni raw...")
+        # Prova a sinistra (shank + foot)
+        ts_l, ang_l = _compute_angle_offline(data, "left_shank_fsm1", "left_foot_fsm1")
+        if ts_l is not None:
+            data["left_ankle_timestamps"] = ts_l
+            data["left_ankle_angles"] = ang_l
+            print("   -> Ricostruita Caviglia Sinistra")
+            
+        # Prova a destra (shank + foot)
+        ts_r, ang_r = _compute_angle_offline(data, "right_shank_fsm1", "right_foot_fsm1")
+        if ts_r is not None:
+            data["right_ankle_timestamps"] = ts_r
+            data["right_ankle_angles"] = ang_r
+            print("   -> Ricostruita Caviglia Destra")
+            
     return data
 
 def plot_angles(data):

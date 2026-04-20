@@ -7063,6 +7063,7 @@ class SetupMainWindow:
 
         # Get the offset values from the angle calibrator (0 if not calibrated)
         offset_left, offset_right = main_window.angle_calibrator.get_offset()
+        offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
 
         # Get the scale factors from the angle plot
         scale_left, scale_right = main_window.angle_plot.get_scale_factors()
@@ -7158,6 +7159,8 @@ class SetupMainWindow:
             "threshold_right": main_window.fsr_threshold_right_spin_box.value(),
             "offset_left": offset_left,
             "offset_right": offset_right,
+            "offset_left_ankle": offset_left_ankle,
+            "offset_right_ankle": offset_right_ankle,
             "scale_left": scale_left,
             "scale_right": scale_right,
             "closed_loop": main_window.closed_loop_toggle.isChecked() and main_window.closed_loop_toggle.isEnabled(),
