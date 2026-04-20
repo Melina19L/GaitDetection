@@ -87,6 +87,23 @@ def load_data(file_path):
             data["right_ankle_angles"] = ang_r
             print("   -> Ricostruita Caviglia Destra")
             
+    # Normalizza i timestamp per farli partire da 0
+    print(" - Normalizzazione timestamps (partenza da t=0s)...")
+    min_time = float('inf')
+    
+    # Primo passaggio: Trova il tempo minimo assoluto
+    for key, value in data.items():
+        if ("timestamps" in key or "peaks" in key or "valleys" in key) and isinstance(value, (list, np.ndarray)) and len(value) > 0:
+            current_min = np.min(value)
+            if current_min < min_time:
+                min_time = current_min
+                
+    # Secondo passaggio: Sottrai il tempo minimo e converti in array numpy
+    if min_time != float('inf'):
+        for key, value in data.copy().items():
+            if ("timestamps" in key or "peaks" in key or "valleys" in key) and isinstance(value, (list, np.ndarray)) and len(value) > 0:
+                data[key] = np.array(value) - min_time
+
     return data
 
 def plot_angles(data):
