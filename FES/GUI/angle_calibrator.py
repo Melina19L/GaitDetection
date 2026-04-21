@@ -3,7 +3,7 @@ from pylsl import StreamInlet, resolve_byprop
 from qt_core import *
 from enum import Enum
 import numpy as np
-from stimulator.closed_loop import ROM, TIME_TOLERANCE
+from stimulator.closed_loop import ROM, TIME_TOLERANCE, sensor_axes_diagnostic
 import time
 from typing import Optional
 
@@ -604,28 +604,30 @@ class AngleCalibrator(QObject):
         def _one_side_knee(shank_inlet, thigh_inlet, target_spinbox):
             if not (shank_inlet and thigh_inlet):
                 return None
-            max_tries = 10  # retry up to ~10×timeout
+            max_tries = 10
             for _ in range(max_tries):
                 q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
                 q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
                 if q_shank is not None and q_thigh is not None:
                     return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
-                QCoreApplication.processEvents()  # keep UI alive
+                QCoreApplication.processEvents()
             return None
 
         def _one_side_ankle(shank_inlet, foot_inlet):
+            """Return (offset, q_shank, q_foot) or (None, None, None) on failure."""
             if not (shank_inlet and foot_inlet):
-                return None
+                return None, None, None
             max_tries = 10
             for _ in range(max_tries):
                 q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
-                q_foot = self.__get_latest_quaternion_nonblocking(foot_inlet)
+                q_foot  = self.__get_latest_quaternion_nonblocking(foot_inlet)
                 if q_shank is not None and q_foot is not None:
                     # Use ankle-specific signed calibration (Z-axis projection)
                     # instead of the knee method which returns unsigned [0°,180°]
-                    return ROM.ankle_functional_calibration(q_shank, q_foot)
+                    offset = ROM.ankle_functional_calibration(q_shank, q_foot)
+                    return offset, q_shank, q_foot
                 QCoreApplication.processEvents()
-            return None
+            return None, None, None
 
         if self.left_checkbox.isChecked():
             # Knee calibration
@@ -634,11 +636,16 @@ class AngleCalibrator(QObject):
                 self.left_angle_offset = off
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
-            # Ankle calibration
-            ankle_off = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
+            # Ankle calibration + diagnostics
+            ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
                 self.message_signal.emit("Left ankle offset calibrated.")
+                # Emit axis diagnostic so the user can verify sensor orientation
+                html = sensor_axes_diagnostic(q_sh_l, q_ft_l)
+                self.diagnostic_signal.emit(
+                    f'<p style="color:#9b59b6"><b>Left leg axis diagnostic:</b></p>{html}'
+                )
             elif self.left_foot_inlet:
                 self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
 
@@ -649,13 +656,19 @@ class AngleCalibrator(QObject):
                 self.right_angle_offset = off
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
-            # Ankle calibration
-            ankle_off = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
+            # Ankle calibration + diagnostics
+            ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
                 self.message_signal.emit("Right ankle offset calibrated.")
+                # Emit axis diagnostic so the user can verify sensor orientation
+                html = sensor_axes_diagnostic(q_sh_r, q_ft_r)
+                self.diagnostic_signal.emit(
+                    f'<p style="color:#9b59b6"><b>Right leg axis diagnostic:</b></p>{html}'
+                )
             elif self.right_foot_inlet:
                 self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
+
     
 
     def __set_checkboxes_enabled(self, enabled: bool):

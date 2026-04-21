@@ -95,11 +95,80 @@ def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> 
 
     return sign * angle_deg
 
+
+def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
+    """Return an HTML table showing how shank and foot sensor axes project in the global frame.
+
+    Called at calibration time so the user can identify which sensor axis
+    aligns with anatomical directions:
+      - Gravity = global Z-down  → the axis with the largest |z| component
+        when standing is the sensor's "vertical" axis.
+      - Along-foot direction = parallel to floor, pointing toward toes
+        → the axis with the smallest |z| value AND the largest |x| or |y|.
+
+    The table is formatted for display in the GUI status box (HTML).
+    """
+    axes = {
+        'X': np.array([1.0, 0.0, 0.0]),
+        'Y': np.array([0.0, 1.0, 0.0]),
+        'Z': np.array([0.0, 0.0, 1.0]),
+    }
+    gravity = np.array([0.0, 0.0, -1.0])   # global frame: Z points up, gravity is −Z
+
+    def axis_info(q, label):
+        rows = []
+        best_grav  = ('?', 0.0)
+        best_floor = ('?', 0.0)
+        for name, v in axes.items():
+            gv = rotate_vector_by_quaternion(v, q)
+            gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
+            alignment_grav  = abs(float(np.dot(gv_norm, gravity)))   # 1 = vertical
+            alignment_floor = float(1.0 - alignment_grav)             # 1 = horizontal
+            bar_g = '█' * int(alignment_grav  * 10)
+            bar_f = '█' * int(alignment_floor * 10)
+            rows.append(
+                f'<tr><td>{label}-{name}</td>'
+                f'<td>[{gv[0]:+.2f}, {gv[1]:+.2f}, {gv[2]:+.2f}]</td>'
+                f'<td title="vertical">{bar_g} {alignment_grav:.2f}</td>'
+                f'<td title="horizontal">{bar_f} {alignment_floor:.2f}</td></tr>'
+            )
+            if alignment_grav  > best_grav[1]:  best_grav  = (name, alignment_grav)
+            if alignment_floor > best_floor[1]: best_floor = (name, alignment_floor)
+        rows.append(
+            f'<tr style="color:#f39c12"><td><b>{label} summary</b></td>'
+            f'<td colspan="2">↕ Vertical axis: <b>{label}-{best_grav[0]}</b></td>'
+            f'<td>↔ Floor axis: <b>{label}-{best_floor[0]}</b></td></tr>'
+        )
+        return rows
+
+    html = (
+        '<p style="color:#3498db; font-weight:bold; font-size:12px;">📐 Sensor Axis Diagnostic</p>'
+        '<table style="color:#ecf0f1; font-family:monospace; font-size:11px; border-collapse:collapse;">'
+        '<tr style="color:#95a5a6">'
+        '<th>Axis</th><th>Global direction [Gx,Gy,Gz]</th>'
+        '<th>Vertical ↕</th><th>Horizontal ↔</th></tr>'
+    )
+    if q_shank is not None:
+        html += ''.join(axis_info(q_shank, 'Shank'))
+    if q_foot is not None:
+        html += ''.join(axis_info(q_foot, 'Foot'))
+    html += (
+        '</table>'
+        '<p style="color:#95a5a6; font-size:10px;">'
+        'Vertical ↕ = aligned with gravity | Horizontal ↔ = parallel to floor<br/>'
+        'The correct ankle axis is the Foot axis most HORIZONTAL (↔ close to 1.0).<br/>'
+        'If Foot-X is the most horizontal → X-axis method is correct.<br/>'
+        'If Foot-Z is the most horizontal → Z-axis method is correct.</p>'
+    )
+    return html
+
+
 def rotate_vector_by_quaternion(v: np.ndarray, q: np.ndarray) -> np.ndarray:
     u = q[1:4]  # Extract the vector part of the quaternion
     s: float = q[0]  # Extract the scalar part of the quaternion
     v_rotated: np.ndarray = u * 2.0 * u.dot(v) + v * (s * s - u.dot(u)) + np.cross(u, v) * 2.0 * s
     return v_rotated
+
 
 
 def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
