@@ -6444,6 +6444,89 @@ class SetupMainWindow:
             )
         )
 
+        # Axis diagnostic: open a dedicated, persistent popup window
+        def _show_axis_diagnostic(html_content: str):
+            """Open a non-modal dialog showing the full sensor axis diagnostic."""
+            import os
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                           QTextBrowser, QPushButton, QFileDialog, QLabel)
+            from PySide6.QtCore import Qt
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle("📐 Sensor Axis Diagnostic — Calibration Report")
+            dlg.setMinimumSize(780, 520)
+            dlg.setStyleSheet("""
+                QDialog        { background: #1e1f26; color: #ecf0f1; }
+                QTextBrowser   { background: #16171e; color: #ecf0f1;
+                                 border: 1px solid #3d4059; border-radius: 6px;
+                                 font-family: 'Consolas','Courier New',monospace; font-size: 12px; }
+                QPushButton    { background: #2c3e50; color: #ecf0f1; border: none;
+                                 border-radius: 5px; padding: 6px 16px; font-size: 12px; }
+                QPushButton:hover { background: #3d5166; }
+                QPushButton#close_btn { background: #8e44ad; }
+                QPushButton#close_btn:hover { background: #9b59b6; }
+                QPushButton#save_btn { background: #27ae60; }
+                QPushButton#save_btn:hover { background: #2ecc71; }
+                QLabel         { color: #bdc3c7; font-size: 11px; padding: 4px; }
+            """)
+
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(8)
+
+            # Instructions label
+            lbl = QLabel(
+                "<b>How to read:</b>  "
+                "<span style='color:#2ecc71'>Vertical ↕ close to 1.0</span> = axis aligned with gravity.  "
+                "<span style='color:#3498db'>Horizontal ↔ close to 1.0</span> = axis along the floor (along foot).  "
+                "The correct ankle axis is the Foot axis with the highest Horizontal score."
+            )
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+
+            # Main text browser
+            browser = QTextBrowser()
+            browser.setOpenExternalLinks(False)
+            browser.setHtml(html_content)
+            layout.addWidget(browser)
+
+            # Button row
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(8)
+
+            save_btn = QPushButton("💾  Save report to file…")
+            save_btn.setObjectName("save_btn")
+            def _save_report():
+                path, _ = QFileDialog.getSaveFileName(
+                    dlg, "Save Axis Diagnostic",
+                    os.path.join(os.path.expanduser("~"), "Desktop",
+                                 "axis_diagnostic.html"),
+                    "HTML Files (*.html);;Text Files (*.txt)"
+                )
+                if path:
+                    with open(path, "w", encoding="utf-8") as f:
+                        if path.endswith(".txt"):
+                            import re
+                            f.write(re.sub(r'<[^>]+>', '', html_content))
+                        else:
+                            f.write(f"<html><body style='background:#1e1f26; color:#ecf0f1;"
+                                    f" font-family:monospace; padding:16px;'>{html_content}</body></html>")
+            save_btn.clicked.connect(_save_report)
+
+            close_btn = QPushButton("✕  Close")
+            close_btn.setObjectName("close_btn")
+            close_btn.clicked.connect(dlg.close)
+
+            btn_row.addWidget(save_btn)
+            btn_row.addStretch()
+            btn_row.addWidget(close_btn)
+            layout.addLayout(btn_row)
+
+            dlg.setWindowModality(Qt.NonModal)
+            dlg.show()   # non-blocking, stays open until user closes it
+
+        self.angle_calibrator.axis_diagnostic_signal.connect(_show_axis_diagnostic)
+
         # ============================================================
         # POPULATE LAYOUT
         # ============================================================

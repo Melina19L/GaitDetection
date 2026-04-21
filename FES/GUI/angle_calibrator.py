@@ -30,6 +30,8 @@ class AngleCalibrator(QObject):
     diagnostic_signal = Signal(str)
     # Emitted once when calibration completes — HTML banner with offset values
     calibration_done_signal = Signal(str)
+    # Emitted with full axis diagnostic — connects to a dedicated popup window
+    axis_diagnostic_signal = Signal(str)
 
     def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None):
         super().__init__(parent)
@@ -622,13 +624,13 @@ class AngleCalibrator(QObject):
                 q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
                 q_foot  = self.__get_latest_quaternion_nonblocking(foot_inlet)
                 if q_shank is not None and q_foot is not None:
-                    # Use ankle-specific signed calibration (Z-axis projection)
-                    # instead of the knee method which returns unsigned [0°,180°]
                     offset = ROM.ankle_functional_calibration(q_shank, q_foot)
                     return offset, q_shank, q_foot
                 QCoreApplication.processEvents()
             return None, None, None
 
+        # Collect quaternions for combined axis diagnostic emitted once at end
+        diag_sections = []
         if self.left_checkbox.isChecked():
             # Knee calibration
             off = _one_side_knee(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
@@ -636,16 +638,11 @@ class AngleCalibrator(QObject):
                 self.left_angle_offset = off
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
-            # Ankle calibration + diagnostics
             ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
                 self.message_signal.emit("Left ankle offset calibrated.")
-                # Emit axis diagnostic so the user can verify sensor orientation
-                html = sensor_axes_diagnostic(q_sh_l, q_ft_l)
-                self.diagnostic_signal.emit(
-                    f'<p style="color:#9b59b6"><b>Left leg axis diagnostic:</b></p>{html}'
-                )
+                diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
                 self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
 
@@ -656,20 +653,25 @@ class AngleCalibrator(QObject):
                 self.right_angle_offset = off
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
-            # Ankle calibration + diagnostics
             ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
                 self.message_signal.emit("Right ankle offset calibrated.")
-                # Emit axis diagnostic so the user can verify sensor orientation
-                html = sensor_axes_diagnostic(q_sh_r, q_ft_r)
-                self.diagnostic_signal.emit(
-                    f'<p style="color:#9b59b6"><b>Right leg axis diagnostic:</b></p>{html}'
-                )
+                diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
                 self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
 
-    
+        # Emit single combined HTML → dedicated popup window (axis_diagnostic_signal)
+        if diag_sections:
+            combined = ""
+            for leg_label, q_sh, q_ft in diag_sections:
+                combined += (
+                    f'<h3 style="color:#9b59b6; margin-top:12px;">{leg_label}</h3>'
+                    + sensor_axes_diagnostic(q_sh, q_ft)
+                )
+            self.axis_diagnostic_signal.emit(combined)
+
+
 
     def __set_checkboxes_enabled(self, enabled: bool):
         """Enable or disable the checkboxes."""
