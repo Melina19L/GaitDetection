@@ -124,29 +124,29 @@ class AngleCalibrator(QObject):
         self.message_signal.emit("Angle calibration stopped (knee + ankle).")
 
     def calibration(self):
-        # Guard: refuse calibration if no sensors are connected
+        """Single-press calibration: reads current sensor pose as the zero reference."""
+        # Guard: refuse if no sensors are connected
         if not self.has_any_sensor():
             self.error_signal.emit("Calibration failed: no sensors connected.")
             return
 
-        # Start the calibration if the calibration step is START
-        if self.calibration_step == CalibrationStep.READY:
-            # Disable the checkboxes to prevent multiple clicks
-            self.__set_checkboxes_enabled(False)
-            self.__start_calibration()
+        if self.calibration_step == CalibrationStep.COLLECT_DATA:
+            self.message_signal.emit("Calibration already in progress, please wait...")
+            return
 
-        # If in neutral pose, proceed to functional calibration
-        elif self.calibration_step == CalibrationStep.NEUTRAL_POSE:
-            self.calibration_step = CalibrationStep.COLLECT_DATA
-            self.message_signal.emit("Collecting data for functional calibration...")
-            self.__functional_calibration()
-            # After finishing the functional calibration, re-enable the checkboxes and the calibration
-            self.message_signal.emit("Functional calibration completed.")
-            self.calibration_step = CalibrationStep.READY
-            self.__set_checkboxes_enabled(True)
+        # Disable toggles while calibrating
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.COLLECT_DATA
+        self.message_signal.emit("Calibrating... Please stand still in neutral position.")
+        QCoreApplication.processEvents()  # let the UI show the message immediately
 
-        elif self.calibration_step == CalibrationStep.COLLECT_DATA:
-            self.message_signal.emit("Collecting data, please wait...")
+        # Run the functional calibration (reads current pose as offset)
+        self.__functional_calibration()
+
+        # Re-enable toggles and report
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        self.message_signal.emit("✅  Offset calibration completed successfully.")
 
     def get_offset(self) -> tuple[float, float]:
         """Return the knee angle offsets for both legs.
