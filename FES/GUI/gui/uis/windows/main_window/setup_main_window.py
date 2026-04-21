@@ -6540,7 +6540,10 @@ class SetupMainWindow:
             try:
                 kl, kr = self.angle_calibrator.get_offset()
                 al, ar = self.angle_calibrator.get_ankle_offset()
-                stim.update_offsets(kl, kr, al, ar)
+                l_qs, l_qf, r_qs, r_qf = self.angle_calibrator.get_ankle_reference()
+                stim.update_offsets(kl, kr, al, ar,
+                                    ankle_left_qshank_ref=l_qs,  ankle_left_qfoot_ref=l_qf,
+                                    ankle_right_qshank_ref=r_qs, ankle_right_qfoot_ref=r_qf)
                 self.imu_status_box.append(
                     '<span style="color:#2ecc71">✔ Offsets updated live in running test.</span>'
                 )
@@ -7179,6 +7182,8 @@ class SetupMainWindow:
         # Get the offset values from the angle calibrator (0 if not calibrated)
         offset_left, offset_right = main_window.angle_calibrator.get_offset()
         offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
+        # Reference quaternions for the stable relative-quaternion ankle algorithm
+        l_qs, l_qf, r_qs, r_qf = main_window.angle_calibrator.get_ankle_reference()
 
         # Get the scale factors securely (fallback to 1.0 if not opened yet)
         try:
@@ -7279,6 +7284,10 @@ class SetupMainWindow:
             "offset_right": offset_right,
             "offset_left_ankle": offset_left_ankle,
             "offset_right_ankle": offset_right_ankle,
+            "ankle_left_qshank_ref":  l_qs,
+            "ankle_left_qfoot_ref":   l_qf,
+            "ankle_right_qshank_ref": r_qs,
+            "ankle_right_qfoot_ref":  r_qf,
             "scale_left": scale_left,
             "scale_right": scale_right,
             "closed_loop": main_window.closed_loop_toggle.isChecked() and main_window.closed_loop_toggle.isEnabled(),

@@ -187,6 +187,21 @@ class AngleCalibrator(QObject):
         """
         return self.left_ankle_offset, self.right_ankle_offset
 
+    def get_ankle_reference(self):
+        """Return the calibration quaternions (q_shank_ref, q_foot_ref) for each leg.
+
+        Used to pass the reference quaternions to ROM.set_ankle_reference() so that
+        the stable relative-quaternion ankle angle algorithm can be used at runtime.
+
+        :return: (left_qs, left_qf, right_qs, right_qf) or (None, None, None, None)
+                 when no ankle calibration has been performed yet.
+        """
+        left_qs  = getattr(self, 'left_ankle_qshank_ref',  None)
+        left_qf  = getattr(self, 'left_ankle_qfoot_ref',   None)
+        right_qs = getattr(self, 'right_ankle_qshank_ref', None)
+        right_qf = getattr(self, 'right_ankle_qfoot_ref',  None)
+        return left_qs, left_qf, right_qs, right_qf
+
     def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the knee angle data for both legs.
 
@@ -641,6 +656,9 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
+                # Store reference quaternions for the stable relative-quat path
+                self.left_ankle_qshank_ref = q_sh_l
+                self.left_ankle_qfoot_ref  = q_ft_l
                 self.message_signal.emit("Left ankle offset calibrated.")
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
@@ -656,6 +674,9 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
+                # Store reference quaternions for the stable relative-quat path
+                self.right_ankle_qshank_ref = q_sh_r
+                self.right_ankle_qfoot_ref  = q_ft_r
                 self.message_signal.emit("Right ankle offset calibrated.")
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:

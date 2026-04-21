@@ -927,6 +927,16 @@ class StimulationIMUs(StimulationBasic):
         self.left_ankle_rom = ROM(kwargs.get("offset_left_ankle",  0.0), kwargs.get("scale_left",  1.0))
         self.right_ankle_rom= ROM(kwargs.get("offset_right_ankle", 0.0), kwargs.get("scale_right", 1.0))
 
+        # Set ankle reference quaternions for the stable relative-quaternion algorithm.
+        # When present, the ROM ignores the numeric offset and directly computes
+        # the change in relative shank-foot orientation since the calibration pose.
+        l_qs = kwargs.get("ankle_left_qshank_ref");  l_qf = kwargs.get("ankle_left_qfoot_ref")
+        r_qs = kwargs.get("ankle_right_qshank_ref"); r_qf = kwargs.get("ankle_right_qfoot_ref")
+        if l_qs is not None and l_qf is not None:
+            self.left_ankle_rom.set_ankle_reference(l_qs, l_qf)
+        if r_qs is not None and r_qf is not None:
+            self.right_ankle_rom.set_ankle_reference(r_qs, r_qf)
+
         dt = self.timer.interval() / 1000.0  # Convert milliseconds to seconds
 
         # Initialize the PI controllers for the legs
@@ -947,17 +957,30 @@ class StimulationIMUs(StimulationBasic):
 
     def update_offsets(self,
                        knee_left:   float, knee_right:   float,
-                       ankle_left:  float, ankle_right:  float) -> None:
+                       ankle_left:  float, ankle_right:  float,
+                       ankle_left_qshank_ref  = None, ankle_left_qfoot_ref   = None,
+                       ankle_right_qshank_ref = None, ankle_right_qfoot_ref  = None) -> None:
         """Hot-update the ROM calibration offsets while the test is running.
 
         Called whenever 'Calibrate Offsets' is pressed (even mid-test) so that
         the ROM objects immediately reflect the new neutral-pose offset without
         needing to restart the test.
+
+        When reference quaternions are provided, the ankle ROMs switch to the
+        stable relative-quaternion algorithm (set_ankle_reference), which is
+        more robust than numeric offset subtraction.
         """
         self.left_knee_rom.set_offset(knee_left)
         self.right_knee_rom.set_offset(knee_right)
-        self.left_ankle_rom.set_offset(ankle_left)
-        self.right_ankle_rom.set_offset(ankle_right)
+        # Ankle: prefer reference-quaternion path
+        if ankle_left_qshank_ref is not None and ankle_left_qfoot_ref is not None:
+            self.left_ankle_rom.set_ankle_reference(ankle_left_qshank_ref, ankle_left_qfoot_ref)
+        else:
+            self.left_ankle_rom.set_offset(ankle_left)
+        if ankle_right_qshank_ref is not None and ankle_right_qfoot_ref is not None:
+            self.right_ankle_rom.set_ankle_reference(ankle_right_qshank_ref, ankle_right_qfoot_ref)
+        else:
+            self.right_ankle_rom.set_offset(ankle_right)
 
     def _iter_pairs(self):
         """
