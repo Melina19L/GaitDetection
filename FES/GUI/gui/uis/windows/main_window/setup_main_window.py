@@ -6433,6 +6433,16 @@ class SetupMainWindow:
                 self.imu_status_box.insertHtml(html),
             )
         )
+        # Calibration done: insert prominent banner AND scroll to bottom so it's always visible
+        self.angle_calibrator.calibration_done_signal.connect(
+            lambda html: (
+                self.imu_status_box.append(""),
+                self.imu_status_box.insertHtml(html),
+                self.imu_status_box.verticalScrollBar().setValue(
+                    self.imu_status_box.verticalScrollBar().maximum()
+                ),
+            )
+        )
 
         # ============================================================
         # POPULATE LAYOUT

@@ -57,8 +57,43 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
     x2 = rotate_vector_by_quaternion(xAxis, q2)
     angleRad = angle_between_vectors(x1, x2)
     angleDeg = np.degrees(angleRad)
-
     return angleDeg
+
+
+def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
+    """Compute ankle flexion/extension angle with correct sign.
+
+    The ankle joint is a hinge rotating around the medio-lateral (ML) axis.
+    For Xsens Dot sensors mounted along the limb segment:
+      - Shank sensor: Z-axis points proximally (up the tibia)
+      - Foot sensor:  Z-axis points distally (along the foot, toward toes)
+
+    In neutral stance the two Z-axes are ~90 degrees apart.
+    Plantarflexion (pointing toes DOWN) opens this angle → positive output.
+    Dorsiflexion  (pointing toes UP)   closes this angle → negative output.
+
+    The sign is recovered by projecting the foot Z-axis (in global frame)
+    onto the shank X-axis (in global frame): a positive projection means
+    the foot has rotated plantarflexion-ward.
+    """
+    zAxis = np.array([0.0, 0.0, 1.0])
+    xAxis = np.array([1.0, 0.0, 0.0])
+
+    # Express both Z-axes in the global frame
+    z_shank = rotate_vector_by_quaternion(zAxis, q_shank)
+    z_foot  = rotate_vector_by_quaternion(zAxis, q_foot)
+
+    # Unsigned angle between the two Z-axes
+    angle_rad = angle_between_vectors(z_shank, z_foot)
+    angle_deg = np.degrees(angle_rad)
+
+    # Sign: project z_foot onto shank X-axis to distinguish plantar vs dorsi
+    x_shank = rotate_vector_by_quaternion(xAxis, q_shank)
+    sign = np.sign(np.dot(z_foot, x_shank))
+    if sign == 0:
+        sign = 1.0
+
+    return sign * angle_deg
 
 def rotate_vector_by_quaternion(v: np.ndarray, q: np.ndarray) -> np.ndarray:
     u = q[1:4]  # Extract the vector part of the quaternion
@@ -79,14 +114,16 @@ def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
 
 class ROM:
     def __init__(self, offset: float = 0.0, scale: float = 1.0):
-        self.timestamp: float = 0.0  # Timestamp for the last measurement
-        self.offset: float = offset  # Offset for the angle
-        self.scale: float = scale  # Scale factor for the angle
-        self.angles = np.empty((0, 2))  # 2D array: each row can be [timestamp, angle]
-        self.angles_algo2 = np.empty((0, 2))  # store (timestamp, algo2_angle)
-        
+        self.timestamp: float = 0.0
+        self.offset: float = offset
+        self.scale: float = scale
+        self.angles = np.empty((0, 2))
+        self.angles_algo2 = np.empty((0, 2))
+
+    # ── Knee methods (unchanged) ──────────────────────────────────────────────
     @staticmethod
     def functional_calibration(q_thigh: np.ndarray, q_shank: np.ndarray) -> float:
+        """Return the knee angle at current neutral pose (used as offset)."""
         return angle_between_quaternions(q_thigh, q_shank)
 
     @staticmethod
@@ -96,12 +133,67 @@ class ROM:
 
     def get_joint_angle(self, q_thigh: np.ndarray, q_shank: np.ndarray) -> float:
         angle = angle_between_quaternions(q_thigh, q_shank) - self.offset
-        angle *= self.scale  # Apply scale factor after offset adjustment
+        angle *= self.scale
         self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
         return angle
 
     def set_offset(self, offset: float) -> None:
         self.offset = offset
+
+    # ── Ankle methods (signed, Z-axis projection) ─────────────────────────────
+    @staticmethod
+    def ankle_functional_calibration(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
+        """Return the signed ankle angle at neutral pose (used as offset).
+
+        This replaces the unsigned `functional_calibration` for the ankle.
+        In quiet standing the returned value represents the geometric angle
+        between shank and foot at the calibration instant; subtracting it
+        from every subsequent measurement yields 0° at neutral and signed
+        dorsiflexion (-) / plantarflexion (+) values during movement.
+        """
+        return ankle_angle_between_quaternions(q_shank, q_foot)
+
+    @staticmethod
+    def calculate_ankle_angle(q_shank: np.ndarray, q_foot: np.ndarray, offset: float) -> float:
+        """Return the calibrated signed ankle angle in degrees."""
+        return ankle_angle_between_quaternions(q_shank, q_foot) - offset
+
+    def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:
+        """Compute, store and return the calibrated ankle angle."""
+        angle = ankle_angle_between_quaternions(q_shank, q_foot) - self.offset
+        angle *= self.scale
+        self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
+        return angle
+
+    def ankle_compute_from_list(self, q_shank_array: np.ndarray, q_foot_array: np.ndarray,
+                                 timestamp: float = None) -> float:
+        """Compute ankle angle from synchronized quaternion arrays using the signed Z-axis method.
+
+        Mirrors compute_from_list but uses get_ankle_angle (ankle-specific signed
+        algorithm) instead of get_joint_angle (knee-specific unsigned X-axis algorithm).
+
+        :param q_shank_array: Quaternions from the shank IMU [timestamp, w, x, y, z].
+        :param q_foot_array:  Quaternions from the foot  IMU [timestamp, w, x, y, z].
+        :param timestamp: Wall-clock time to log; if None uses shank timestamp.
+        :return: Calibrated ankle angle in degrees, or 0.0 if no matching pair found.
+        """
+        if q_shank_array.size == 0 or q_foot_array.size == 0:
+            return 0.0
+
+        shank_ts = q_shank_array[:, 0]
+        foot_ts  = q_foot_array[:, 0]
+
+        # Iterate from the most-recent shank sample backwards
+        for i in range(len(shank_ts) - 1, -1, -1):
+            ts = shank_ts[i]
+            closest_index = np.argmin(np.abs(foot_ts - ts))
+            if np.abs(foot_ts[closest_index] - ts) < TIME_TOLERANCE:
+                q_shank = q_shank_array[i, 1:5]
+                q_foot  = q_foot_array[closest_index, 1:5]
+                self.timestamp = timestamp if timestamp is not None else ts
+                return self.get_ankle_angle(q_shank, q_foot)
+
+        return 0.0
 
     def compute_from_list(self, q_thigh_array: np.ndarray, q_shank_array: np.ndarray, timestamp: float = None) -> float:
         """Compute joint angles from lists of quaternions for thigh and shank containing samples with timestamps.\n

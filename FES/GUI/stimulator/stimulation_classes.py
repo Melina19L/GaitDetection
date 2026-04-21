@@ -1259,9 +1259,9 @@ class StimulationIMUs(StimulationBasic):
                 if getattr(q_thigh_left_array, "size", 0) > 0:
                     self.left_knee_rom.compute_from_list(q_thigh_left_array, q_shank_left_array, ts_left)
                 
-                # Compute Ankle ROM if foot is available
+                # Compute Ankle ROM if foot is available (signed Z-axis method)
                 if getattr(q_foot_left_array, "size", 0) > 0:
-                    self.left_ankle_rom.compute_from_list(q_shank_left_array, q_foot_left_array, ts_left)
+                    self.left_ankle_rom.ankle_compute_from_list(q_shank_left_array, q_foot_left_array, ts_left)
 
                 # Choose phase/subphase
                 left_fsm = self.get_first_available_fsm(side="left")
@@ -1306,9 +1306,9 @@ class StimulationIMUs(StimulationBasic):
                 if getattr(q_thigh_right_array, "size", 0) > 0:
                     self.right_knee_rom.compute_from_list(q_thigh_right_array, q_shank_right_array, ts_right)
                 
-                # Compute Ankle ROM if foot is available
+                # Compute Ankle ROM if foot is available (signed Z-axis method)
                 if getattr(q_foot_right_array, "size", 0) > 0:
-                    self.right_ankle_rom.compute_from_list(q_shank_right_array, q_foot_right_array, ts_right)
+                    self.right_ankle_rom.ankle_compute_from_list(q_shank_right_array, q_foot_right_array, ts_right)
 
                 right_fsm = self.get_first_available_fsm(side="right")
                 phase_right = right_fsm.active_phase if right_fsm is not None else None

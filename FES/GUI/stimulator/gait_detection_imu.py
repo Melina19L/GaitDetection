@@ -211,8 +211,19 @@ class IMUGaitFSM(QObject):
                     parameters['peak_detection_deadzone'] = 0.25
                     parameters['heel_strike_peak_range'] = 1
                     
-                else: # this would mean 0.8 km/h - 1.5 km/h, and we leave the parameters as they are
-                    pass 
+                else:
+                    # 0.8 – 1.5 km/h shank: the default 0.25 threshold is tuned for
+                    # 3 km/h and is too high for the shank gyroscope at moderate speed.
+                    # Use lower initial values so the adaptive algorithm has enough
+                    # confirmed HS peaks to self-calibrate amplitude from the start.
+                    parameters['peak_threshold'] = 0.14
+                    parameters['prominence']     = 0.10
+                    parameters['distance']       = 30
+                    parameters['min_distance_between_peaks'] = 30
+                    parameters['valley_height']  = 0.4
+                    parameters['distance_valleys'] = 40
+                    parameters['min_distance_between_valleys'] = 45
+
                 
         elif self.stream_name in ("Right Foot", "Left Foot"): # Method F1 
             if fast_walking:
@@ -724,35 +735,27 @@ class IMUGaitFSM(QObject):
         return valley_timestamp
 
     def _adaptive_update_params(self) -> None:
-        """Adapt temporal peak-detection parameters from measured inter-HS cadence.
+        """Adapt peak-detection parameters from measured inter-HS cadence and peak heights.
 
-        This method is called after every Heel Strike detection.  It uses the
-        **median** of the last 5 inter-HS intervals to estimate the current step
-        period, then rescales the sample-space distance parameters accordingly.
+        Called after every Heel Strike detection. Updates both temporal parameters
+        (distance, min_distance) and amplitude thresholds (peak_threshold, prominence)
+        so the FSM stays accurate regardless of the manually-entered walking speed.
 
-        Design decisions (robustness vs. noise)
-        ----------------------------------------
-        * **Median over last 5 intervals** — one bad/missed step does not move the
-          estimate; mean would be pulled by outliers.
-        * **Warm-up gate (N_MIN = 4 HS)** — the FSM must have seen at least 4 heel
-          strikes (= 3 complete inter-HS intervals) before any adaptation occurs.
-          During warm-up the initial speed-based parameters remain in effect.
-        * **15 % hysteresis** — parameters are only updated when the new step-period
-          estimate differs from the current ``self.distance`` (converted back to
-          seconds) by more than 15 %.  This prevents oscillating micro-updates on
-          every step.
-        * **Hard bounds** — all new values are clamped between conservative minima
-          and maxima so a corrupted timestamp can never push the FSM into an
-          implausible regime.
-        * **Only temporal parameters are adapted** — amplitude thresholds
-          (``peak_threshold``, ``prominence``) are NOT touched because peak
-          amplitude in the gyroscope signal varies with sensor placement and
-          walking style, not just cadence.  Changing them online risks missing
-          events entirely.
+        Temporal adaptation
+        -------------------
+        Uses median of last 5 inter-HS intervals to estimate step period, then
+        rescales sample-space distance parameters.  4-step warm-up, 15% hysteresis.
+
+        Amplitude adaptation  (NEW)
+        -------------------
+        Uses the median height of the last 8 confirmed HS peaks.  The new threshold
+        is set to 40% of that median (generous margin to not miss valid peaks) and
+        the prominence to 30%.  A 20% hysteresis prevents oscillation.
+        Hard lower bounds ensure we never set thresholds so low that noise triggers.
         """
         N_MIN         = 4      # warm-up: need at least this many HS events
         N_WINDOW      = 5      # rolling window: last N inter-HS intervals
-        UPDATE_THR    = 0.15   # relative change required to trigger an update
+        UPDATE_THR    = 0.15   # relative change required to trigger temporal update
         SR_NOMINAL    = 100.0  # Xsens Dot nominal sample rate (Hz)
 
         if self.heel_strike_peaks_timestamps.size < N_MIN:
@@ -768,7 +771,6 @@ class IMUGaitFSM(QObject):
         step_period_s = float(np.median(intervals))
 
         # Sanity gate: reject obviously wrong values
-        # (normal gait: 0.4 s – 2.5 s; outside this range assume noise/artifact)
         if not (0.4 <= step_period_s <= 2.5):
             return
 
@@ -776,34 +778,52 @@ class IMUGaitFSM(QObject):
         if len(self.timestamps) >= 50:
             ts_list = list(self.timestamps)
             sr = (len(ts_list) - 1) / (ts_list[-1] - ts_list[0])
-            sr = float(np.clip(sr, 50.0, 200.0))   # clamp to sane IMU range
+            sr = float(np.clip(sr, 50.0, 200.0))
         else:
             sr = SR_NOMINAL
 
         step_period_samples = step_period_s * sr
 
         # ── 3. Compute new temporal parameters ───────────────────────────────
-        #   distance               ≈ 20 % of step period  (min gap between peaks)
-        #   min_distance           ≈ 30 % of step period
-        #   distance_valleys       ≈ 25 % of step period
-        #   min_distance_valleys   ≈ 35 % of step period
         new_dist     = int(np.clip(step_period_samples * 0.20, 10,  200))
         new_min_dist = int(np.clip(step_period_samples * 0.30, 15,  300))
         new_dist_v   = int(np.clip(step_period_samples * 0.25, 20,  200))
         new_min_v    = int(np.clip(step_period_samples * 0.35, 30,  300))
 
-        # ── 4. Hysteresis check — only update if change is significant ────────
+        # ── 4. Hysteresis check for temporal parameters ───────────────────────
         current_dist = self.distance
         if current_dist > 0:
             relative_change = abs(new_dist - current_dist) / current_dist
-            if relative_change < UPDATE_THR:
-                return  # change too small — skip to avoid oscillation
+            if relative_change >= UPDATE_THR:
+                # Apply temporal parameters
+                self.distance                    = new_dist
+                self.min_distance_between_peaks  = new_min_dist
+                self.distance_valleys            = new_dist_v
+                self.min_distance_between_valleys = new_min_v
 
-        # ── 5. Apply new parameters ───────────────────────────────────────────
-        self.distance                   = new_dist
-        self.min_distance_between_peaks = new_min_dist
-        self.distance_valleys           = new_dist_v
-        self.min_distance_between_valleys = new_min_v
+        # ── 5. Amplitude adaptation from confirmed HS peak heights ────────────
+        N_AMP_WINDOW  = 8    # last N confirmed HS peaks to compute median
+        AMP_UPDATE_THR = 0.20  # 20 % hysteresis for amplitude
+        # Hard lower bounds prevent noise from becoming valid peaks
+        MIN_THRESHOLD  = 0.08
+        MIN_PROMINENCE = 0.06
+
+        if self.height_heel_strike.size >= N_AMP_WINDOW:
+            recent_heights = self.height_heel_strike[-N_AMP_WINDOW:]
+            median_height  = float(np.median(recent_heights))
+
+            if median_height > 0:
+                # New threshold = 40% of median HS peak height
+                new_threshold  = float(np.clip(median_height * 0.40, MIN_THRESHOLD, 5.0))
+                # New prominence = 30% of median HS peak height
+                new_prominence = float(np.clip(median_height * 0.30, MIN_PROMINENCE, 4.0))
+
+                # Apply only if change is significant (hysteresis)
+                if self.peak_threshold > 0:
+                    rel_thr = abs(new_threshold - self.peak_threshold) / self.peak_threshold
+                    if rel_thr >= AMP_UPDATE_THR:
+                        self.peak_threshold = new_threshold
+                        self.prominence     = new_prominence
 
 
 class IMUGaitFSM_2(QObject):
@@ -1393,18 +1413,12 @@ class IMUGaitFSM_2(QObject):
         self._adaptive_update_params()
 
     def _adaptive_update_params(self) -> None:
-        """Adapt temporal parameters from measured inter-HS cadence (FSM_2 variant).
+        """Adapt temporal and amplitude parameters from measured inter-HS cadence (FSM_2).
 
-        IMUGaitFSM_2 uses a different parameter set (TO_threshold, HS_threshold,
-        min_event_distance, min_TO_HS_distance) compared to IMUGaitFSM.  Of these,
-        only the **temporal** ones (min_event_distance, min_TO_HS_distance,
-        distance_valleys, min_distance_between_valleys) are adapted.  The
-        amplitude thresholds TO_threshold and HS_threshold are NOT changed
-        because they depend on sensor placement and walking style, not just
-        cadence.
-
-        The adaptation logic is identical to IMUGaitFSM._adaptive_update_params:
-        median of last 5 inter-HS intervals, 4-step warm-up, 15 % hysteresis.
+        Temporal (min_event_distance, min_TO_HS_distance, valley params):
+          median of last 5 inter-HS intervals, 4-step warm-up, 15% hysteresis.
+        Amplitude (HS_threshold, TO_threshold):
+          median of last 8 confirmed HS peak heights, 20% hysteresis.
         """
         N_MIN         = 4
         N_WINDOW      = 5
@@ -1434,22 +1448,35 @@ class IMUGaitFSM_2(QObject):
 
         step_period_samples = step_period_s * sr
 
-        # Temporal parameters only
-        new_min_event       = float(np.clip(step_period_s * 0.45, 0.3,  3.0))  # seconds
-        new_min_to_hs       = float(np.clip(step_period_s * 0.30, 0.2,  2.5))  # seconds
-        new_dist_v          = int(np.clip(step_period_samples * 0.25, 20, 200))
-        new_min_v           = int(np.clip(step_period_samples * 0.35, 30, 300))
+        # ── Temporal parameters ───────────────────────────────────────────────
+        new_min_event = float(np.clip(step_period_s * 0.45, 0.3, 3.0))
+        new_min_to_hs = float(np.clip(step_period_s * 0.30, 0.2, 2.5))
+        new_dist_v    = int(np.clip(step_period_samples * 0.25, 20, 200))
+        new_min_v     = int(np.clip(step_period_samples * 0.35, 30, 300))
 
-        # Hysteresis: check relative change in min_event_distance
         if self.min_event_distance > 0:
             rel_change = abs(new_min_event - self.min_event_distance) / self.min_event_distance
-            if rel_change < UPDATE_THR:
-                return
+            if rel_change >= UPDATE_THR:
+                self.min_event_distance           = new_min_event
+                self.min_TO_HS_distance           = new_min_to_hs
+                self.distance_valleys             = new_dist_v
+                self.min_distance_between_valleys = new_min_v
 
-        self.min_event_distance         = new_min_event
-        self.min_TO_HS_distance         = new_min_to_hs
-        self.distance_valleys           = new_dist_v
-        self.min_distance_between_valleys = new_min_v
+        # ── Amplitude adaptation from confirmed HS peak heights ───────────────
+        N_AMP_WINDOW   = 8
+        AMP_UPDATE_THR = 0.20
+        MIN_THRESHOLD  = 0.08
+
+        if self.height_heel_strike.size >= N_AMP_WINDOW:
+            median_height = float(np.median(self.height_heel_strike[-N_AMP_WINDOW:]))
+            if median_height > 0:
+                new_hs_thr = float(np.clip(median_height * 0.40, MIN_THRESHOLD, 5.0))
+                new_to_thr = float(np.clip(median_height * 0.50, MIN_THRESHOLD, 5.0))
+                if self.HS_threshold > 0:
+                    rel_thr = abs(new_hs_thr - self.HS_threshold) / self.HS_threshold
+                    if rel_thr >= AMP_UPDATE_THR:
+                        self.HS_threshold = new_hs_thr
+                        self.TO_threshold = new_to_thr
 
     def __record_toe_off_peak(self, peak_timestamp: float) -> None:
         """Record the time of the detected and classified toe off peak."""

@@ -28,6 +28,8 @@ class AngleCalibrator(QObject):
     error_signal = Signal(str)
     # Carries HTML-formatted diagnostic lines for display in the status box
     diagnostic_signal = Signal(str)
+    # Emitted once when calibration completes — HTML banner with offset values
+    calibration_done_signal = Signal(str)
 
     def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None):
         super().__init__(parent)
@@ -137,16 +139,35 @@ class AngleCalibrator(QObject):
         # Disable toggles while calibrating
         self.__set_checkboxes_enabled(False)
         self.calibration_step = CalibrationStep.COLLECT_DATA
-        self.message_signal.emit("Calibrating... Please stand still in neutral position.")
+        self.diagnostic_signal.emit(
+            '<p style="color:#f39c12; font-weight:bold;">'
+            '&#9203; Calibrating&hellip; Please stand still in neutral position.</p>'
+        )
         QCoreApplication.processEvents()  # let the UI show the message immediately
 
         # Run the functional calibration (reads current pose as offset)
         self.__functional_calibration()
 
-        # Re-enable toggles and report
+        # Re-enable toggles
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
-        self.message_signal.emit("✅  Offset calibration completed successfully.")
+
+        # Build a clear success banner with the actual offset values
+        kl, kr = self.left_angle_offset, self.right_angle_offset
+        al, ar = self.left_ankle_offset, self.right_ankle_offset
+        banner = (
+            '<hr/>'
+            '<p style="color:#27ae60; font-size:13px; font-weight:bold;">'
+            '&#10003;&#10003; OFFSET CALIBRATION COMPLETED SUCCESSFULLY &#10003;&#10003;</p>'
+            '<table style="color:#ecf0f1; font-family:monospace;">'
+            f'<tr><td>Knee &nbsp;Left&nbsp;</td><td><b>{kl:+.2f}&deg;</b></td></tr>'
+            f'<tr><td>Knee &nbsp;Right</td><td><b>{kr:+.2f}&deg;</b></td></tr>'
+            f'<tr><td>Ankle Left&nbsp;</td><td><b>{al:+.2f}&deg;</b></td></tr>'
+            f'<tr><td>Ankle Right</td><td><b>{ar:+.2f}&deg;</b></td></tr>'
+            '</table><hr/>'
+        )
+        self.calibration_done_signal.emit(banner)
+
 
     def get_offset(self) -> tuple[float, float]:
         """Return the knee angle offsets for both legs.
@@ -600,7 +621,9 @@ class AngleCalibrator(QObject):
                 q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
                 q_foot = self.__get_latest_quaternion_nonblocking(foot_inlet)
                 if q_shank is not None and q_foot is not None:
-                    return ROM.functional_calibration(q_shank, q_foot)
+                    # Use ankle-specific signed calibration (Z-axis projection)
+                    # instead of the knee method which returns unsigned [0°,180°]
+                    return ROM.ankle_functional_calibration(q_shank, q_foot)
                 QCoreApplication.processEvents()
             return None
 
