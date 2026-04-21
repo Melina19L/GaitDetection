@@ -6527,6 +6527,28 @@ class SetupMainWindow:
 
         self.angle_calibrator.axis_diagnostic_signal.connect(_show_axis_diagnostic)
 
+        # Live offset update: if a test is currently running, push new offsets
+        # immediately to the running stimulation object so they take effect
+        # without restarting the test.
+        def _push_live_offsets(_html: str = "") -> None:
+            try:
+                stim = getattr(self.experiment_handler, "stimulator", None)
+            except AttributeError:
+                return
+            if stim is None:
+                return
+            try:
+                kl, kr = self.angle_calibrator.get_offset()
+                al, ar = self.angle_calibrator.get_ankle_offset()
+                stim.update_offsets(kl, kr, al, ar)
+                self.imu_status_box.append(
+                    '<span style="color:#2ecc71">✔ Offsets updated live in running test.</span>'
+                )
+            except Exception as e:
+                print(f"[live offset update] {e}")
+
+        self.angle_calibrator.calibration_done_signal.connect(_push_live_offsets)
+
         # ============================================================
         # POPULATE LAYOUT
         # ============================================================

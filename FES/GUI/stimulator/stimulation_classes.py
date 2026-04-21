@@ -922,10 +922,10 @@ class StimulationIMUs(StimulationBasic):
         self._chosen_step_fsm = {"left": None, "right": None}
         self._wire_preferred_step_signals()
 
-        self.left_knee_rom = ROM(kwargs.get("offset_left", 0.0), kwargs.get("scale_left", 1.0))
-        self.right_knee_rom = ROM(kwargs.get("offset_right", 0.0), kwargs.get("scale_right", 1.0))
-        self.left_ankle_rom = ROM(kwargs.get("offset_left_ankle", 0.0), kwargs.get("scale_left", 1.0))
-        self.right_ankle_rom = ROM(kwargs.get("offset_right_ankle", 0.0), kwargs.get("scale_right", 1.0))
+        self.left_knee_rom  = ROM(kwargs.get("offset_left",        0.0), kwargs.get("scale_left",  1.0))
+        self.right_knee_rom = ROM(kwargs.get("offset_right",       0.0), kwargs.get("scale_right", 1.0))
+        self.left_ankle_rom = ROM(kwargs.get("offset_left_ankle",  0.0), kwargs.get("scale_left",  1.0))
+        self.right_ankle_rom= ROM(kwargs.get("offset_right_ankle", 0.0), kwargs.get("scale_right", 1.0))
 
         dt = self.timer.interval() / 1000.0  # Convert milliseconds to seconds
 
@@ -934,17 +934,31 @@ class StimulationIMUs(StimulationBasic):
             kp=kwargs["left_knee_pi_params"].get("kp", 0.1),
             ki=kwargs["left_knee_pi_params"].get("ki", 0.01),
             dt=dt,
-            target_extension=kwargs.get("left_knee_angle_range", [10, 60])[0],  # Default to 10 degrees
-            target_flexion=kwargs.get("left_knee_angle_range", [10, 60])[1],  # Default to 60 degrees
+            target_extension=kwargs.get("left_knee_angle_range", [10, 60])[0],
+            target_flexion=kwargs.get("left_knee_angle_range", [10, 60])[1],
         )
         self.right_pi_controller = PIController(
             kp=kwargs["right_knee_pi_params"].get("kp", 0.1),
             ki=kwargs["right_knee_pi_params"].get("ki", 0.01),
             dt=dt,
-            target_extension=kwargs.get("right_knee_angle_range", [10, 60])[0],  # Default to 10 degrees
-            target_flexion=kwargs.get("right_knee_angle_range", [10, 60])[1],  # Default to 60 degrees
+            target_extension=kwargs.get("right_knee_angle_range", [10, 60])[0],
+            target_flexion=kwargs.get("right_knee_angle_range", [10, 60])[1],
         )
-    
+
+    def update_offsets(self,
+                       knee_left:   float, knee_right:   float,
+                       ankle_left:  float, ankle_right:  float) -> None:
+        """Hot-update the ROM calibration offsets while the test is running.
+
+        Called whenever 'Calibrate Offsets' is pressed (even mid-test) so that
+        the ROM objects immediately reflect the new neutral-pose offset without
+        needing to restart the test.
+        """
+        self.left_knee_rom.set_offset(knee_left)
+        self.right_knee_rom.set_offset(knee_right)
+        self.left_ankle_rom.set_offset(ankle_left)
+        self.right_ankle_rom.set_offset(ankle_right)
+
     def _iter_pairs(self):
         """
         Yield tuples: (placement, method_suffix, right_fsm, left_fsm)
