@@ -61,38 +61,41 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
 
 
 def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
-    """Compute ankle dorsiflexion/plantarflexion angle with correct axis and sign.
+    """Compute raw signed ankle angle using empirically confirmed sensor axes.
 
-    Axes confirmed empirically by sensor_axes_diagnostic on 2026-04-21:
-      - Shank-X: vertical axis along the tibia (global ≈ [0, 0, +1])
-      - Foot-Y:  longitudinal axis along the foot, most horizontal (global ≈ [+0.98, +0.15, -0.11])
+    Axes confirmed by sensor_axes_diagnostic on 2026-04-21:
+      - Shank-X: most vertical axis (along tibia, global ≈ [0, 0, +1])
+      - Foot-Y:  most horizontal axis (along foot toward toes, global ≈ [+0.98, +0.15, -0.11])
 
-    The ankle angle is the deviation of (shank_X · foot_Y) from the neutral 90°:
-      - Plantarflexion (toes DOWN): foot_Y tilts downward → foot_Y[2] becomes negative → +angle
-      - Dorsiflexion   (toes UP):   foot_Y tilts upward   → foot_Y[2] becomes positive → −angle
+    Returns the SIGNED angle between these two axes in the global frame.
+    The neutral-pose zeroing is handled externally by subtracting the calibration
+    offset stored in ROM.offset (populated by ankle_functional_calibration).
 
-    At rest (standing, after calibration) this returns ~0°.
-    Expected biomechanical range: plantarflexion +5°..+20°, dorsiflexion −5°..−15°.
+    Sign convention:
+      - foot_y_global[2] < 0 → toes DOWN → plantarflexion → positive sign
+      - foot_y_global[2] > 0 → toes UP   → dorsiflexion   → negative sign
+
+    Do NOT subtract any fixed constant here — the actual neutral angle between
+    Shank-X and Foot-Y depends on sensor mounting and is measured at calibration.
     """
     xAxis = np.array([1.0, 0.0, 0.0])
     yAxis = np.array([0.0, 1.0, 0.0])
 
-    # Shank longitudinal axis (up the tibia) in global frame
+    # Longitudinal axes in global frame
     shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
-    # Foot longitudinal axis (toward toes) in global frame
     foot_y_global  = rotate_vector_by_quaternion(yAxis, q_foot)
 
     # Unsigned angle between the two axes
     angle_rad = angle_between_vectors(shank_x_global, foot_y_global)
-    angle_deg = np.degrees(angle_rad)  # ~90° at neutral stance
+    angle_deg = np.degrees(angle_rad)
 
-    # Sign convention:
-    #   foot_y_global[2] < 0 → toes tilted DOWN  → plantarflexion → positive
-    #   foot_y_global[2] > 0 → toes tilted UP    → dorsiflexion   → negative
+    # Signed based on vertical component of Foot-Y:
+    #   toes DOWN (plantarflexion) → foot_y[2] < 0 → positive output
+    #   toes UP   (dorsiflexion)   → foot_y[2] > 0 → negative output
     sign = -np.sign(foot_y_global[2]) if abs(foot_y_global[2]) > 0.01 else 1.0
 
-    # Return deviation from 90° rather than raw angle, so neutral = 0
-    return sign * (angle_deg - 90.0)
+    return sign * angle_deg   # raw signed angle; offset subtracted in ROM.get_ankle_angle
+
 
 
 def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
