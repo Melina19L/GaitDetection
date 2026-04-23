@@ -63,39 +63,41 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
 def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
     """Signed ankle dorsiflexion/plantarflexion angle in degrees.
 
-    Uses the empirically confirmed sensor axes (sensor_axes_diagnostic, 2026-04-21):
-      - Shank-X: longitudinal tibial axis, most vertical  (global ≈ [0, 0, +1])
-      - Foot-Y:  longitudinal foot axis, most horizontal  (global ≈ [+0.98, +0.15, -0.11])
+    Sensor axes confirmed by sensor_axes_diagnostic on 2026-04-23:
+      - Shank-X  global ≈ [−0.05, +0.03, +1.00]  → vertical (along tibia)  ✓
+      - Foot-X   global ≈ [+0.78, +0.25, +0.57]  → LONGITUDINAL (toward toes) ✓
+      - Foot-Y   global ≈ [−0.21, +0.97, −0.15]  → medio-lateral (Gy≈1 = sideways) ✗
 
-    In quiet standing these two axes are ~90° apart.  Subtracting 90° centres
-    the output on 0° without any calibration, and the small residual (few degrees)
-    is corrected by the ROM offset set at calibration time.
+    Why Foot-X (not Foot-Y):
+      Foot-Y is the medio-lateral (inversion/eversion) axis.  It stays
+      approximately perpendicular to the sagittal plane during normal gait and
+      therefore barely changes its angle with Shank-X during dorsi/plantarflexion.
+      Foot-X is the longitudinal axis of the foot (pointing toward the toes); as
+      the foot rotates at the ankle, this axis changes its angle with the tibial
+      axis Shank-X, correctly encoding the flexion angle.
 
-    Sign convention (physiological):
-      +  plantarflexion  (toes DOWN, push-off)     foot_y_global[2] < 0
-      -  dorsiflexion    (toes UP,  loading/swing)  foot_y_global[2] > 0
+    Measurement principle:
+      angle(Shank-X_global, Foot-X_global) at neutral ≈ 55-60° (sensor-specific).
+      Subtracting the calibration offset (measured at neutral) centres the output
+      on 0°; larger angle = plantarflexion (+°), smaller angle = dorsiflexion (−°).
+
+    No sign trick required: plantarflexion moves Foot-X away from vertical
+    (angle increases above offset → +), dorsiflexion moves it closer to vertical
+    (angle decreases below offset → −).
 
     Expected range during normal gait:
       Plantarflexion (toe-off)  : +5° to +20°
       Neutral (quiet standing)  :  ~0°
-      Dorsiflexion (mid-stance) : -5° to -15°
+      Dorsiflexion (mid-stance) : −5° to −15°
     """
     xAxis = np.array([1.0, 0.0, 0.0])
-    yAxis = np.array([0.0, 1.0, 0.0])
 
     shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
-    foot_y_global  = rotate_vector_by_quaternion(yAxis, q_foot)
+    foot_x_global  = rotate_vector_by_quaternion(xAxis, q_foot)  # longitudinal foot axis
 
-    # Unsigned angle between the two axes (~90° at neutral)
-    angle_rad = angle_between_vectors(shank_x_global, foot_y_global)
-    angle_deg = np.degrees(angle_rad)
-
-    # Sign: toes DOWN → foot_y[2] < 0 → plantarflexion → positive
-    #        toes UP  → foot_y[2] > 0 → dorsiflexion   → negative
-    sign = -np.sign(foot_y_global[2]) if abs(foot_y_global[2]) > 0.01 else 1.0
-
-    # Subtract 90° so that neutral standing → ~0°
-    return float(sign * (angle_deg - 90.0))
+    # Unsigned angle; offset subtraction in ROM.get_ankle_angle supplies the sign
+    angle_rad = angle_between_vectors(shank_x_global, foot_x_global)
+    return float(np.degrees(angle_rad))
 
 
 def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
