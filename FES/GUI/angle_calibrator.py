@@ -659,10 +659,18 @@ class AngleCalibrator(QObject):
                 # Store reference quaternions for the stable relative-quat path
                 self.left_ankle_qshank_ref = q_sh_l
                 self.left_ankle_qfoot_ref  = q_ft_l
-                self.message_signal.emit("Left ankle offset calibrated.")
+                print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}°  q_shank={q_sh_l}  q_foot={q_ft_l}")
+                self.message_signal.emit("Left ankle offset calibrated.  ✔ Reference quaternions saved.")
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
                 self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
+            else:
+                # foot_inlet is None — ankle calibration cannot proceed
+                self.message_signal.emit(
+                    "⚠️ Left ankle: foot sensor not connected to calibrator. "
+                    "Connect the Left Foot stream before calibrating."
+                )
+                print("[CalibAnkle LEFT] left_foot_inlet is None — ankle calibration skipped.")
 
         if self.right_checkbox.isChecked():
             # Knee calibration
@@ -677,10 +685,18 @@ class AngleCalibrator(QObject):
                 # Store reference quaternions for the stable relative-quat path
                 self.right_ankle_qshank_ref = q_sh_r
                 self.right_ankle_qfoot_ref  = q_ft_r
-                self.message_signal.emit("Right ankle offset calibrated.")
+                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°  q_shank={q_sh_r}  q_foot={q_ft_r}")
+                self.message_signal.emit("Right ankle offset calibrated.  ✔ Reference quaternions saved.")
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
                 self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
+            else:
+                # foot_inlet is None — ankle calibration cannot proceed
+                self.message_signal.emit(
+                    "⚠️ Right ankle: foot sensor not connected to calibrator. "
+                    "Connect the Right Foot stream before calibrating."
+                )
+                print("[CalibAnkle RIGHT] right_foot_inlet is None — ankle calibration skipped.")
 
         # Emit single combined HTML → dedicated popup window (axis_diagnostic_signal)
         if diag_sections:

@@ -60,79 +60,42 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
     return angleDeg
 
 
-def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray,
-                                    q_shank_ref: np.ndarray = None,
-                                    q_foot_ref:  np.ndarray = None) -> float:
+def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
     """Signed ankle dorsiflexion/plantarflexion angle in degrees.
 
-    Strategy (stable relative-quaternion approach):
-    ─────────────────────────────────────────────────────────────────────
-    Instead of projecting axes into the global frame (which suffers from
-    sign-flip ambiguity when foot_y_global[2] ≈ 0), we compute the *change*
-    in relative orientation between shank and foot since the neutral calibration
-    pose:
+    Uses the empirically confirmed sensor axes (sensor_axes_diagnostic, 2026-04-21):
+      - Shank-X: longitudinal tibial axis, most vertical  (global ≈ [0, 0, +1])
+      - Foot-Y:  longitudinal foot axis, most horizontal  (global ≈ [+0.98, +0.15, -0.11])
 
-        q_rel_neutral = q_shank_ref^{-1} ⊗ q_foot_ref   (at calibration)
-        q_rel_now     = q_shank^{-1}     ⊗ q_foot        (at runtime)
-        q_delta       = q_rel_neutral^{-1} ⊗ q_rel_now   (change)
+    In quiet standing these two axes are ~90° apart.  Subtracting 90° centres
+    the output on 0° without any calibration, and the small residual (few degrees)
+    is corrected by the ROM offset set at calibration time.
 
-    The ankle angle is extracted from q_delta along the medio-lateral (Y)
-    axis — the axis around which dorsi/plantarflexion occurs at the ankle.
-    The sign is positive for plantarflexion (toes down) and negative for
-    dorsiflexion (toes up), based on the rotation about the Y-axis.
+    Sign convention (physiological):
+      +  plantarflexion  (toes DOWN, push-off)     foot_y_global[2] < 0
+      -  dorsiflexion    (toes UP,  loading/swing)  foot_y_global[2] > 0
 
-    Fallback (no reference quaternions):
-    ─────────────────────────────────────────────────────────────────────
-    When called without reference quaternions (e.g. during calibration itself
-    to compute the offset value), falls back to the unsigned angle between
-    Shank-X and Foot-Y in the global frame.  This value is stored as the
-    ROM offset and subtracted from every runtime call, so the final output
-    is always zeroed at the neutral pose even in the fallback path.
-
-    Expected output range:
-        Plantarflexion (toe-off)  : +5° to +20°
-        Neutral (quiet standing)  : ~0°
-        Dorsiflexion (mid-stance) : -5° to -15°
+    Expected range during normal gait:
+      Plantarflexion (toe-off)  : +5° to +20°
+      Neutral (quiet standing)  :  ~0°
+      Dorsiflexion (mid-stance) : -5° to -15°
     """
-    q_shank = normalize(np.asarray(q_shank, dtype=float))
-    q_foot  = normalize(np.asarray(q_foot,  dtype=float))
+    xAxis = np.array([1.0, 0.0, 0.0])
+    yAxis = np.array([0.0, 1.0, 0.0])
 
-    if q_shank_ref is not None and q_foot_ref is not None:
-        # ── STABLE RELATIVE-QUATERNION PATH ───────────────────────────────────
-        q_shank_ref = normalize(np.asarray(q_shank_ref, dtype=float))
-        q_foot_ref  = normalize(np.asarray(q_foot_ref,  dtype=float))
+    shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
+    foot_y_global  = rotate_vector_by_quaternion(yAxis, q_foot)
 
-        # Relative orientation at neutral
-        q_rel_neutral = quat_mul(quat_conjugate(q_shank_ref), q_foot_ref)
-        q_rel_neutral = normalize(q_rel_neutral)
+    # Unsigned angle between the two axes (~90° at neutral)
+    angle_rad = angle_between_vectors(shank_x_global, foot_y_global)
+    angle_deg = np.degrees(angle_rad)
 
-        # Relative orientation now
-        q_rel_now = quat_mul(quat_conjugate(q_shank), q_foot)
-        q_rel_now = normalize(q_rel_now)
+    # Sign: toes DOWN → foot_y[2] < 0 → plantarflexion → positive
+    #        toes UP  → foot_y[2] > 0 → dorsiflexion   → negative
+    sign = -np.sign(foot_y_global[2]) if abs(foot_y_global[2]) > 0.01 else 1.0
 
-        # Change in relative orientation since calibration
-        q_delta = quat_mul(quat_conjugate(q_rel_neutral), q_rel_now)
-        q_delta = normalize(q_delta)
-
-        # Extract rotation around the medio-lateral (Y) axis of the ankle joint
-        # q_delta = [w, x, y, z]; rotation about Y: angle ≈ 2·arcsin(y)
-        # Plantarflexion → foot rotates "downward" relative to shank → +angle
-        y_component = np.clip(q_delta[2], -1.0, 1.0)   # q_delta[2] = y part
-        angle_deg   = np.degrees(2.0 * np.arcsin(y_component))
-
-        return float(angle_deg)
-
-    else:
-        # ── FALLBACK PATH (used only at calibration to produce the ROM offset) ─
-        xAxis = np.array([1.0, 0.0, 0.0])
-        yAxis = np.array([0.0, 1.0, 0.0])
-        shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
-        foot_y_global  = rotate_vector_by_quaternion(yAxis, q_foot)
-        angle_rad = angle_between_vectors(shank_x_global, foot_y_global)
-        angle_deg = np.degrees(angle_rad)
-        sign = -np.sign(foot_y_global[2]) if abs(foot_y_global[2]) > 0.01 else 1.0
-        return float(sign * angle_deg)
-
+    # Subtract 90° so that neutral standing → ~0°
+    return float(sign * (angle_deg - 90.0))
 
 
 def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
@@ -264,10 +227,12 @@ class ROM:
 
     @staticmethod
     def ankle_functional_calibration(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
-        """Return the fallback raw signed angle (kept for backward compatibility).
+        """Return the ankle angle at neutral pose (used as calibration offset).
 
-        Prefer calling set_ankle_reference() with the same quaternions so that
-        get_ankle_angle() uses the stable relative-quaternion path.
+        With the built-in −90° correction in ankle_angle_between_quaternions,
+        this returns only the small sensor-specific residual from perfect
+        perpendicularity (typically ±5°).  Subtracting this small offset from
+        every subsequent measurement centres the signal on 0° at neutral.
         """
         return ankle_angle_between_quaternions(q_shank, q_foot)
 
@@ -279,17 +244,11 @@ class ROM:
     def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:
         """Compute, store and return the calibrated ankle angle.
 
-        Uses the stable relative-quaternion path when reference quaternions have
-        been set via set_ankle_reference(); otherwise falls back to the
-        offset-subtraction approach.
+        Uses ankle_angle_between_quaternions (which returns ~0° at neutral
+        standing thanks to the built-in −90° correction) minus the small
+        residual offset stored at calibration time.
         """
-        q_sh_ref = getattr(self, 'q_shank_ref', None)
-        q_ft_ref = getattr(self, 'q_foot_ref',  None)
-        angle = ankle_angle_between_quaternions(q_shank, q_foot,
-                                                q_shank_ref=q_sh_ref,
-                                                q_foot_ref=q_ft_ref)
-        if q_sh_ref is None:          # fallback path: still subtract stored offset
-            angle -= self.offset
+        angle = ankle_angle_between_quaternions(q_shank, q_foot) - self.offset
         angle *= self.scale
         self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
         return angle
