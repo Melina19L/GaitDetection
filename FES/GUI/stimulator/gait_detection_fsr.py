@@ -82,6 +82,9 @@ class FSRGaitFSM(QObject):
             self.data_mf.extend(sample[1] for sample in samples)
             self.data_bf.extend(sample[2] for sample in samples)
             self.timestamps.extend(timestamps)
+            
+            # Print streaming FSR data in the terminal (Front, Middle, Back foot)
+            print(f"FSR Stream -> Front: {self.data_ff[-1]:.2f}, Middle: {self.data_mf[-1]:.2f}, Back: {self.data_bf[-1]:.2f}")
 
 
             # For offline analysis, store the data in numpy arrays
@@ -328,6 +331,9 @@ class FSRGaitFSM_2(QObject):
             self.data_mf.extend(sample[1] for sample in samples)
             self.data_bf.extend(sample[2] for sample in samples)
             self.timestamps.extend(timestamps)
+            
+            # Print streaming FSR data in the terminal (Front, Middle, Back foot)
+            print(f"FSR Stream -> Front: {self.data_ff[-1]:.2f}, Middle: {self.data_mf[-1]:.2f}, Back: {self.data_bf[-1]:.2f}")
             
             
 
