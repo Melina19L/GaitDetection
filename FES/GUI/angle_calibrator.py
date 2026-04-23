@@ -150,6 +150,20 @@ class AngleCalibrator(QObject):
         # Run the functional calibration (reads current pose as offset)
         self.__functional_calibration()
 
+        # IMPORTANT: Clear data buffers here!
+        # The background timer started logging data the moment the IMUs were toggled ON,
+        # using an offset of 0.0 (since calibration had not happened yet).
+        # We must discard this pre-calibration "garbage" data so it doesn't show
+        # up at the start of the plot or in the saved .pkl file.
+        self.left_angle_data = np.array([])
+        self.right_angle_data = np.array([])
+        self.left_ankle_data = np.array([])
+        self.right_ankle_data = np.array([])
+        self.left_angle_timestamps = np.array([])
+        self.right_angle_timestamps = np.array([])
+        self.left_ankle_timestamps = np.array([])
+        self.right_ankle_timestamps = np.array([])
+
         # Re-enable toggles
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
