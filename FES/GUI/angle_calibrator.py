@@ -1176,7 +1176,11 @@ class LSLStreamResolver(QObject):
         stream_shank = resolve_byprop("name", "Left Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Left Thigh", timeout=TIMEOUT)
         stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
+        
+        # Try 'Left Trunk', fallback to 'Custom 1'
         stream_trunk = resolve_byprop("name", "Left Trunk", timeout=TIMEOUT)
+        if not stream_trunk:
+            stream_trunk = resolve_byprop("name", "Custom 1", timeout=TIMEOUT)
         
         shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
         thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
@@ -1197,7 +1201,11 @@ class LSLStreamResolver(QObject):
         stream_shank = resolve_byprop("name", "Right Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Right Thigh", timeout=TIMEOUT)
         stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
+        
+        # Try 'Right Trunk', fallback to 'Custom 2'
         stream_trunk = resolve_byprop("name", "Right Trunk", timeout=TIMEOUT)
+        if not stream_trunk:
+            stream_trunk = resolve_byprop("name", "Custom 2", timeout=TIMEOUT)
         
         shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
         thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
