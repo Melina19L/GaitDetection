@@ -33,12 +33,14 @@ class AngleCalibrator(QObject):
     # Emitted with full axis diagnostic — connects to a dedicated popup window
     axis_diagnostic_signal = Signal(str)
 
-    def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None):
+    def __init__(self, left_checkbox: QCheckBox, right_checkbox: QCheckBox, extension_target_left: QSpinBox, extension_target_right: QSpinBox, parent=None, hip_target_left: QSpinBox=None, hip_target_right: QSpinBox=None):
         super().__init__(parent)
         self.left_checkbox = left_checkbox
         self.right_checkbox = right_checkbox
         self.extension_target_left = extension_target_left
         self.extension_target_right = extension_target_right
+        self.hip_target_left = hip_target_left
+        self.hip_target_right = hip_target_right
         self.calibration_step = CalibrationStep.READY
         self.left_shank_inlet = None
         self.right_shank_inlet = None
@@ -46,10 +48,14 @@ class AngleCalibrator(QObject):
         self.right_thigh_inlet = None
         self.left_foot_inlet = None
         self.right_foot_inlet = None
+        self.left_trunk_inlet = None
+        self.right_trunk_inlet = None
         self.left_angle_data = np.array([])
         self.right_angle_data = np.array([])
         self.left_ankle_data = np.array([])
         self.right_ankle_data = np.array([])
+        self.left_hip_data = np.array([])
+        self.right_hip_data = np.array([])
 
         # Timestamps (wall-clock seconds, time.time()) aligned sample-by-sample
         # with the four angle arrays above.  Populated in record_data.
@@ -57,6 +63,8 @@ class AngleCalibrator(QObject):
         self.right_angle_timestamps = np.array([])
         self.left_ankle_timestamps  = np.array([])
         self.right_ankle_timestamps = np.array([])
+        self.left_hip_timestamps  = np.array([])
+        self.right_hip_timestamps = np.array([])
 
         # Session bookkeeping
         self._session_start: float | None = None
@@ -65,6 +73,8 @@ class AngleCalibrator(QObject):
         self.right_angle_offset = 0.0
         self.left_ankle_offset = 0.0
         self.right_ankle_offset = 0.0
+        self.left_hip_offset = 0.0
+        self.right_hip_offset = 0.0
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -76,8 +86,8 @@ class AngleCalibrator(QObject):
         # Each entry is [total_samples_in_window, last_chunk_timestamp]
         self._diag: dict[str, dict] = {
             name: {"count": 0, "last_ts": 0.0, "sync_gap_sum": 0.0, "sync_gap_n": 0}
-            for name in ("left_shank", "left_thigh", "left_foot",
-                          "right_shank", "right_thigh", "right_foot")
+            for name in ("left_shank", "left_thigh", "left_foot", "left_trunk",
+                          "right_shank", "right_thigh", "right_foot", "right_trunk")
         }
 
         # ── Per-inlet accumulation buffers ────────────────────────────────────
@@ -88,8 +98,8 @@ class AngleCalibrator(QObject):
         _BUF = 300
         self._acc = {
             name: deque(maxlen=_BUF)
-            for name in ("left_thigh", "left_shank", "left_foot",
-                          "right_thigh", "right_shank", "right_foot")
+            for name in ("left_thigh", "left_shank", "left_foot", "left_trunk",
+                          "right_thigh", "right_shank", "right_foot", "right_trunk")
         }
 
         # Diagnostic timer — fires every 2 s, reads the counters and emits
@@ -110,7 +120,9 @@ class AngleCalibrator(QObject):
         right_knee = self.right_shank_inlet is not None and self.right_thigh_inlet is not None
         left_ankle = self.left_shank_inlet is not None and self.left_foot_inlet is not None
         right_ankle = self.right_shank_inlet is not None and self.right_foot_inlet is not None
-        return left_knee or right_knee or left_ankle or right_ankle
+        left_hip = self.left_thigh_inlet is not None and self.left_trunk_inlet is not None
+        right_hip = self.right_thigh_inlet is not None and self.right_trunk_inlet is not None
+        return left_knee or right_knee or left_ankle or right_ankle or left_hip or right_hip
 
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
@@ -125,7 +137,7 @@ class AngleCalibrator(QObject):
             self.worker_thread.quit()
             self.worker_thread.wait()
             self.worker_thread.deleteLater()
-        self.message_signal.emit("Angle calibration stopped (knee + ankle).")
+        self.message_signal.emit("Angle calibration stopped (knee + ankle + hip).")
 
     def calibration(self):
         """Single-press calibration: reads current sensor pose as the zero reference."""
@@ -159,10 +171,14 @@ class AngleCalibrator(QObject):
         self.right_angle_data = np.array([])
         self.left_ankle_data = np.array([])
         self.right_ankle_data = np.array([])
+        self.left_hip_data = np.array([])
+        self.right_hip_data = np.array([])
         self.left_angle_timestamps = np.array([])
         self.right_angle_timestamps = np.array([])
         self.left_ankle_timestamps = np.array([])
         self.right_ankle_timestamps = np.array([])
+        self.left_hip_timestamps = np.array([])
+        self.right_hip_timestamps = np.array([])
 
         # Re-enable toggles
         self.calibration_step = CalibrationStep.READY
@@ -252,6 +268,24 @@ class AngleCalibrator(QObject):
         right_ankle = self.right_ankle_data[-1] if self.right_ankle_data.size > 0 else np.array([])
         return left_ankle, right_ankle
 
+    def get_hip_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the hip angle data for both legs.
+
+        :return: Left and right hip angle data
+        :rtype: tuple[np.ndarray, np.ndarray]
+        """
+        return self.left_hip_data, self.right_hip_data
+
+    def get_latest_hip_data(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the latest hip angle data for both legs.
+
+        :return: Latest left and right hip angle data
+        :rtype: tuple[np.ndarray, np.ndarray]
+        """
+        left_hip = self.left_hip_data[-1] if self.left_hip_data.size > 0 else np.array([])
+        right_hip = self.right_hip_data[-1] if self.right_hip_data.size > 0 else np.array([])
+        return left_hip, right_hip
+
     @Slot(bool)
     def handle_left_inlet(self, checked: bool):
         if checked:
@@ -300,9 +334,11 @@ class AngleCalibrator(QObject):
             (self.left_thigh_inlet,  "left_thigh"),
             (self.left_shank_inlet,  "left_shank"),
             (self.left_foot_inlet,   "left_foot"),
+            (self.left_trunk_inlet,  "left_trunk"),
             (self.right_thigh_inlet, "right_thigh"),
             (self.right_shank_inlet, "right_shank"),
             (self.right_foot_inlet,  "right_foot"),
+            (self.right_trunk_inlet, "right_trunk"),
         ):
             if inlet is None:
                 continue
@@ -350,22 +386,54 @@ class AngleCalibrator(QObject):
                         self.left_ankle_timestamps,
                         np.full(len(ankle_angles), now)
                     )
-
-        elif self.left_shank_inlet and self.left_foot_inlet:
-            # No thigh — only ankle
-            l_shank_s, l_foot_s = _drain_pairs(
-                self._acc["left_shank"], self._acc["left_foot"]
-            )
-            ankle_angles = self.__compute_angles_from_data(
-                l_shank_s, [], l_foot_s, [],
-                self.left_ankle_offset, self._diag["left_shank"],
-            )
-            self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
-            if len(ankle_angles):
-                self.left_ankle_timestamps = np.append(
-                    self.left_ankle_timestamps,
-                    np.full(len(ankle_angles), now)
+            
+            # Hip LEFT: re-use the same thigh samples
+            if self.left_trunk_inlet:
+                n_hip = min(len(l_thigh_s), len(self._acc["left_trunk"]))
+                l_trunk_s = [self._acc["left_trunk"].popleft() for _ in range(n_hip)]
+                hip_angles = self.__compute_angles_from_data(
+                    l_trunk_s, [], l_thigh_s[:n_hip], [],
+                    self.left_hip_offset, self._diag["left_trunk"],
                 )
+                self.left_hip_data = np.append(self.left_hip_data, hip_angles)
+                if len(hip_angles):
+                    self.left_hip_timestamps = np.append(
+                        self.left_hip_timestamps,
+                        np.full(len(hip_angles), now)
+                    )
+
+        else:
+            if self.left_shank_inlet and self.left_foot_inlet:
+                # No thigh — only ankle
+                l_shank_s, l_foot_s = _drain_pairs(
+                    self._acc["left_shank"], self._acc["left_foot"]
+                )
+                ankle_angles = self.__compute_angles_from_data(
+                    l_shank_s, [], l_foot_s, [],
+                    self.left_ankle_offset, self._diag["left_shank"],
+                )
+                self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+                if len(ankle_angles):
+                    self.left_ankle_timestamps = np.append(
+                        self.left_ankle_timestamps,
+                        np.full(len(ankle_angles), now)
+                    )
+            
+            if self.left_trunk_inlet and self.left_thigh_inlet:
+                # No shank — only hip
+                l_trunk_s, l_thigh_s = _drain_pairs(
+                    self._acc["left_trunk"], self._acc["left_thigh"]
+                )
+                hip_angles = self.__compute_angles_from_data(
+                    l_trunk_s, [], l_thigh_s, [],
+                    self.left_hip_offset, self._diag["left_trunk"],
+                )
+                self.left_hip_data = np.append(self.left_hip_data, hip_angles)
+                if len(hip_angles):
+                    self.left_hip_timestamps = np.append(
+                        self.left_hip_timestamps,
+                        np.full(len(hip_angles), now)
+                    )
 
         # ── 4. Knee RIGHT: thigh ↔ shank ───────────────────────────────────────
         if self.right_thigh_inlet and self.right_shank_inlet:
@@ -397,22 +465,54 @@ class AngleCalibrator(QObject):
                         self.right_ankle_timestamps,
                         np.full(len(ankle_angles), now)
                     )
-
-        elif self.right_shank_inlet and self.right_foot_inlet:
-            # No thigh — only ankle
-            r_shank_s, r_foot_s = _drain_pairs(
-                self._acc["right_shank"], self._acc["right_foot"]
-            )
-            ankle_angles = self.__compute_angles_from_data(
-                r_shank_s, [], r_foot_s, [],
-                self.right_ankle_offset, self._diag["right_shank"],
-            )
-            self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
-            if len(ankle_angles):
-                self.right_ankle_timestamps = np.append(
-                    self.right_ankle_timestamps,
-                    np.full(len(ankle_angles), now)
+                    
+            # Hip RIGHT: re-use the same thigh samples
+            if self.right_trunk_inlet:
+                n_hip = min(len(r_thigh_s), len(self._acc["right_trunk"]))
+                r_trunk_s = [self._acc["right_trunk"].popleft() for _ in range(n_hip)]
+                hip_angles = self.__compute_angles_from_data(
+                    r_trunk_s, [], r_thigh_s[:n_hip], [],
+                    self.right_hip_offset, self._diag["right_trunk"],
                 )
+                self.right_hip_data = np.append(self.right_hip_data, hip_angles)
+                if len(hip_angles):
+                    self.right_hip_timestamps = np.append(
+                        self.right_hip_timestamps,
+                        np.full(len(hip_angles), now)
+                    )
+
+        else:
+            if self.right_shank_inlet and self.right_foot_inlet:
+                # No thigh — only ankle
+                r_shank_s, r_foot_s = _drain_pairs(
+                    self._acc["right_shank"], self._acc["right_foot"]
+                )
+                ankle_angles = self.__compute_angles_from_data(
+                    r_shank_s, [], r_foot_s, [],
+                    self.right_ankle_offset, self._diag["right_shank"],
+                )
+                self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+                if len(ankle_angles):
+                    self.right_ankle_timestamps = np.append(
+                        self.right_ankle_timestamps,
+                        np.full(len(ankle_angles), now)
+                    )
+            
+            if self.right_trunk_inlet and self.right_thigh_inlet:
+                # No shank — only hip
+                r_trunk_s, r_thigh_s = _drain_pairs(
+                    self._acc["right_trunk"], self._acc["right_thigh"]
+                )
+                hip_angles = self.__compute_angles_from_data(
+                    r_trunk_s, [], r_thigh_s, [],
+                    self.right_hip_offset, self._diag["right_trunk"],
+                )
+                self.right_hip_data = np.append(self.right_hip_data, hip_angles)
+                if len(hip_angles):
+                    self.right_hip_timestamps = np.append(
+                        self.right_hip_timestamps,
+                        np.full(len(hip_angles), now)
+                    )
 
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
@@ -426,6 +526,12 @@ class AngleCalibrator(QObject):
         if self.right_ankle_data.size > MAX_BUFFER:
             self.right_ankle_data       = self.right_ankle_data[-MAX_BUFFER:]
             self.right_ankle_timestamps = self.right_ankle_timestamps[-MAX_BUFFER:]
+        if self.left_hip_data.size > MAX_BUFFER:
+            self.left_hip_data       = self.left_hip_data[-MAX_BUFFER:]
+            self.left_hip_timestamps = self.left_hip_timestamps[-MAX_BUFFER:]
+        if self.right_hip_data.size > MAX_BUFFER:
+            self.right_hip_data       = self.right_hip_data[-MAX_BUFFER:]
+            self.right_hip_timestamps = self.right_hip_timestamps[-MAX_BUFFER:]
 
 
     def save_data(self, path: str) -> bool:
@@ -472,16 +578,22 @@ class AngleCalibrator(QObject):
             "right_knee_angles":   self.right_angle_data.copy(),
             "left_ankle_angles":   self.left_ankle_data.copy(),
             "right_ankle_angles":  self.right_ankle_data.copy(),
+            "left_hip_angles":     self.left_hip_data.copy(),
+            "right_hip_angles":    self.right_hip_data.copy(),
             # ── Timestamps ───────────────────────────────────────────────────
             "left_knee_timestamps":   self.left_angle_timestamps.copy(),
             "right_knee_timestamps":  self.right_angle_timestamps.copy(),
             "left_ankle_timestamps":  self.left_ankle_timestamps.copy(),
             "right_ankle_timestamps": self.right_ankle_timestamps.copy(),
+            "left_hip_timestamps":    self.left_hip_timestamps.copy(),
+            "right_hip_timestamps":   self.right_hip_timestamps.copy(),
             # ── Calibration offsets ──────────────────────────────────────────
             "left_knee_offset":   self.left_angle_offset,
             "right_knee_offset":  self.right_angle_offset,
             "left_ankle_offset":  self.left_ankle_offset,
             "right_ankle_offset": self.right_ankle_offset,
+            "left_hip_offset":    self.left_hip_offset,
+            "right_hip_offset":   self.right_hip_offset,
             # ── Session metadata ─────────────────────────────────────────────
             "session_start_unix": start,
             "session_end_unix":   now,
@@ -516,9 +628,9 @@ class AngleCalibrator(QObject):
         elif self.resolving == SIDE.RIGHT:
             self.right_checkbox.setEnabled(True)
 
-        if inlets[0] is None or inlets[1] is None:
+        if not any(inlets):
             # Connection failed — uncheck the toggle that was trying to connect
-            self.error_signal.emit("Connection failed: sensors not found.")
+            self.error_signal.emit("Connection failed: no sensors found.")
             if self.resolving == SIDE.LEFT:
                 self.left_checkbox.setChecked(False)
             elif self.resolving == SIDE.RIGHT:
@@ -526,32 +638,40 @@ class AngleCalibrator(QObject):
             self.resolving = SIDE.NONE
             return
 
-        # Extract foot inlet (may be None)
-        foot_inlet = inlets[2] if len(inlets) > 2 else None
+        # Extract inlets
+        shank_inlet, thigh_inlet, foot_inlet, trunk_inlet = inlets
 
         if self.resolving == SIDE.LEFT:
             # Store the inlets and start the timer
-            self.left_shank_inlet, self.left_thigh_inlet = inlets[0], inlets[1]
+            self.left_shank_inlet = shank_inlet
+            self.left_thigh_inlet = thigh_inlet
             self.left_foot_inlet = foot_inlet
-            self.message_signal.emit("Left leg streams connected successfully.")
-            if foot_inlet:
-                self.message_signal.emit("Left foot IMU connected (ankle angle enabled).")
-            else:
-                self.message_signal.emit("Left foot IMU not found (ankle angle disabled).")
+            self.left_trunk_inlet = trunk_inlet
+            
+            connected_names = []
+            if shank_inlet: connected_names.append("Shank")
+            if thigh_inlet: connected_names.append("Thigh")
+            if foot_inlet: connected_names.append("Foot")
+            if trunk_inlet: connected_names.append("Trunk")
+            self.message_signal.emit(f"Left leg streams connected: {', '.join(connected_names)}.")
             self.timer.start()
-            self.start_diagnostics()   # start live stream-quality monitor
+            self.start_diagnostics()
 
         elif self.resolving == SIDE.RIGHT:
             # Store the inlets and start the timer
-            self.right_shank_inlet, self.right_thigh_inlet = inlets[0], inlets[1]
+            self.right_shank_inlet = shank_inlet
+            self.right_thigh_inlet = thigh_inlet
             self.right_foot_inlet = foot_inlet
-            self.message_signal.emit("Right leg streams connected successfully.")
-            if foot_inlet:
-                self.message_signal.emit("Right foot IMU connected (ankle angle enabled).")
-            else:
-                self.message_signal.emit("Right foot IMU not found (ankle angle disabled).")
+            self.right_trunk_inlet = trunk_inlet
+            
+            connected_names = []
+            if shank_inlet: connected_names.append("Shank")
+            if thigh_inlet: connected_names.append("Thigh")
+            if foot_inlet: connected_names.append("Foot")
+            if trunk_inlet: connected_names.append("Trunk")
+            self.message_signal.emit(f"Right leg streams connected: {', '.join(connected_names)}.")
             self.timer.start()
-            self.start_diagnostics()   # start live stream-quality monitor
+            self.start_diagnostics()
 
         self.resolving = SIDE.NONE
 
@@ -667,6 +787,27 @@ class AngleCalibrator(QObject):
                 self.left_angle_offset = off
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
+            
+            # Hip calibration
+            hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
+            def _one_side_hip(trunk_inlet, thigh_inlet, offset_val):
+                if not (trunk_inlet and thigh_inlet):
+                    return None
+                max_tries = 10
+                for _ in range(max_tries):
+                    q_trunk = self.__get_latest_quaternion_nonblocking(trunk_inlet)
+                    q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
+                    if q_trunk is not None and q_thigh is not None:
+                        return ROM.functional_calibration(q_trunk, q_thigh) - offset_val
+                    QCoreApplication.processEvents()
+                return None
+
+            hip_off = _one_side_hip(self.left_trunk_inlet, self.left_thigh_inlet, hip_tgt)
+            if hip_off is not None:
+                self.left_hip_offset = hip_off
+            elif self.left_trunk_inlet and self.left_thigh_inlet:
+                self.message_signal.emit("Left hip: no data yet. Try again when streams are active.")
+
             ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
@@ -693,6 +834,15 @@ class AngleCalibrator(QObject):
                 self.right_angle_offset = off
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
+                
+            # Hip calibration
+            hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
+            hip_off_r = _one_side_hip(self.right_trunk_inlet, self.right_thigh_inlet, hip_tgt_r)
+            if hip_off_r is not None:
+                self.right_hip_offset = hip_off_r
+            elif self.right_trunk_inlet and self.right_thigh_inlet:
+                self.message_signal.emit("Right hip: no data yet. Try again when streams are active.")
+
             ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
@@ -1022,38 +1172,44 @@ class LSLStreamResolver(QObject):
     @Slot()
     def resolve_streams_for_left(self):
         print("Resolving streams for left leg...")
-        # Resolve the LSL streams for the left leg (shank + thigh + foot)
+        # Resolve the LSL streams for the left leg (shank + thigh + foot + trunk)
         stream_shank = resolve_byprop("name", "Left Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Left Thigh", timeout=TIMEOUT)
-        if not stream_shank or not stream_thigh:
+        stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
+        stream_trunk = resolve_byprop("name", "Left Trunk", timeout=TIMEOUT)
+        
+        shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
+        thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
+        foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
+        trunk_inlet = StreamInlet(stream_trunk[0]) if stream_trunk else None
+        
+        if not any([shank_inlet, thigh_inlet, foot_inlet, trunk_inlet]):
             self.message_signal.emit("Left leg streams not found. Please check the LSL streams.")
-            self.found_inlets.emit((None, None, None))
         else:
             self.message_signal.emit("Left leg streams found. Connecting...")
-            shank_inlet = StreamInlet(stream_shank[0])
-            thigh_inlet = StreamInlet(stream_thigh[0])
-            # Try to resolve foot stream (optional — ankle angle)
-            stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
-            foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
-            self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet))
+            
+        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, trunk_inlet))
 
     @Slot()
     def resolve_streams_for_right(self):
         print("Resolving streams for right leg...")
-        # Resolve the LSL streams for the right leg (shank + thigh + foot)
+        # Resolve the LSL streams for the right leg (shank + thigh + foot + trunk)
         stream_shank = resolve_byprop("name", "Right Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Right Thigh", timeout=TIMEOUT)
-        if not stream_shank or not stream_thigh:
+        stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
+        stream_trunk = resolve_byprop("name", "Right Trunk", timeout=TIMEOUT)
+        
+        shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
+        thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
+        foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
+        trunk_inlet = StreamInlet(stream_trunk[0]) if stream_trunk else None
+
+        if not any([shank_inlet, thigh_inlet, foot_inlet, trunk_inlet]):
             self.message_signal.emit("Right leg streams not found. Please check the LSL streams.")
-            self.found_inlets.emit((None, None, None))
         else:
             self.message_signal.emit("Right leg streams found. Connecting...")
-            shank_inlet = StreamInlet(stream_shank[0])
-            thigh_inlet = StreamInlet(stream_thigh[0])
-            # Try to resolve foot stream (optional — ankle angle)
-            stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
-            foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
-            self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet))
+            
+        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, trunk_inlet))
             
     @Slot()            
     def move_to_main(self):

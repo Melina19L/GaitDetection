@@ -6148,6 +6148,18 @@ class SetupMainWindow:
             circle_color=self.themes["app_color"]["icon_color"],
             active_color=self.themes["app_color"]["context_color"],
         )
+        self.left_hip_toggle = PyToggleSmall(
+            text="Left Hip",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
+        )
+        self.right_hip_toggle = PyToggleSmall(
+            text="Right Hip",
+            bg_color=self.themes["app_color"]["dark_two"],
+            circle_color=self.themes["app_color"]["icon_color"],
+            active_color=self.themes["app_color"]["context_color"],
+        )
 
         # ── STATUS BOX ──
         self.imu_status_box = QTextBrowser()
@@ -6298,10 +6310,58 @@ class SetupMainWindow:
             value_range=(0.0, 10.0), decimals=2, step_size=0.01, value=0.01,
         )
 
+        # ── HIP PARAMETER WIDGETS ──
+        self.hip_header = QLabel("HIP")
+        self.hip_header.setStyleSheet(f"font-size: 12pt; font-weight: bold; color: {self.themes['app_color']['text_foreground']};")
+        self.hip_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.invert_left_hip_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert L")
+        self.invert_left_hip_btn.setMinimumHeight(LINE_HEIGHT)
+        self.invert_right_hip_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Invert R")
+        self.invert_right_hip_btn.setMinimumHeight(LINE_HEIGHT)
+
+        self.hip_scale_label = QLabel("Scale:")
+        self.hip_scale_label.setStyleSheet(lbl_sub_style)
+        self.hip_scale_left_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
+        )
+        self.hip_scale_right_spin_box = PyDoubleSpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0.1, 4.0), decimals=1, step_size=0.1, value=1.0,
+        )
+
+        self.hip_targets_label = QLabel("Targets (Ext. – Flex.):")
+        self.hip_targets_label.setStyleSheet(lbl_sub_style)
+        self.hip_extension_left_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 30), value=10,
+        )
+        self.hip_flexion_left_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0, 120), value=60,
+        )
+        self.hip_extension_right_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(-30, 30), value=10,
+        )
+        self.hip_flexion_right_spin_box = PySpinBox(
+            text_color=self.themes["app_color"]["text_foreground"],
+            bg_color=self.themes["app_color"]["dark_one"],
+            value_range=(0, 120), value=60,
+        )
+
         # ── ANGLE CALIBRATOR ──
         self.angle_calibrator = AngleCalibrator(
             self.left_leg_toggle, self.right_leg_toggle,
-            self.extension_left_spin_box, self.extension_right_spin_box, self
+            self.extension_left_spin_box, self.extension_right_spin_box, self,
+            hip_target_left=self.hip_extension_left_spin_box,
+            hip_target_right=self.hip_extension_right_spin_box
         )
 
         # ── CALLBACKS ──
@@ -6337,15 +6397,23 @@ class SetupMainWindow:
                     self.plot_dialog.ankle_plot.show_left_ankle_angle(st == Qt.CheckState.Checked)
                 def _sync_ankle_right(st):
                     self.plot_dialog.ankle_plot.show_right_ankle_angle(st == Qt.CheckState.Checked)
+                def _sync_hip_left(st):
+                    self.plot_dialog.hip_plot.show_left_hip_angle(st == Qt.CheckState.Checked)
+                def _sync_hip_right(st):
+                    self.plot_dialog.hip_plot.show_right_hip_angle(st == Qt.CheckState.Checked)
                 self.left_knee_toggle.checkStateChanged.connect(_sync_knee_left)
                 self.right_knee_toggle.checkStateChanged.connect(_sync_knee_right)
                 self.left_ankle_toggle.checkStateChanged.connect(_sync_ankle_left)
                 self.right_ankle_toggle.checkStateChanged.connect(_sync_ankle_right)
+                self.left_hip_toggle.checkStateChanged.connect(_sync_hip_left)
+                self.right_hip_toggle.checkStateChanged.connect(_sync_hip_right)
                 # ── Sync current toggle state immediately (toggles may already be ON) ──
                 self.plot_dialog.knee_plot.show_left_knee_angle(self.left_knee_toggle.isChecked())
                 self.plot_dialog.knee_plot.show_right_knee_angle(self.right_knee_toggle.isChecked())
                 self.plot_dialog.ankle_plot.show_left_ankle_angle(self.left_ankle_toggle.isChecked())
                 self.plot_dialog.ankle_plot.show_right_ankle_angle(self.right_ankle_toggle.isChecked())
+                self.plot_dialog.hip_plot.show_left_hip_angle(self.left_hip_toggle.isChecked())
+                self.plot_dialog.hip_plot.show_right_hip_angle(self.right_hip_toggle.isChecked())
                 # Wire spin boxes → plot
                 self.scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, LEFT))
                 self.scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_scale_factor(v, RIGHT))
@@ -6355,15 +6423,23 @@ class SetupMainWindow:
                 self.flexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.knee_plot.set_target_flexion_angle(v, RIGHT))
                 self.ankle_scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_scale_factor(v, LEFT))
                 self.ankle_scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_scale_factor(v, RIGHT))
+                self.hip_scale_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_scale_factor(v, LEFT))
+                self.hip_scale_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_scale_factor(v, RIGHT))
                 self.dorsiflexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_dorsiflexion_angle(v, LEFT))
                 self.plantarflexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_plantarflexion_angle(v, LEFT))
                 self.dorsiflexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_dorsiflexion_angle(v, RIGHT))
                 self.plantarflexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.ankle_plot.set_target_plantarflexion_angle(v, RIGHT))
+                self.hip_extension_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_target_extension_angle(v, LEFT))
+                self.hip_flexion_left_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_target_flexion_angle(v, LEFT))
+                self.hip_extension_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_target_extension_angle(v, RIGHT))
+                self.hip_flexion_right_spin_box.valueChanged.connect(lambda v: self.plot_dialog.hip_plot.set_target_flexion_angle(v, RIGHT))
                 # Wire invert buttons
                 self.invert_left_angle_btn.clicked.connect(lambda: self.plot_dialog.knee_plot.invert_angle(LEFT))
                 self.invert_right_angle_btn.clicked.connect(lambda: self.plot_dialog.knee_plot.invert_angle(RIGHT))
                 self.invert_left_ankle_btn.clicked.connect(lambda: self.plot_dialog.ankle_plot.invert_angle(LEFT))
                 self.invert_right_ankle_btn.clicked.connect(lambda: self.plot_dialog.ankle_plot.invert_angle(RIGHT))
+                self.invert_left_hip_btn.clicked.connect(lambda: self.plot_dialog.hip_plot.invert_angle(LEFT))
+                self.invert_right_hip_btn.clicked.connect(lambda: self.plot_dialog.hip_plot.invert_angle(RIGHT))
             self.plot_dialog.start()
 
         # ── Toggle callbacks ──
@@ -6411,6 +6487,24 @@ class SetupMainWindow:
                     update_imu_error("Right Ankle: Shank or Foot sensor not connected. Enable Right Leg first.")
                     self.right_ankle_toggle.setChecked(False)
 
+        def left_hip_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.left_trunk_inlet and cal.left_thigh_inlet:
+                    update_imu_status("Left Hip: sensors connected (Trunk + Thigh).")
+                else:
+                    update_imu_error("Left Hip: Trunk or Thigh sensor not connected. Enable Left Leg first.")
+                    self.left_hip_toggle.setChecked(False)
+
+        def right_hip_state_changed(state: Qt.CheckState):
+            if state == Qt.CheckState.Checked:
+                cal = self.angle_calibrator
+                if cal.right_trunk_inlet and cal.right_thigh_inlet:
+                    update_imu_status("Right Hip: sensors connected (Trunk + Thigh).")
+                else:
+                    update_imu_error("Right Hip: Trunk or Thigh sensor not connected. Enable Right Leg first.")
+                    self.right_hip_toggle.setChecked(False)
+
         # ── CONNECT BUTTONS ──
         self.imu_btn.clicked.connect(open_imu_gui)
         self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
@@ -6421,6 +6515,8 @@ class SetupMainWindow:
         self.right_knee_toggle.checkStateChanged.connect(right_knee_state_changed)
         self.left_ankle_toggle.checkStateChanged.connect(left_ankle_state_changed)
         self.right_ankle_toggle.checkStateChanged.connect(right_ankle_state_changed)
+        self.left_hip_toggle.checkStateChanged.connect(left_hip_state_changed)
+        self.right_hip_toggle.checkStateChanged.connect(right_hip_state_changed)
         self.finish_btn_7.clicked.connect(finish_btn_clicked)
 
         # CONNECT SIGNALS
@@ -6565,6 +6661,8 @@ class SetupMainWindow:
         tbar.addWidget(self.right_knee_toggle)
         tbar.addWidget(self.left_ankle_toggle)
         tbar.addWidget(self.right_ankle_toggle)
+        tbar.addWidget(self.left_hip_toggle)
+        tbar.addWidget(self.right_hip_toggle)
         tbar.addStretch(1)
 
         # ── Button bar ──
@@ -6639,6 +6737,40 @@ class SetupMainWindow:
         ag.addWidget(self.ankle_pi_kp_right_spin_box,  6, 2, 1, 1)
         ag.addWidget(self.ankle_pi_ki_left_spin_box,   7, 1, 1, 1)
         ag.addWidget(self.ankle_pi_ki_right_spin_box,  7, 2, 1, 1)
+
+        # ── Hip parameters grid ──
+        self.hip_params_widget = QWidget(self.ui.load_pages.params_widget)
+        self.hip_params_widget.setObjectName(u"hip_params_widget")
+        self.hip_params_layout = QGridLayout(self.hip_params_widget)
+        self.hip_params_layout.setObjectName(u"hip_params_layout")
+        self.hip_params_layout.setContentsMargins(4, 4, 4, 4)
+        self.hip_params_layout.setSpacing(4)
+        self.ui.load_pages.params_layout.addWidget(self.hip_params_widget)
+
+        hg = self.hip_params_layout
+        hg.addWidget(self.hip_header,                  0, 0, 1, 4)
+        hg.addWidget(self.invert_left_hip_btn,         1, 0, 1, 2)
+        hg.addWidget(self.invert_right_hip_btn,        1, 2, 1, 2)
+        #
+        lbl_lh = QLabel("Left")
+        lbl_lh.setStyleSheet(lbl_sub_style)
+        lbl_lh.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_rh = QLabel("Right")
+        lbl_rh.setStyleSheet(lbl_sub_style)
+        lbl_rh.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hg.addWidget(lbl_lh,                           2, 1, 1, 1)
+        hg.addWidget(lbl_rh,                           2, 2, 1, 1)
+        #
+        hg.addWidget(self.hip_scale_label,             3, 0, 1, 1)
+        hg.addWidget(self.hip_scale_left_spin_box,     3, 1, 1, 1)
+        hg.addWidget(self.hip_scale_right_spin_box,    3, 2, 1, 1)
+        #
+        hg.addWidget(self.hip_targets_label,           4, 0, 1, 1)
+        hg.addWidget(self.hip_extension_left_spin_box, 4, 1, 1, 1)
+        hg.addWidget(self.hip_extension_right_spin_box,4, 2, 1, 1)
+        hg.addWidget(self.hip_flexion_left_spin_box,   5, 1, 1, 1)
+        hg.addWidget(self.hip_flexion_right_spin_box,  5, 2, 1, 1)
+
 
         # ── Finish ──
         self.ui.load_pages.finish_btn_layout_6.addWidget(self.finish_btn_7)

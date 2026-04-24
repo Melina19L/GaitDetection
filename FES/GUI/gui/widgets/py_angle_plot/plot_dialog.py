@@ -9,6 +9,7 @@
 from qt_core import *
 from gui.widgets.py_angle_plot.py_angle_plot import PyAnglePlot
 from gui.widgets.py_angle_plot.py_ankle_plot import PyAnklePlot
+from gui.widgets.py_angle_plot.py_hip_plot import PyHipPlot
 from angle_calibrator import AngleCalibrator
 
 
@@ -140,6 +141,39 @@ class PlotDialog(QDialog):
         al.addStretch(1)
         layout.addWidget(ankle_legend)
 
+        # ── Hip Angle Plot ──
+        hip_title = QLabel("Hip Angle")
+        hip_title.setStyleSheet(label_style)
+        hip_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hip_title.setMaximumHeight(24)
+        layout.addWidget(hip_title)
+
+        self.hip_plot = PyHipPlot(
+            calibrator,
+            axis_color=themes["app_color"]["text_foreground"],
+            background_color=themes["app_color"]["dark_three"],
+            line_color_left="#8be9fd",   # cyan
+            line_color_right="#ffb86c",  # orange
+            max_points=1000,
+        )
+        layout.addWidget(self.hip_plot, 1)
+
+        # Hip legend
+        hip_legend = QWidget()
+        hip_legend.setMaximumHeight(22)
+        hl = QHBoxLayout(hip_legend)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(20)
+        hl.addStretch(1)
+        lbl_lh = QLabel("\u25a0 Left Hip")
+        lbl_lh.setStyleSheet("font-size: 10pt; color: #8be9fd;")
+        lbl_rh = QLabel("\u25a0 Right Hip")
+        lbl_rh.setStyleSheet("font-size: 10pt; color: #ffb86c;")
+        hl.addWidget(lbl_lh)
+        hl.addWidget(lbl_rh)
+        hl.addStretch(1)
+        layout.addWidget(hip_legend)
+
         # ── Timer for plot updates ──
         # 50 ms = 20 Hz refresh — enough for smooth gait visualization,
         # and safe for pyqtgraph rendering 1000 points without stacking callbacks.
@@ -147,6 +181,7 @@ class PlotDialog(QDialog):
         self.timer.setInterval(50)
         self.timer.timeout.connect(self.knee_plot.update_plot)
         self.timer.timeout.connect(self.ankle_plot.update_plot)
+        self.timer.timeout.connect(self.hip_plot.update_plot)
 
         # ── Button wiring ──
         self.reset_btn.clicked.connect(self._reset)
@@ -160,6 +195,7 @@ class PlotDialog(QDialog):
         """Show the dialog and start the plot timer."""
         self.knee_plot.reset_plot()
         self.ankle_plot.reset_plot()
+        self.hip_plot.reset_plot()
         self.timer.stop()   # ensure no double-fire if already running
         self.timer.start()
         self.show()
@@ -170,6 +206,7 @@ class PlotDialog(QDialog):
         self.timer.stop()
         self.knee_plot.reset_plot()
         self.ankle_plot.reset_plot()
+        self.hip_plot.reset_plot()
         # Reset session timestamp in calibrator to align with visually reset data
         self.calibrator._session_start = __import__('time').time()
         self.timer.start()
