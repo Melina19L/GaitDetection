@@ -128,9 +128,9 @@ class AngleCalibrator(QObject):
         """Stop the angle calibration and disconnect from all streams."""
         self.timer.stop()
         self._diag_timer.stop()
-        if self.left_shank_inlet:
+        if self.left_shank_inlet or self.left_trunk_inlet:
             self.__disconnect_from_streams_left()
-        if self.right_shank_inlet:
+        if self.right_shank_inlet or self.right_trunk_inlet:
             self.__disconnect_from_streams_right()
         if self.worker_thread:
             # If a worker thread is running, stop it
@@ -187,6 +187,7 @@ class AngleCalibrator(QObject):
         # Build a clear success banner with the actual offset values
         kl, kr = self.left_angle_offset, self.right_angle_offset
         al, ar = self.left_ankle_offset, self.right_ankle_offset
+        hl, hr = self.left_hip_offset, self.right_hip_offset
         banner = (
             '<hr/>'
             '<p style="color:#27ae60; font-size:13px; font-weight:bold;">'
@@ -196,6 +197,8 @@ class AngleCalibrator(QObject):
             f'<tr><td>Knee &nbsp;Right</td><td><b>{kr:+.2f}&deg;</b></td></tr>'
             f'<tr><td>Ankle Left&nbsp;</td><td><b>{al:+.2f}&deg;</b></td></tr>'
             f'<tr><td>Ankle Right</td><td><b>{ar:+.2f}&deg;</b></td></tr>'
+            f'<tr><td>Hip &nbsp;&nbsp;Left&nbsp;</td><td><b>{hl:+.2f}&deg;</b></td></tr>'
+            f'<tr><td>Hip &nbsp;&nbsp;Right</td><td><b>{hr:+.2f}&deg;</b></td></tr>'
             '</table><hr/>'
         )
         self.calibration_done_signal.emit(banner)
@@ -778,6 +781,18 @@ class AngleCalibrator(QObject):
                 QCoreApplication.processEvents()
             return None, None, None
 
+        def _one_side_hip(trunk_inlet, thigh_inlet, offset_val):
+            if not (trunk_inlet and thigh_inlet):
+                return None
+            max_tries = 10
+            for _ in range(max_tries):
+                q_trunk = self.__get_latest_quaternion_nonblocking(trunk_inlet)
+                q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
+                if q_trunk is not None and q_thigh is not None:
+                    return ROM.functional_calibration(q_trunk, q_thigh) - offset_val
+                QCoreApplication.processEvents()
+            return None
+
         # Collect quaternions for combined axis diagnostic emitted once at end
         diag_sections = []
         if self.left_checkbox.isChecked():
@@ -788,25 +803,16 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
             
-            # Hip calibration
-            hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
-            def _one_side_hip(trunk_inlet, thigh_inlet, offset_val):
-                if not (trunk_inlet and thigh_inlet):
-                    return None
-                max_tries = 10
-                for _ in range(max_tries):
-                    q_trunk = self.__get_latest_quaternion_nonblocking(trunk_inlet)
-                    q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
-                    if q_trunk is not None and q_thigh is not None:
-                        return ROM.functional_calibration(q_trunk, q_thigh) - offset_val
-                    QCoreApplication.processEvents()
-                return None
-
-            hip_off = _one_side_hip(self.left_trunk_inlet, self.left_thigh_inlet, hip_tgt)
-            if hip_off is not None:
-                self.left_hip_offset = hip_off
-            elif self.left_trunk_inlet and self.left_thigh_inlet:
-                self.message_signal.emit("Left hip: no data yet. Try again when streams are active.")
+            # Hip calibration (safe — does not block if trunk is absent)
+            try:
+                hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
+                hip_off = _one_side_hip(self.left_trunk_inlet, self.left_thigh_inlet, hip_tgt)
+                if hip_off is not None:
+                    self.left_hip_offset = hip_off
+                elif self.left_trunk_inlet and self.left_thigh_inlet:
+                    self.message_signal.emit("Left hip: no data yet. Try again when streams are active.")
+            except Exception as e:
+                print(f"[CalibHip LEFT] skipped: {e}")
 
             ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
@@ -835,13 +841,16 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
                 
-            # Hip calibration
-            hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
-            hip_off_r = _one_side_hip(self.right_trunk_inlet, self.right_thigh_inlet, hip_tgt_r)
-            if hip_off_r is not None:
-                self.right_hip_offset = hip_off_r
-            elif self.right_trunk_inlet and self.right_thigh_inlet:
-                self.message_signal.emit("Right hip: no data yet. Try again when streams are active.")
+            # Hip calibration (safe — does not block if trunk is absent)
+            try:
+                hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
+                hip_off_r = _one_side_hip(self.right_trunk_inlet, self.right_thigh_inlet, hip_tgt_r)
+                if hip_off_r is not None:
+                    self.right_hip_offset = hip_off_r
+                elif self.right_trunk_inlet and self.right_thigh_inlet:
+                    self.message_signal.emit("Right hip: no data yet. Try again when streams are active.")
+            except Exception as e:
+                print(f"[CalibHip RIGHT] skipped: {e}")
 
             ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
@@ -939,6 +948,10 @@ class AngleCalibrator(QObject):
             self.left_foot_inlet.close_stream()
             del self.left_foot_inlet
             self.left_foot_inlet = None
+        if self.left_trunk_inlet is not None:
+            self.left_trunk_inlet.close_stream()
+            del self.left_trunk_inlet
+            self.left_trunk_inlet = None
 
     def __disconnect_from_streams_right(self):
         # Close the streams for the right leg
@@ -954,6 +967,10 @@ class AngleCalibrator(QObject):
             self.right_foot_inlet.close_stream()
             del self.right_foot_inlet
             self.right_foot_inlet = None
+        if self.right_trunk_inlet is not None:
+            self.right_trunk_inlet.close_stream()
+            del self.right_trunk_inlet
+            self.right_trunk_inlet = None
 
     def __calculate_angles(self, shank_inlet: StreamInlet, thigh_inlet: StreamInlet, angle_offset: float) -> np.ndarray:
         """Compute joint angles for ALL synchronized sample pairs in the current chunk.
@@ -1177,10 +1194,11 @@ class LSLStreamResolver(QObject):
         stream_thigh = resolve_byprop("name", "Left Thigh", timeout=TIMEOUT)
         stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
         
-        # Try 'Left Trunk', fallback to 'Custom 1'
-        stream_trunk = resolve_byprop("name", "Left Trunk", timeout=TIMEOUT)
+        # Try 'Left Trunk', fallback to 'Custom 1' — short timeout (optional sensor)
+        TRUNK_TIMEOUT = 1.0
+        stream_trunk = resolve_byprop("name", "Left Trunk", timeout=TRUNK_TIMEOUT)
         if not stream_trunk:
-            stream_trunk = resolve_byprop("name", "Custom 1", timeout=TIMEOUT)
+            stream_trunk = resolve_byprop("name", "Custom 1", timeout=TRUNK_TIMEOUT)
         
         shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
         thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
@@ -1202,10 +1220,11 @@ class LSLStreamResolver(QObject):
         stream_thigh = resolve_byprop("name", "Right Thigh", timeout=TIMEOUT)
         stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
         
-        # Try 'Right Trunk', fallback to 'Custom 2'
-        stream_trunk = resolve_byprop("name", "Right Trunk", timeout=TIMEOUT)
+        # Try 'Right Trunk', fallback to 'Custom 2' — short timeout (optional sensor)
+        TRUNK_TIMEOUT = 1.0
+        stream_trunk = resolve_byprop("name", "Right Trunk", timeout=TRUNK_TIMEOUT)
         if not stream_trunk:
-            stream_trunk = resolve_byprop("name", "Custom 2", timeout=TIMEOUT)
+            stream_trunk = resolve_byprop("name", "Custom 2", timeout=TRUNK_TIMEOUT)
         
         shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
         thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
