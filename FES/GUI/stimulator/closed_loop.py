@@ -91,21 +91,12 @@ def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> 
       Dorsiflexion (mid-stance) : −5° to −15°
     """
     xAxis = np.array([1.0, 0.0, 0.0])
-    yAxis = np.array([0.0, 1.0, 0.0])
-    zAxis = np.array([0.0, 0.0, 1.0])
 
     shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
-    
-    foot_x_global = rotate_vector_by_quaternion(xAxis, q_foot)
-    foot_y_global = rotate_vector_by_quaternion(yAxis, q_foot)
-    foot_z_global = rotate_vector_by_quaternion(zAxis, q_foot)
-    
-    # Seleziona dinamicamente l'asse più orizzontale (quello con la componente Z globale minore)
-    foot_axes = [foot_x_global, foot_y_global, foot_z_global]
-    best_foot_axis = min(foot_axes, key=lambda v: abs(v[2]))
+    foot_x_global  = rotate_vector_by_quaternion(xAxis, q_foot)  # longitudinal foot axis
 
     # Unsigned angle; offset subtraction in ROM.get_ankle_angle supplies the sign
-    angle_rad = angle_between_vectors(shank_x_global, best_foot_axis)
+    angle_rad = angle_between_vectors(shank_x_global, foot_x_global)
     return float(np.degrees(angle_rad))
 
 
