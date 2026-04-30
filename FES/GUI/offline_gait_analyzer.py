@@ -64,10 +64,12 @@ def load_data(file_path):
     print("Contenuto trovato nel file:")
     has_knee = any("knee_angles" in k for k in data.keys())
     has_ankle = any("ankle_angles" in k for k in data.keys())
+    has_hip = any("hip_angles" in k for k in data.keys())
     has_events = any("peaks" in k or "hs" in k.lower() or "toe" in k.lower() for k in data.keys())
     
     print(f" - Angoli Ginocchio pre-calcolati: {'SI' if has_knee else 'NO'}")
     print(f" - Angoli Caviglia pre-calcolati: {'SI' if has_ankle else 'NO'}")
+    print(f" - Angoli Anca pre-calcolati: {'SI' if has_hip else 'NO'}")
     print(f" - Makers Fasi del Passo: {'SI' if has_events else 'NO'}")
     
     # Se mancano le caviglie ma abbiamo i dati RAW (Salvataggio della finestra principale)
@@ -108,10 +110,44 @@ def load_data(file_path):
 
 def plot_angles(data):
     """
-    Funzione per plottare Angoli di Ginocchio e Caviglia (se presenti).
+    Funzione per plottare Angoli di Anca, Ginocchio e Caviglia (se presenti).
     """
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    ax_knee, ax_ankle = axes
+    has_hip = any("hip_angles" in k for k in data.keys())
+    
+    if has_hip:
+        fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+        ax_hip, ax_knee, ax_ankle = axes
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+        ax_hip = None
+        ax_knee, ax_ankle = axes
+
+    # --- HIP
+    if ax_hip is not None:
+        hip_plotted = False
+        if "left_hip_timestamps" in data and "left_hip_angles" in data:
+            ax_hip.plot(data["left_hip_timestamps"], data["left_hip_angles"], 
+                         label="Left Hip", color="#8be9fd", linewidth=2) # Cyan
+            hip_plotted = True
+        elif "imu_left_hip_timestamps" in data and "imu_left_hip_angles" in data:
+            ax_hip.plot(data["imu_left_hip_timestamps"], data["imu_left_hip_angles"], 
+                         label="Left Hip", color="#8be9fd", linewidth=2)
+            hip_plotted = True
+
+        if "right_hip_timestamps" in data and "right_hip_angles" in data:
+            ax_hip.plot(data["right_hip_timestamps"], data["right_hip_angles"], 
+                         label="Right Hip", color="#ffb86c", linewidth=2) # Orange
+            hip_plotted = True
+        elif "imu_right_hip_timestamps" in data and "imu_right_hip_angles" in data:
+            ax_hip.plot(data["imu_right_hip_timestamps"], data["imu_right_hip_angles"], 
+                         label="Right Hip", color="#ffb86c", linewidth=2)
+            hip_plotted = True
+
+        if hip_plotted:
+            ax_hip.set_title("Hip Angle", fontsize=14, fontweight='bold')
+            ax_hip.set_ylabel("Angle (°)")
+            ax_hip.legend(loc="upper right")
+            ax_hip.grid(True, linestyle="--", alpha=0.6)
 
     # --- KNEE 
     knee_plotted = False
@@ -168,7 +204,11 @@ def add_gait_events(data, axes):
     - Toe Off (Linea tratteggiata Arancione)
     Supporta i dati FSR e FSM (IMU).
     """
-    ax_knee, ax_ankle = axes
+    if len(axes) == 3:
+        ax_hip, ax_knee, ax_ankle = axes
+    else:
+        ax_hip = None
+        ax_knee, ax_ankle = axes
     
     # Colori per gli eventi
     hs_color = "#8be9fd" # Ciano
@@ -179,11 +219,13 @@ def add_gait_events(data, axes):
     # FSR Events Left
     if "fsr_heel_strike_timestamps_left" in data:
         for hs in data["fsr_heel_strike_timestamps_left"]:
+            if ax_hip is not None: ax_hip.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
             ax_knee.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
             ax_ankle.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
             events_added = True
     if "fsr_toe_off_timestamps_left" in data:
         for to in data["fsr_toe_off_timestamps_left"]:
+            if ax_hip is not None: ax_hip.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
             ax_knee.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
             ax_ankle.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
             events_added = True
@@ -193,11 +235,13 @@ def add_gait_events(data, axes):
     for key in data.keys():
         if "heel_strike_peaks" in key:
             for hs in data[key]:
+                if ax_hip is not None: ax_hip.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
                 ax_knee.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
                 ax_ankle.axvline(x=hs, color=hs_color, linestyle="-", alpha=0.5)
                 events_added = True
         elif "toe_off_peaks" in key:
             for to in data[key]:
+                if ax_hip is not None: ax_hip.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
                 ax_knee.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
                 ax_ankle.axvline(x=to, color=to_color, linestyle="--", alpha=0.5)
                 events_added = True
