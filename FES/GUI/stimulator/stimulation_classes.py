@@ -70,10 +70,18 @@ def export_csv_logs(save_path, data_to_save):
                 "Right_Hip", "Right_Knee", "Right_Ankle"
             ])
             
-            # Use left knee timestamps as reference (or any available)
-            ref_ts = data_to_save.get("imu_left_knee_timestamps")
-            if ref_ts is None or len(ref_ts) == 0:
-                ref_ts = data_to_save.get("imu_right_knee_timestamps")
+            # Use any available timestamp array as reference
+            ref_ts = None
+            for key in [
+                "imu_left_knee_timestamps", "imu_right_knee_timestamps",
+                "imu_left_ankle_timestamps", "imu_right_ankle_timestamps",
+                "imu_left_hip_timestamps", "imu_right_hip_timestamps"
+            ]:
+                ts = data_to_save.get(key)
+                if ts is not None and len(ts) > 0:
+                    ref_ts = ts
+                    break
+                
                 
             if ref_ts is not None and len(ref_ts) > 0:
                 l_hip = data_to_save.get("imu_left_hip_angles", [])
