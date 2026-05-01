@@ -1072,7 +1072,7 @@ class StimulationIMUs(StimulationBasic):
 
     def _iter_all_fsms(self):
         """Yield every existing FSM instance (any side, any placement, any method)."""
-        for placement in ("shank", "foot","thigh"):
+        for placement in ("shank", "foot", "thigh", "trunk"):
             for suffix in ("fsm1", "fsm2"):
                 for side in ("right", "left"):
                     fsm = getattr(self, f"{side}_leg_{placement}_{suffix}", None)

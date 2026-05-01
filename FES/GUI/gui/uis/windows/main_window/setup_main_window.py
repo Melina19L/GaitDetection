@@ -5848,8 +5848,17 @@ class SetupMainWindow:
             # Create only the parent folder of the final file path that’s already shown on Page 6
             try:
                 import os
+                import re
                 final_path = self.lineEdit_save_info_confirm.text().strip()
                 parent_dir = os.path.dirname(final_path)
+                
+                patient_name = self.lineEdit_subject_id.text().strip()
+                if patient_name:
+                    safe_patient_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', patient_name)
+                    parent_dir = os.path.join(parent_dir, safe_patient_name)
+                    file_name = os.path.basename(final_path)
+                    final_path = os.path.join(parent_dir, file_name)
+
                 if parent_dir:
                     os.makedirs(parent_dir, exist_ok=True)
                 # Ensure task_dict uses this exact path
