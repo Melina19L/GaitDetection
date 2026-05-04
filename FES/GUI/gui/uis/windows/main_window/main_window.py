@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         self.stop_experiment.connect(self.experiment_handler.stop_experiment)
         self.experiment_handler.starting_experiment.connect(self.start_timer)
         self.experiment_handler.finished.connect(self.show_results)
+        self.experiment_handler.finished.connect(self._save_plot_pkl_after_test)
         self.experiment_handler.error_message.connect(self.error_handler)
 
          # NEW: connect pause/resume to handler
@@ -499,6 +500,31 @@ class MainWindow(QMainWindow):
                 self.page10_timer_value.setText(text)
         except Exception:
             pass
+
+    # -------------------- POST-TEST PLOT SAVE --------------------
+    @Slot(tuple)
+    def _save_plot_pkl_after_test(self, _results=None):
+        """Dump the AngleCalibrator buffers next to the master .pkl.
+
+        Replaces the old ``Save Data...`` button on the Setup IMU dialog so
+        every test run produces ``<base>_plot.pkl`` automatically.
+        """
+        try:
+            base_path = getattr(self, "_last_experiment_save_path", None)
+            calibrator = getattr(self, "angle_calibrator", None)
+            if not base_path or calibrator is None:
+                return
+            import os
+            base_dir = os.path.dirname(base_path)
+            base_name = os.path.splitext(os.path.basename(base_path))[0]
+            plot_path = os.path.join(base_dir, f"{base_name}_plot.pkl")
+            ok = calibrator.save_data(plot_path)
+            if ok:
+                print(f"Calibrator plot data saved to {plot_path}")
+            else:
+                print("Calibrator plot data NOT saved (see previous errors).")
+        except Exception as e:
+            print(f"Failed to save calibrator plot pkl: {e}")
 
     # -------------------- EXPERIMENT RESULTS --------------------
     @Slot(tuple)

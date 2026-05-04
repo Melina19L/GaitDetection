@@ -4999,6 +4999,8 @@ class SetupMainWindow:
         self.page10_footer_row_layout.setStretch(1, 3)  # right: Status & Log
 
         # Add the footer row to Page 10 layout
+        # NOTE: real-time joint-angle plots are inserted between the test frame
+        # and this footer later, after self.angle_calibrator is built (Page 9).
         page10_layout.addWidget(self.page10_footer_row)
 
         #---- Redirect stdout/stderr to the log box (while keeping terminal output) ----
@@ -5863,6 +5865,9 @@ class SetupMainWindow:
                     os.makedirs(parent_dir, exist_ok=True)
                 # Ensure task_dict uses this exact path
                 task_dict["save_path_filename"] = final_path
+                # Stash so MainWindow can dump the calibrator plot pkl alongside
+                # the master pkl when the experiment finishes.
+                self._last_experiment_save_path = final_path
             except Exception as e:
                 print(f"Failed to prepare/save session directory: {e}")
             
@@ -6372,6 +6377,132 @@ class SetupMainWindow:
             hip_target_left=self.hip_extension_left_spin_box,
             hip_target_right=self.hip_extension_right_spin_box
         )
+
+        # ── PAGE 10: Real-time joint-angle plots (Hip / Knee / Ankle) ──
+        # Mirrors the Setup IMU preview but embedded in the test page so the
+        # operator can monitor live signals while data is being acquired.
+        # Built here because PyAnglePlot/PyAnklePlot/PyHipPlot need the
+        # angle_calibrator instantiated above.
+        self.page10_plots_frame = QFrame(self.ui.load_pages.page_10)
+        self.page10_plots_frame.setObjectName("page10_plots_frame")
+        self.page10_plots_frame.setStyleSheet(
+            f"QFrame#page10_plots_frame {{border: 2px solid {self.themes['app_color']['bg_two']}; border-radius: 4px;}}"
+        )
+        _page10_plots_layout = QVBoxLayout(self.page10_plots_frame)
+        _page10_plots_layout.setContentsMargins(8, 6, 8, 6)
+        _page10_plots_layout.setSpacing(4)
+
+        _fg = self.themes["app_color"]["text_foreground"]
+        _label_style = f"font-size: 11pt; font-weight: 600; color: {_fg};"
+
+        def _legend_row(label_left_text, color_left, label_right_text, color_right):
+            w = QWidget()
+            w.setMaximumHeight(20)
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(20)
+            lay.addStretch(1)
+            ll = QLabel(f"■ {label_left_text}")
+            ll.setStyleSheet(f"font-size: 9pt; color: {color_left};")
+            lr = QLabel(f"■ {label_right_text}")
+            lr.setStyleSheet(f"font-size: 9pt; color: {color_right};")
+            lay.addWidget(ll)
+            lay.addWidget(lr)
+            lay.addStretch(1)
+            return w
+
+        # Knee
+        _knee_title = QLabel("Knee Angle")
+        _knee_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _knee_title.setStyleSheet(_label_style)
+        _knee_title.setMaximumHeight(20)
+        _page10_plots_layout.addWidget(_knee_title)
+        self.page10_knee_plot = PyAnglePlot(
+            self.angle_calibrator,
+            axis_color=_fg,
+            background_color=self.themes["app_color"]["dark_three"],
+            line_color_left=self.themes["app_color"]["yellow"],
+            line_color_right=self.themes["app_color"]["red"],
+            max_points=1000,
+        )
+        _page10_plots_layout.addWidget(self.page10_knee_plot, 1)
+        _page10_plots_layout.addWidget(_legend_row(
+            "Left Knee", self.themes["app_color"]["yellow"],
+            "Right Knee", self.themes["app_color"]["red"],
+        ))
+
+        # Ankle
+        _ankle_title = QLabel("Ankle Angle")
+        _ankle_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _ankle_title.setStyleSheet(_label_style)
+        _ankle_title.setMaximumHeight(20)
+        _page10_plots_layout.addWidget(_ankle_title)
+        self.page10_ankle_plot = PyAnklePlot(
+            self.angle_calibrator,
+            axis_color=_fg,
+            background_color=self.themes["app_color"]["dark_three"],
+            line_color_left="#50fa7b",
+            line_color_right="#bd93f9",
+            max_points=1000,
+        )
+        _page10_plots_layout.addWidget(self.page10_ankle_plot, 1)
+        _page10_plots_layout.addWidget(_legend_row(
+            "Left Ankle", "#50fa7b",
+            "Right Ankle", "#bd93f9",
+        ))
+
+        # Hip
+        _hip_title = QLabel("Hip Angle")
+        _hip_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _hip_title.setStyleSheet(_label_style)
+        _hip_title.setMaximumHeight(20)
+        _page10_plots_layout.addWidget(_hip_title)
+        self.page10_hip_plot = PyHipPlot(
+            self.angle_calibrator,
+            axis_color=_fg,
+            background_color=self.themes["app_color"]["dark_three"],
+            line_color_left="#8be9fd",
+            line_color_right="#ffb86c",
+            max_points=1000,
+        )
+        _page10_plots_layout.addWidget(self.page10_hip_plot, 1)
+        _page10_plots_layout.addWidget(_legend_row(
+            "Left Hip", "#8be9fd",
+            "Right Hip", "#ffb86c",
+        ))
+
+        # Show both legs by default; operator doesn't need to toggle here.
+        for _p, _l, _r in (
+            (self.page10_knee_plot, "show_left_knee_angle", "show_right_knee_angle"),
+            (self.page10_ankle_plot, "show_left_ankle_angle", "show_right_ankle_angle"),
+            (self.page10_hip_plot, "show_left_hip_angle", "show_right_hip_angle"),
+        ):
+            try:
+                getattr(_p, _l)(True)
+                getattr(_p, _r)(True)
+            except Exception:
+                pass
+
+        # Drive the embedded plots with a dedicated 20 Hz timer.
+        # Always running: when no IMU data flows the plots stay flat, which is
+        # the right idle behaviour for a monitoring page.
+        self.page10_plot_timer = QTimer(self)
+        self.page10_plot_timer.setInterval(50)
+        self.page10_plot_timer.timeout.connect(self.page10_knee_plot.update_plot)
+        self.page10_plot_timer.timeout.connect(self.page10_ankle_plot.update_plot)
+        self.page10_plot_timer.timeout.connect(self.page10_hip_plot.update_plot)
+        self.page10_plot_timer.start()
+
+        # Insert the plots frame just above the existing footer row.
+        try:
+            _p10_layout = self.ui.load_pages.page_10.layout()
+            _idx = _p10_layout.indexOf(self.page10_footer_row)
+            if _idx == -1:
+                _p10_layout.addWidget(self.page10_plots_frame, 1)
+            else:
+                _p10_layout.insertWidget(_idx, self.page10_plots_frame, 1)
+        except Exception as _e:
+            print(f"[Page10] Failed to insert real-time plots frame: {_e}")
 
         # ── CALLBACKS ──
         def open_imu_gui():

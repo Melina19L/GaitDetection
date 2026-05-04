@@ -90,6 +90,7 @@ from . py_dropbox import PyDropbox
 # ///////////////////////////////////////////////////////////////
 from . py_angle_plot import PyAnglePlot
 from . py_angle_plot import PyAnklePlot
+from . py_angle_plot import PyHipPlot
 from . py_angle_plot import PlotDialog
 
 # PY TEXT BROWSER

@@ -31,6 +31,125 @@ from PySide6.QtCore import QTimer, QObject, Signal
 from PySide6.QtWidgets import QMessageBox
 from .closed_loop import PIController, ROM
 
+def export_xlsx_log(save_path, data_to_save):
+    """Bundle every recorded stream into one Excel workbook.
+
+    Sheets:
+      - Joint_Angles: timestamps + Left/Right Hip/Knee/Ankle (degrees)
+      - Raw_<sensor_key>: per-IMU raw acc/gyro/quat from rom_data
+      - FSR_Left / FSR_Right: front/middle/back FSR samples (when available)
+      - Stim_Events: stim/de-stim timestamps and currents per side
+    """
+    try:
+        import openpyxl  # noqa: F401  (verify availability before pandas writer)
+    except ImportError:
+        print("Excel export skipped: openpyxl is not installed (pip install openpyxl).")
+        return
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("Excel export skipped: pandas is not installed.")
+        return
+
+    base_dir = os.path.dirname(save_path)
+    base_name = os.path.splitext(os.path.basename(save_path))[0]
+    xlsx_path = os.path.join(base_dir, f"{base_name}.xlsx")
+
+    def _series(arr):
+        try:
+            return list(arr) if arr is not None else []
+        except Exception:
+            return []
+
+    def _frame_from_columns(cols: dict):
+        max_len = max((len(v) for v in cols.values()), default=0)
+        if max_len == 0:
+            return None
+        padded = {k: list(v) + [None] * (max_len - len(v)) for k, v in cols.items()}
+        return pd.DataFrame(padded)
+
+    sheets: dict[str, pd.DataFrame] = {}
+
+    # 1) Joint angles
+    angle_cols = {
+        "Timestamp_LeftHip":  _series(data_to_save.get("imu_left_hip_timestamps")),
+        "Left_Hip":           _series(data_to_save.get("imu_left_hip_angles")),
+        "Timestamp_LeftKnee": _series(data_to_save.get("imu_left_knee_timestamps")),
+        "Left_Knee":          _series(data_to_save.get("imu_left_knee_angles")),
+        "Timestamp_LeftAnkle":_series(data_to_save.get("imu_left_ankle_timestamps")),
+        "Left_Ankle":         _series(data_to_save.get("imu_left_ankle_angles")),
+        "Timestamp_RightHip": _series(data_to_save.get("imu_right_hip_timestamps")),
+        "Right_Hip":          _series(data_to_save.get("imu_right_hip_angles")),
+        "Timestamp_RightKnee":_series(data_to_save.get("imu_right_knee_timestamps")),
+        "Right_Knee":         _series(data_to_save.get("imu_right_knee_angles")),
+        "Timestamp_RightAnkle":_series(data_to_save.get("imu_right_ankle_timestamps")),
+        "Right_Ankle":        _series(data_to_save.get("imu_right_ankle_angles")),
+    }
+    df_angles = _frame_from_columns(angle_cols)
+    if df_angles is not None:
+        sheets["Joint_Angles"] = df_angles
+
+    # 2) Raw IMU per-sensor (rom_data buckets)
+    rom_data = data_to_save.get("rom_data", {}) or {}
+    for sensor_key, sensor_data in rom_data.items():
+        cols = {
+            "Timestamp": _series(sensor_data.get("timestamps")),
+            "AccX": _series(sensor_data.get("accx")),
+            "AccY": _series(sensor_data.get("accy")),
+            "AccZ": _series(sensor_data.get("accz")),
+            "GyrX": _series(sensor_data.get("gx")),
+            "GyrY": _series(sensor_data.get("gy")),
+            "GyrZ": _series(sensor_data.get("gz")),
+            "QuatW": _series(sensor_data.get("qw")),
+            "QuatX": _series(sensor_data.get("qx")),
+            "QuatY": _series(sensor_data.get("qy")),
+            "QuatZ": _series(sensor_data.get("qz")),
+        }
+        df = _frame_from_columns(cols)
+        if df is not None:
+            # Excel sheet names are limited to 31 chars
+            sheet = f"Raw_{sensor_key}"[:31]
+            sheets[sheet] = df
+
+    # 3) FSR (left / right)
+    for side in ("left", "right"):
+        cols = {
+            "Timestamp":  _series(data_to_save.get(f"fsr_timestamps_{side}")),
+            "Front_Foot": _series(data_to_save.get(f"fsr_data_ff_{side}")),
+            "Mid_Foot":   _series(data_to_save.get(f"fsr_data_mf_{side}")),
+            "Back_Foot":  _series(data_to_save.get(f"fsr_data_bf_{side}")),
+        }
+        df = _frame_from_columns(cols)
+        if df is not None:
+            sheets[f"FSR_{side.capitalize()}"] = df
+
+    # 4) Stim events (timestamps + currents)
+    stim_cols = {
+        "Timestamp_Stim_Left":    _series(data_to_save.get("imu_timestamps_stim_left")),
+        "Current_Left":           _series(data_to_save.get("imu_current_left")),
+        "Timestamp_DeStim_Left":  _series(data_to_save.get("imu_timestamps_de_stim_left")),
+        "Timestamp_Stim_Right":   _series(data_to_save.get("imu_timestamps_stim_right")),
+        "Current_Right":          _series(data_to_save.get("imu_current_right")),
+        "Timestamp_DeStim_Right": _series(data_to_save.get("imu_timestamps_de_stim_right")),
+    }
+    df_stim = _frame_from_columns(stim_cols)
+    if df_stim is not None:
+        sheets["Stim_Events"] = df_stim
+
+    if not sheets:
+        print("Excel export skipped: no streams to write.")
+        return
+
+    try:
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for name, df in sheets.items():
+                df.to_excel(writer, sheet_name=name, index=False)
+        print(f"Excel workbook exported to {xlsx_path}")
+    except Exception as e:
+        print(f"Failed to export Excel workbook: {e}")
+
+
 def export_csv_logs(save_path, data_to_save):
     try:
         base_dir = os.path.dirname(save_path)
@@ -869,6 +988,7 @@ class StimulationFSR(StimulationBasic):
             return
 
         print("Saving completed")
+        export_xlsx_log(self.save_path, data_to_save)
 
     @override
     def __check_for_unknown_phases(self):
@@ -1293,6 +1413,7 @@ class StimulationIMUs(StimulationBasic):
                 pickle.dump(data_to_save, f)
             print("Saving completed")
             export_csv_logs(self.save_path, data_to_save)
+            export_xlsx_log(self.save_path, data_to_save)
         except Exception as e:
             print(f"Data not saved: {e}")
 
@@ -1856,6 +1977,7 @@ class StimulationFSRandIMU(StimulationIMUs):
                 pickle.dump(data_to_save, f)
             print("Saving completed")
             export_csv_logs(self.save_path, data_to_save)
+            export_xlsx_log(self.save_path, data_to_save)
         except Exception as e:
             print(f"Data not saved: {e}")
 

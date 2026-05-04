@@ -69,6 +69,7 @@ nest_asyncio
 notebook
 notebook_shim
 numpy
+openpyxl
 overrides
 packaging
 pandas
