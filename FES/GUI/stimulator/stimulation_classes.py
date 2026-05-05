@@ -25,7 +25,6 @@ from threading import Event
 import time
 import pickle
 import os
-import csv
 import numpy as np
 from PySide6.QtCore import QTimer, QObject, Signal
 from PySide6.QtWidgets import QMessageBox
@@ -149,80 +148,6 @@ def export_xlsx_log(save_path, data_to_save):
     except Exception as e:
         print(f"Failed to export Excel workbook: {e}")
 
-
-def export_csv_logs(save_path, data_to_save):
-    try:
-        base_dir = os.path.dirname(save_path)
-        base_name = os.path.splitext(os.path.basename(save_path))[0]
-        
-        # 1. Export Raw IMU Data (Acc and Gyro)
-        raw_data_dir = os.path.join(base_dir, "raw_data")
-        os.makedirs(raw_data_dir, exist_ok=True)
-        
-        rom_data = data_to_save.get("rom_data", {})
-        for sensor_key, sensor_data in rom_data.items():
-            csv_path = os.path.join(raw_data_dir, f"{base_name}_{sensor_key}.csv")
-            with open(csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Timestamp", "AccX", "AccY", "AccZ", "GyrX", "GyrY", "GyrZ"])
-                
-                ts = sensor_data.get("timestamps", [])
-                accx = sensor_data.get("accx", [])
-                accy = sensor_data.get("accy", [])
-                accz = sensor_data.get("accz", [])
-                gx = sensor_data.get("gx", [])
-                gy = sensor_data.get("gy", [])
-                gz = sensor_data.get("gz", [])
-                
-                # Check lengths
-                n = min(len(ts), len(accx), len(accy), len(accz), len(gx), len(gy), len(gz))
-                for i in range(n):
-                    writer.writerow([ts[i], accx[i], accy[i], accz[i], gx[i], gy[i], gz[i]])
-                    
-        # 2. Export Joint Angles
-        angles_csv_path = os.path.join(base_dir, f"{base_name}_joint_angles.csv")
-        with open(angles_csv_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "Timestamp", 
-                "Left_Hip", "Left_Knee", "Left_Ankle",
-                "Right_Hip", "Right_Knee", "Right_Ankle"
-            ])
-            
-            # Use any available timestamp array as reference
-            ref_ts = None
-            for key in [
-                "imu_left_knee_timestamps", "imu_right_knee_timestamps",
-                "imu_left_ankle_timestamps", "imu_right_ankle_timestamps",
-                "imu_left_hip_timestamps", "imu_right_hip_timestamps"
-            ]:
-                ts = data_to_save.get(key)
-                if ts is not None and len(ts) > 0:
-                    ref_ts = ts
-                    break
-                
-                
-            if ref_ts is not None and len(ref_ts) > 0:
-                l_hip = data_to_save.get("imu_left_hip_angles", [])
-                l_knee = data_to_save.get("imu_left_knee_angles", [])
-                l_ankle = data_to_save.get("imu_left_ankle_angles", [])
-                r_hip = data_to_save.get("imu_right_hip_angles", [])
-                r_knee = data_to_save.get("imu_right_knee_angles", [])
-                r_ankle = data_to_save.get("imu_right_ankle_angles", [])
-                
-                def safe_get(arr, idx):
-                    return arr[idx] if arr is not None and idx < len(arr) else ""
-                
-                for i in range(len(ref_ts)):
-                    writer.writerow([
-                        ref_ts[i],
-                        safe_get(l_hip, i), safe_get(l_knee, i), safe_get(l_ankle, i),
-                        safe_get(r_hip, i), safe_get(r_knee, i), safe_get(r_ankle, i)
-                    ])
-                    
-        print(f"CSV logs exported to {raw_data_dir} and {angles_csv_path}")
-    except Exception as e:
-        print(f"Failed to export CSV logs: {e}")
 
 COM_PORT = "COM3"  # Replace with your COM port
 BAUDRATE = 115200 * 8  # Replace with your baud rate
@@ -1048,14 +973,17 @@ class StimulationIMUs(StimulationBasic):
 
         # Pre-create all attributes as None so later code can safely check them
         for side in ("right", "left"):
-            for placement in ("shank", "foot", "thigh", "trunk"):
+            for placement in ("shank", "foot", "thigh"):
                 setattr(self, f"{side}_leg_{placement}_fsm1", None)
                 setattr(self, f"{side}_leg_{placement}_fsm2", None)
-                
+        # Single shared pelvis FSM (replaces the previous left/right trunk FSMs).
+        self.pelvis_fsm1 = None
+        self.pelvis_fsm2 = None
+
         # Try to connect both SHANK and FOOT for each leg; if found, instantiate the requested method(s)
         for side_label in ("Right", "Left"):
             side = side_label.lower()
-            for placement_label in ("Shank", "Foot", "Thigh", "Trunk"):
+            for placement_label in ("Shank", "Foot", "Thigh"):
                 placement = placement_label.lower()
                 stream_name = f"{side_label} {placement_label}"
                 inlet = None
@@ -1080,7 +1008,7 @@ class StimulationIMUs(StimulationBasic):
                     attr = f"{side}_leg_{placement}_{suffix}"
                     try:
                         # instantiate and store the FSM
-                        
+
                         fsm = fsm_cls(inlet=inlet_m, speed=self.speed, terminal_stance_divider=self.terminal_stance_divider,  FES=self.FES,  both_imu_methods=(self.method=="Both"), do_closed_loop=self.do_closed_loop)
                         setattr(self, attr, fsm)
                        
@@ -1115,6 +1043,30 @@ class StimulationIMUs(StimulationBasic):
                     except Exception:
                         print("debug: did not create gait fsms")
                         pass
+
+        # Single pelvis stream (shared between both hips). Try "Pelvis", fallback to "Custom 1".
+        for pelvis_stream_name in ("Pelvis", "Custom 1"):
+            try:
+                inlet_check = self._resolve_streaminlet(pelvis_stream_name)
+            except Exception:
+                inlet_check = None
+            if inlet_check is None:
+                continue
+            for m in methods_to_use:
+                try:
+                    inlet_m = self._resolve_streaminlet(pelvis_stream_name)
+                except Exception:
+                    inlet_m = None
+                if inlet_m is None:
+                    continue
+                fsm_cls, suffix = fsm_by_method[m]
+                try:
+                    fsm = fsm_cls(inlet=inlet_m, speed=self.speed, terminal_stance_divider=self.terminal_stance_divider, FES=self.FES, both_imu_methods=(self.method=="Both"), do_closed_loop=self.do_closed_loop)
+                    setattr(self, f"pelvis_{suffix}", fsm)
+                except Exception:
+                    print("debug: did not create pelvis fsm")
+            break  # bound to the first stream name that resolves
+
         # Choose which IMU stream drives the frontend step counters (prefer Foot; fallback to Shank)
         self._chosen_step_fsm = {"left": None, "right": None}
         self._wire_preferred_step_signals()
@@ -1199,13 +1151,21 @@ class StimulationIMUs(StimulationBasic):
         return (not right_fsm.is_phase_unknown()) and (not left_fsm.is_phase_unknown())
 
     def _iter_all_fsms(self):
-        """Yield every existing FSM instance (any side, any placement, any method)."""
-        for placement in ("shank", "foot", "thigh", "trunk"):
+        """Yield every existing FSM instance (any side, any placement, any method).
+
+        The pelvis sensor is side-less and yielded with side="pelvis", placement="pelvis"
+        so callers that build keys from (side, placement) get a stable identifier.
+        """
+        for placement in ("shank", "foot", "thigh"):
             for suffix in ("fsm1", "fsm2"):
                 for side in ("right", "left"):
                     fsm = getattr(self, f"{side}_leg_{placement}_{suffix}", None)
                     if fsm is not None:
                         yield side, placement, suffix, fsm
+        for suffix in ("fsm1", "fsm2"):
+            fsm = getattr(self, f"pelvis_{suffix}", None)
+            if fsm is not None:
+                yield "pelvis", "pelvis", suffix, fsm
     
     # Preferred-step-counter selection and wiring
     def _get_preferred_fsm_for_side(self, side: str):
@@ -1412,7 +1372,6 @@ class StimulationIMUs(StimulationBasic):
             with open(self.save_path, "wb") as f:
                 pickle.dump(data_to_save, f)
             print("Saving completed")
-            export_csv_logs(self.save_path, data_to_save)
             export_xlsx_log(self.save_path, data_to_save)
         except Exception as e:
             print(f"Data not saved: {e}")
@@ -1457,8 +1416,6 @@ class StimulationIMUs(StimulationBasic):
         left_shank_ready_fsm2 = getattr(self, "left_leg_shank_fsm2", None) is not None
         left_thigh_ready_fsm2 = getattr(self, "left_leg_thigh_fsm2", None) is not None
         left_foot_ready_fsm2 = getattr(self, "left_leg_foot_fsm2", None) is not None
-        left_trunk_ready_fsm1 = getattr(self, "left_leg_trunk_fsm1", None) is not None
-        left_trunk_ready_fsm2 = getattr(self, "left_leg_trunk_fsm2", None) is not None
 
         right_shank_ready_fsm1 = getattr(self, "right_leg_shank_fsm1", None) is not None
         right_thigh_ready_fsm1 = getattr(self, "right_leg_thigh_fsm1", None) is not None
@@ -1467,8 +1424,11 @@ class StimulationIMUs(StimulationBasic):
         right_shank_ready_fsm2 = getattr(self, "right_leg_shank_fsm2", None) is not None
         right_thigh_ready_fsm2 = getattr(self, "right_leg_thigh_fsm2", None) is not None
         right_foot_ready_fsm2 = getattr(self, "right_leg_foot_fsm2", None) is not None
-        right_trunk_ready_fsm1 = getattr(self, "right_leg_trunk_fsm1", None) is not None
-        right_trunk_ready_fsm2 = getattr(self, "right_leg_trunk_fsm2", None) is not None
+
+        # Single pelvis sensor (shared between both hips). FSM1 and FSM2 are the
+        # two acquisition pipelines; whichever is wired up provides the pelvis stream.
+        pelvis_ready_fsm1 = getattr(self, "pelvis_fsm1", None) is not None
+        pelvis_ready_fsm2 = getattr(self, "pelvis_fsm2", None) is not None
 
         left_ready_fsm1 = left_shank_ready_fsm1 and (left_thigh_ready_fsm1 or left_foot_ready_fsm1)
         left_ready_fsm2 = left_shank_ready_fsm2 and (left_thigh_ready_fsm2 or left_foot_ready_fsm2)
@@ -1477,6 +1437,19 @@ class StimulationIMUs(StimulationBasic):
 
         left_ready = True if left_ready_fsm1 or left_ready_fsm2 else False
         right_ready = True if right_ready_fsm1 or right_ready_fsm2 else False
+
+        # Single pelvis quaternion array — shared between left and right hip computation.
+        # Resolved once before the per-leg blocks so each side can reuse it.
+        try:
+            if pelvis_ready_fsm1:
+                q_pelvis_array = self.pelvis_fsm1.get_quaternion(last_n=150)
+            elif pelvis_ready_fsm2:
+                q_pelvis_array = self.pelvis_fsm2.get_quaternion(last_n=150)
+            else:
+                q_pelvis_array = None
+        except Exception as e:
+            print(f"[Pelvis] Failed to read quaternions: {e}")
+            q_pelvis_array = None
 
         # ----------------
         # LEFT LEG (if ready)
@@ -1487,17 +1460,15 @@ class StimulationIMUs(StimulationBasic):
                     q_shank_left_array = self.left_leg_shank_fsm1.get_quaternion(last_n=150)
                     q_thigh_left_array = self.left_leg_thigh_fsm1.get_quaternion(last_n=150) if left_thigh_ready_fsm1 else None
                     q_foot_left_array = self.left_leg_foot_fsm1.get_quaternion(last_n=150) if left_foot_ready_fsm1 else None
-                    q_trunk_left_array = self.left_leg_trunk_fsm1.get_quaternion(last_n=150) if left_trunk_ready_fsm1 else None
                 elif left_ready_fsm2:
                     q_shank_left_array = self.left_leg_shank_fsm2.get_quaternion(last_n=150)
                     q_thigh_left_array = self.left_leg_thigh_fsm2.get_quaternion(last_n=150) if left_thigh_ready_fsm2 else None
                     q_foot_left_array = self.left_leg_foot_fsm2.get_quaternion(last_n=150) if left_foot_ready_fsm2 else None
-                    q_trunk_left_array = self.left_leg_trunk_fsm2.get_quaternion(last_n=150) if left_trunk_ready_fsm2 else None
                 else:
                     pass
             except Exception as e:
                 print(f"[Left] Failed to read quaternions: {e}")
-                q_shank_left_array = q_thigh_left_array = q_foot_left_array = q_trunk_left_array = None
+                q_shank_left_array = q_thigh_left_array = q_foot_left_array = None
 
             if getattr(q_shank_left_array, "size", 0) > 0 and (getattr(q_thigh_left_array, "size", 0) > 0 or getattr(q_foot_left_array, "size", 0) > 0):
                 # Prefer device time from shank array (assuming first column = timestamp)
@@ -1513,9 +1484,9 @@ class StimulationIMUs(StimulationBasic):
                 if getattr(q_foot_left_array, "size", 0) > 0:
                     self.left_ankle_rom.ankle_compute_from_list(q_shank_left_array, q_foot_left_array, ts_left)
 
-                # Compute Hip ROM if trunk and thigh are available
-                if getattr(q_trunk_left_array, "size", 0) > 0 and getattr(q_thigh_left_array, "size", 0) > 0:
-                    self.left_hip_rom.compute_from_list(q_trunk_left_array, q_thigh_left_array, ts_left)
+                # Compute Hip ROM if pelvis and thigh are available
+                if getattr(q_pelvis_array, "size", 0) > 0 and getattr(q_thigh_left_array, "size", 0) > 0:
+                    self.left_hip_rom.compute_from_list(q_pelvis_array, q_thigh_left_array, ts_left)
 
                 # Choose phase/subphase
                 left_fsm = self.get_first_available_fsm(side="left")
@@ -1540,18 +1511,16 @@ class StimulationIMUs(StimulationBasic):
                     q_shank_right_array = self.right_leg_shank_fsm1.get_quaternion(last_n=150)
                     q_thigh_right_array = self.right_leg_thigh_fsm1.get_quaternion(last_n=150) if right_thigh_ready_fsm1 else None
                     q_foot_right_array = self.right_leg_foot_fsm1.get_quaternion(last_n=150) if right_foot_ready_fsm1 else None
-                    q_trunk_right_array = self.right_leg_trunk_fsm1.get_quaternion(last_n=150) if right_trunk_ready_fsm1 else None
                 elif right_ready_fsm2:
                     q_shank_right_array = self.right_leg_shank_fsm2.get_quaternion(last_n=150)
                     q_thigh_right_array = self.right_leg_thigh_fsm2.get_quaternion(last_n=150) if right_thigh_ready_fsm2 else None
                     q_foot_right_array = self.right_leg_foot_fsm2.get_quaternion(last_n=150) if right_foot_ready_fsm2 else None
-                    q_trunk_right_array = self.right_leg_trunk_fsm2.get_quaternion(last_n=150) if right_trunk_ready_fsm2 else None
                 else:
-                    q_shank_right_array = q_thigh_right_array = q_foot_right_array = q_trunk_right_array = None
-                
+                    q_shank_right_array = q_thigh_right_array = q_foot_right_array = None
+
             except Exception as e:
                 #print(f"[Right] Failed to read quaternions: {e}")
-                q_shank_right_array = q_thigh_right_array = q_foot_right_array = q_trunk_right_array = None
+                q_shank_right_array = q_thigh_right_array = q_foot_right_array = None
 
             if getattr(q_shank_right_array, "size", 0) > 0 and (getattr(q_thigh_right_array, "size", 0) > 0 or getattr(q_foot_right_array, "size", 0) > 0):
                 # Prefer device time from shank array
@@ -1566,9 +1535,9 @@ class StimulationIMUs(StimulationBasic):
                 if getattr(q_foot_right_array, "size", 0) > 0:
                     self.right_ankle_rom.ankle_compute_from_list(q_shank_right_array, q_foot_right_array, ts_right)
 
-                # Compute Hip ROM if trunk and thigh are available
-                if getattr(q_trunk_right_array, "size", 0) > 0 and getattr(q_thigh_right_array, "size", 0) > 0:
-                    self.right_hip_rom.compute_from_list(q_trunk_right_array, q_thigh_right_array, ts_right)
+                # Compute Hip ROM if pelvis and thigh are available
+                if getattr(q_pelvis_array, "size", 0) > 0 and getattr(q_thigh_right_array, "size", 0) > 0:
+                    self.right_hip_rom.compute_from_list(q_pelvis_array, q_thigh_right_array, ts_right)
 
                 right_fsm = self.get_first_available_fsm(side="right")
                 phase_right = right_fsm.active_phase if right_fsm is not None else None
@@ -1976,7 +1945,6 @@ class StimulationFSRandIMU(StimulationIMUs):
             with open(self.save_path, "wb") as f:
                 pickle.dump(data_to_save, f)
             print("Saving completed")
-            export_csv_logs(self.save_path, data_to_save)
             export_xlsx_log(self.save_path, data_to_save)
         except Exception as e:
             print(f"Data not saved: {e}")

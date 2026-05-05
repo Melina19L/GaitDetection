@@ -48,8 +48,9 @@ class AngleCalibrator(QObject):
         self.right_thigh_inlet = None
         self.left_foot_inlet = None
         self.right_foot_inlet = None
-        self.left_trunk_inlet = None
-        self.right_trunk_inlet = None
+        # Single pelvis sensor (replaces the previous left/right trunk pair).
+        # Shared between left and right hip computations.
+        self.pelvis_inlet = None
         self.left_angle_data = np.array([])
         self.right_angle_data = np.array([])
         self.left_ankle_data = np.array([])
@@ -86,8 +87,9 @@ class AngleCalibrator(QObject):
         # Each entry is [total_samples_in_window, last_chunk_timestamp]
         self._diag: dict[str, dict] = {
             name: {"count": 0, "last_ts": 0.0, "sync_gap_sum": 0.0, "sync_gap_n": 0}
-            for name in ("left_shank", "left_thigh", "left_foot", "left_trunk",
-                          "right_shank", "right_thigh", "right_foot", "right_trunk")
+            for name in ("left_shank", "left_thigh", "left_foot",
+                          "right_shank", "right_thigh", "right_foot",
+                          "pelvis")
         }
 
         # ── Per-inlet accumulation buffers ────────────────────────────────────
@@ -98,8 +100,9 @@ class AngleCalibrator(QObject):
         _BUF = 300
         self._acc = {
             name: deque(maxlen=_BUF)
-            for name in ("left_thigh", "left_shank", "left_foot", "left_trunk",
-                          "right_thigh", "right_shank", "right_foot", "right_trunk")
+            for name in ("left_thigh", "left_shank", "left_foot",
+                          "right_thigh", "right_shank", "right_foot",
+                          "pelvis")
         }
 
         # Diagnostic timer — fires every 2 s, reads the counters and emits
@@ -120,18 +123,20 @@ class AngleCalibrator(QObject):
         right_knee = self.right_shank_inlet is not None and self.right_thigh_inlet is not None
         left_ankle = self.left_shank_inlet is not None and self.left_foot_inlet is not None
         right_ankle = self.right_shank_inlet is not None and self.right_foot_inlet is not None
-        left_hip = self.left_thigh_inlet is not None and self.left_trunk_inlet is not None
-        right_hip = self.right_thigh_inlet is not None and self.right_trunk_inlet is not None
+        left_hip = self.left_thigh_inlet is not None and self.pelvis_inlet is not None
+        right_hip = self.right_thigh_inlet is not None and self.pelvis_inlet is not None
         return left_knee or right_knee or left_ankle or right_ankle or left_hip or right_hip
 
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
         self.timer.stop()
         self._diag_timer.stop()
-        if self.left_shank_inlet or self.left_trunk_inlet:
+        if self.left_shank_inlet or self.left_thigh_inlet or self.left_foot_inlet:
             self.__disconnect_from_streams_left()
-        if self.right_shank_inlet or self.right_trunk_inlet:
+        if self.right_shank_inlet or self.right_thigh_inlet or self.right_foot_inlet:
             self.__disconnect_from_streams_right()
+        # Pelvis is shared — close once if no leg side keeps it alive
+        self.__disconnect_pelvis_if_idle()
         if self.worker_thread:
             # If a worker thread is running, stop it
             self.worker_thread.quit()
@@ -337,11 +342,10 @@ class AngleCalibrator(QObject):
             (self.left_thigh_inlet,  "left_thigh"),
             (self.left_shank_inlet,  "left_shank"),
             (self.left_foot_inlet,   "left_foot"),
-            (self.left_trunk_inlet,  "left_trunk"),
             (self.right_thigh_inlet, "right_thigh"),
             (self.right_shank_inlet, "right_shank"),
             (self.right_foot_inlet,  "right_foot"),
-            (self.right_trunk_inlet, "right_trunk"),
+            (self.pelvis_inlet,      "pelvis"),
         ):
             if inlet is None:
                 continue
@@ -351,31 +355,40 @@ class AngleCalibrator(QObject):
                 self._diag[key]["count"]  += len(samples)
                 self._diag[key]["last_ts"] = now
 
-        # ── 2. helper: drain N matched pairs from two deques ───────────────────
+        # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
+        # Pelvis samples feed BOTH left and right hip computations, so they are
+        # NOT included in the per-leg `min` and we don't pop them per-leg either.
+        # Instead we take a snapshot, peek for hip math on each side, then pop
+        # only the maximum count actually used by either side.
+        pelvis_snapshot = list(self._acc["pelvis"]) if self.pelvis_inlet else []
+        pelvis_used = 0
+
         # ── 3. Process LEFT LEG ───────────────────────────────────────────────
         left_queues = []
-        if self.left_trunk_inlet: left_queues.append(self._acc["left_trunk"])
         if self.left_thigh_inlet: left_queues.append(self._acc["left_thigh"])
         if self.left_shank_inlet: left_queues.append(self._acc["left_shank"])
         if self.left_foot_inlet:  left_queues.append(self._acc["left_foot"])
-        
+
         if left_queues:
             n_left = min((len(q) for q in left_queues))
             if n_left > 0:
-                l_trunk_s = [self._acc["left_trunk"].popleft() for _ in range(n_left)] if self.left_trunk_inlet else []
                 l_thigh_s = [self._acc["left_thigh"].popleft() for _ in range(n_left)] if self.left_thigh_inlet else []
                 l_shank_s = [self._acc["left_shank"].popleft() for _ in range(n_left)] if self.left_shank_inlet else []
                 l_foot_s  = [self._acc["left_foot"].popleft()  for _ in range(n_left)] if self.left_foot_inlet  else []
 
-                # Hip LEFT
-                if self.left_trunk_inlet and self.left_thigh_inlet:
-                    hip_angles = self.__compute_angles_from_data(
-                        l_trunk_s, [], l_thigh_s, [],
-                        self.left_hip_offset, self._diag["left_trunk"],
-                    )
-                    self.left_hip_data = np.append(self.left_hip_data, hip_angles)
-                    if len(hip_angles):
-                        self.left_hip_timestamps = np.append(self.left_hip_timestamps, np.full(len(hip_angles), now))
+                # Hip LEFT — pelvis (proximal) vs left thigh (distal)
+                if self.pelvis_inlet and self.left_thigh_inlet and l_thigh_s:
+                    n_hip_l = min(len(pelvis_snapshot), len(l_thigh_s))
+                    if n_hip_l > 0:
+                        p_s = pelvis_snapshot[:n_hip_l]
+                        hip_angles = self.__compute_angles_from_data(
+                            p_s, [], l_thigh_s[:n_hip_l], [],
+                            self.left_hip_offset, self._diag["pelvis"],
+                        )
+                        self.left_hip_data = np.append(self.left_hip_data, hip_angles)
+                        if len(hip_angles):
+                            self.left_hip_timestamps = np.append(self.left_hip_timestamps, np.full(len(hip_angles), now))
+                        pelvis_used = max(pelvis_used, n_hip_l)
 
                 # Knee LEFT
                 if self.left_thigh_inlet and self.left_shank_inlet:
@@ -400,28 +413,30 @@ class AngleCalibrator(QObject):
 
         # ── 4. Process RIGHT LEG ──────────────────────────────────────────────
         right_queues = []
-        if self.right_trunk_inlet: right_queues.append(self._acc["right_trunk"])
         if self.right_thigh_inlet: right_queues.append(self._acc["right_thigh"])
         if self.right_shank_inlet: right_queues.append(self._acc["right_shank"])
         if self.right_foot_inlet:  right_queues.append(self._acc["right_foot"])
-        
+
         if right_queues:
             n_right = min((len(q) for q in right_queues))
             if n_right > 0:
-                r_trunk_s = [self._acc["right_trunk"].popleft() for _ in range(n_right)] if self.right_trunk_inlet else []
                 r_thigh_s = [self._acc["right_thigh"].popleft() for _ in range(n_right)] if self.right_thigh_inlet else []
                 r_shank_s = [self._acc["right_shank"].popleft() for _ in range(n_right)] if self.right_shank_inlet else []
                 r_foot_s  = [self._acc["right_foot"].popleft()  for _ in range(n_right)] if self.right_foot_inlet  else []
 
-                # Hip RIGHT
-                if self.right_trunk_inlet and self.right_thigh_inlet:
-                    hip_angles = self.__compute_angles_from_data(
-                        r_trunk_s, [], r_thigh_s, [],
-                        self.right_hip_offset, self._diag["right_trunk"],
-                    )
-                    self.right_hip_data = np.append(self.right_hip_data, hip_angles)
-                    if len(hip_angles):
-                        self.right_hip_timestamps = np.append(self.right_hip_timestamps, np.full(len(hip_angles), now))
+                # Hip RIGHT — pelvis (proximal) vs right thigh (distal)
+                if self.pelvis_inlet and self.right_thigh_inlet and r_thigh_s:
+                    n_hip_r = min(len(pelvis_snapshot), len(r_thigh_s))
+                    if n_hip_r > 0:
+                        p_s = pelvis_snapshot[:n_hip_r]
+                        hip_angles = self.__compute_angles_from_data(
+                            p_s, [], r_thigh_s[:n_hip_r], [],
+                            self.right_hip_offset, self._diag["pelvis"],
+                        )
+                        self.right_hip_data = np.append(self.right_hip_data, hip_angles)
+                        if len(hip_angles):
+                            self.right_hip_timestamps = np.append(self.right_hip_timestamps, np.full(len(hip_angles), now))
+                        pelvis_used = max(pelvis_used, n_hip_r)
 
                 # Knee RIGHT
                 if self.right_thigh_inlet and self.right_shank_inlet:
@@ -443,6 +458,11 @@ class AngleCalibrator(QObject):
                     self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                     if len(ankle_angles):
                         self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, np.full(len(ankle_angles), now))
+
+        # ── 5. Drop the pelvis samples consumed by hip computations ───────────
+        if self.pelvis_inlet and pelvis_used > 0:
+            for _ in range(min(pelvis_used, len(self._acc["pelvis"]))):
+                self._acc["pelvis"].popleft()
 
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
@@ -543,15 +563,18 @@ class AngleCalibrator(QObject):
     @Slot(tuple)
     def handle_found_inlets(self, inlets: tuple):
         """Handle the found inlets from the stream resolver.
-        inlets is a tuple of (shank_inlet, thigh_inlet, foot_inlet).
-        foot_inlet may be None if no foot IMU is available.
+
+        ``inlets`` is ``(shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet)``.
+        The pelvis inlet is shared between sides: the second leg to connect
+        receives the same pelvis inlet (or ``None`` if it was already wired up)
+        so we never bind two inlets to the same LSL stream.
         """
         # Clean up the worker thread
         self.worker_thread.quit()
         self.worker_thread.wait()
         self.worker_thread.deleteLater()
         self.worker_thread = None
-        
+
         # Re-enable the checkbox that was being connected
         if self.resolving == SIDE.LEFT:
             self.left_checkbox.setEnabled(True)
@@ -569,36 +592,44 @@ class AngleCalibrator(QObject):
             return
 
         # Extract inlets
-        shank_inlet, thigh_inlet, foot_inlet, trunk_inlet = inlets
+        shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet = inlets
+
+        # Adopt the pelvis inlet only if we don't already own one for this run
+        if pelvis_inlet is not None and self.pelvis_inlet is None:
+            self.pelvis_inlet = pelvis_inlet
+        elif pelvis_inlet is not None and self.pelvis_inlet is not None:
+            # We already have one — close the duplicate stream returned this round
+            try:
+                pelvis_inlet.close_stream()
+            except Exception:
+                pass
+
+        pelvis_label = "Pelvis" if self.pelvis_inlet is not None else None
 
         if self.resolving == SIDE.LEFT:
-            # Store the inlets and start the timer
             self.left_shank_inlet = shank_inlet
             self.left_thigh_inlet = thigh_inlet
-            self.left_foot_inlet = foot_inlet
-            self.left_trunk_inlet = trunk_inlet
-            
+            self.left_foot_inlet  = foot_inlet
+
             connected_names = []
             if shank_inlet: connected_names.append("Shank")
             if thigh_inlet: connected_names.append("Thigh")
-            if foot_inlet: connected_names.append("Foot")
-            if trunk_inlet: connected_names.append("Trunk")
+            if foot_inlet:  connected_names.append("Foot")
+            if pelvis_label: connected_names.append(pelvis_label)
             self.message_signal.emit(f"Left leg streams connected: {', '.join(connected_names)}.")
             self.timer.start()
             self.start_diagnostics()
 
         elif self.resolving == SIDE.RIGHT:
-            # Store the inlets and start the timer
             self.right_shank_inlet = shank_inlet
             self.right_thigh_inlet = thigh_inlet
-            self.right_foot_inlet = foot_inlet
-            self.right_trunk_inlet = trunk_inlet
-            
+            self.right_foot_inlet  = foot_inlet
+
             connected_names = []
             if shank_inlet: connected_names.append("Shank")
             if thigh_inlet: connected_names.append("Thigh")
-            if foot_inlet: connected_names.append("Foot")
-            if trunk_inlet: connected_names.append("Trunk")
+            if foot_inlet:  connected_names.append("Foot")
+            if pelvis_label: connected_names.append(pelvis_label)
             self.message_signal.emit(f"Right leg streams connected: {', '.join(connected_names)}.")
             self.timer.start()
             self.start_diagnostics()
@@ -708,15 +739,16 @@ class AngleCalibrator(QObject):
                 QCoreApplication.processEvents()
             return None, None, None
 
-        def _one_side_hip(trunk_inlet, thigh_inlet, offset_val):
-            if not (trunk_inlet and thigh_inlet):
+        def _one_side_hip(thigh_inlet, offset_val):
+            """Calibrate hip using the shared pelvis sensor as the proximal reference."""
+            if not (self.pelvis_inlet and thigh_inlet):
                 return None
             max_tries = 10
             for _ in range(max_tries):
-                q_trunk = self.__get_latest_quaternion_nonblocking(trunk_inlet)
-                q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
-                if q_trunk is not None and q_thigh is not None:
-                    return ROM.functional_calibration(q_trunk, q_thigh) - offset_val
+                q_pelvis = self.__get_latest_quaternion_nonblocking(self.pelvis_inlet)
+                q_thigh  = self.__get_latest_quaternion_nonblocking(thigh_inlet)
+                if q_pelvis is not None and q_thigh is not None:
+                    return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
                 QCoreApplication.processEvents()
             return None
 
@@ -730,13 +762,13 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
             
-            # Hip calibration (safe — does not block if trunk is absent)
+            # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
-                hip_off = _one_side_hip(self.left_trunk_inlet, self.left_thigh_inlet, hip_tgt)
+                hip_off = _one_side_hip(self.left_thigh_inlet, hip_tgt)
                 if hip_off is not None:
                     self.left_hip_offset = hip_off
-                elif self.left_trunk_inlet and self.left_thigh_inlet:
+                elif self.pelvis_inlet and self.left_thigh_inlet:
                     self.message_signal.emit("Left hip: no data yet. Try again when streams are active.")
             except Exception as e:
                 print(f"[CalibHip LEFT] skipped: {e}")
@@ -768,13 +800,13 @@ class AngleCalibrator(QObject):
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
                 
-            # Hip calibration (safe — does not block if trunk is absent)
+            # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
-                hip_off_r = _one_side_hip(self.right_trunk_inlet, self.right_thigh_inlet, hip_tgt_r)
+                hip_off_r = _one_side_hip(self.right_thigh_inlet, hip_tgt_r)
                 if hip_off_r is not None:
                     self.right_hip_offset = hip_off_r
-                elif self.right_trunk_inlet and self.right_thigh_inlet:
+                elif self.pelvis_inlet and self.right_thigh_inlet:
                     self.message_signal.emit("Right hip: no data yet. Try again when streams are active.")
             except Exception as e:
                 print(f"[CalibHip RIGHT] skipped: {e}")
@@ -875,10 +907,8 @@ class AngleCalibrator(QObject):
             self.left_foot_inlet.close_stream()
             del self.left_foot_inlet
             self.left_foot_inlet = None
-        if self.left_trunk_inlet is not None:
-            self.left_trunk_inlet.close_stream()
-            del self.left_trunk_inlet
-            self.left_trunk_inlet = None
+        # Pelvis is shared with the right leg — drop only when both sides are gone.
+        self.__disconnect_pelvis_if_idle()
 
     def __disconnect_from_streams_right(self):
         # Close the streams for the right leg
@@ -894,10 +924,26 @@ class AngleCalibrator(QObject):
             self.right_foot_inlet.close_stream()
             del self.right_foot_inlet
             self.right_foot_inlet = None
-        if self.right_trunk_inlet is not None:
-            self.right_trunk_inlet.close_stream()
-            del self.right_trunk_inlet
-            self.right_trunk_inlet = None
+        # Pelvis is shared with the left leg — drop only when both sides are gone.
+        self.__disconnect_pelvis_if_idle()
+
+    def __disconnect_pelvis_if_idle(self):
+        """Close the shared pelvis inlet only when no leg is connected anymore."""
+        any_left  = bool(self.left_shank_inlet  or self.left_thigh_inlet  or self.left_foot_inlet)
+        any_right = bool(self.right_shank_inlet or self.right_thigh_inlet or self.right_foot_inlet)
+        if any_left or any_right:
+            return
+        if self.pelvis_inlet is not None:
+            try:
+                self.pelvis_inlet.close_stream()
+            except Exception:
+                pass
+            self.pelvis_inlet = None
+            # Allow the resolver to re-bind on the next connect.
+            try:
+                self.stream_resolver.pelvis_already_bound = False
+            except Exception:
+                pass
 
     def __calculate_angles(self, shank_inlet: StreamInlet, thigh_inlet: StreamInlet, angle_offset: float) -> np.ndarray:
         """Compute joint angles for ALL synchronized sample pairs in the current chunk.
@@ -1026,6 +1072,7 @@ class AngleCalibrator(QObject):
             ("R-Thigh",  "right_thigh", self.right_thigh_inlet is not None),
             ("R-Shank",  "right_shank", self.right_shank_inlet is not None),
             ("R-Foot",   "right_foot",  self.right_foot_inlet  is not None),
+            ("Pelvis",   "pelvis",      self.pelvis_inlet      is not None),
         ]
 
         # ── Pairing for sync-gap check (proximal diag key → label) ──
@@ -1113,61 +1160,71 @@ class LSLStreamResolver(QObject):
     message_signal = Signal(str)
     found_inlets = Signal(tuple)
 
+    # Pelvis is a single shared sensor (replaces the previous left/right trunk pair).
+    # Only the FIRST leg to connect resolves it; the second leg sees ``pelvis_already_bound``
+    # set to True and skips resolution to avoid binding two inlets to the same stream.
+    pelvis_already_bound: bool = False
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.found_inlets.connect(self.move_to_main)
 
+    def _resolve_pelvis(self):
+        """Resolve the single pelvis sensor stream (``Pelvis`` → fallback ``Custom 1``).
+
+        Returns a ``StreamInlet`` or ``None``.  Resolution is skipped (returns ``None``)
+        when ``pelvis_already_bound`` is set, so the second leg connect doesn't try to
+        bind a duplicate inlet.
+        """
+        if self.pelvis_already_bound:
+            return None
+        PELVIS_TIMEOUT = 1.0
+        stream = resolve_byprop("name", "Pelvis", timeout=PELVIS_TIMEOUT)
+        if not stream:
+            stream = resolve_byprop("name", "Custom 1", timeout=PELVIS_TIMEOUT)
+        if not stream:
+            return None
+        inlet = StreamInlet(stream[0])
+        self.pelvis_already_bound = True
+        return inlet
+
     @Slot()
     def resolve_streams_for_left(self):
         print("Resolving streams for left leg...")
-        # Resolve the LSL streams for the left leg (shank + thigh + foot + trunk)
         stream_shank = resolve_byprop("name", "Left Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Left Thigh", timeout=TIMEOUT)
-        stream_foot = resolve_byprop("name", "Left Foot", timeout=TIMEOUT)
-        
-        # Try 'Left Trunk', fallback to 'Custom 1' — short timeout (optional sensor)
-        TRUNK_TIMEOUT = 1.0
-        stream_trunk = resolve_byprop("name", "Left Trunk", timeout=TRUNK_TIMEOUT)
-        if not stream_trunk:
-            stream_trunk = resolve_byprop("name", "Custom 1", timeout=TRUNK_TIMEOUT)
-        
-        shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
-        thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
-        foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
-        trunk_inlet = StreamInlet(stream_trunk[0]) if stream_trunk else None
-        
-        if not any([shank_inlet, thigh_inlet, foot_inlet, trunk_inlet]):
+        stream_foot  = resolve_byprop("name", "Left Foot",  timeout=TIMEOUT)
+
+        shank_inlet  = StreamInlet(stream_shank[0]) if stream_shank else None
+        thigh_inlet  = StreamInlet(stream_thigh[0]) if stream_thigh else None
+        foot_inlet   = StreamInlet(stream_foot[0])  if stream_foot  else None
+        pelvis_inlet = self._resolve_pelvis()
+
+        if not any([shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet]):
             self.message_signal.emit("Left leg streams not found. Please check the LSL streams.")
         else:
             self.message_signal.emit("Left leg streams found. Connecting...")
-            
-        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, trunk_inlet))
+
+        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet))
 
     @Slot()
     def resolve_streams_for_right(self):
         print("Resolving streams for right leg...")
-        # Resolve the LSL streams for the right leg (shank + thigh + foot + trunk)
         stream_shank = resolve_byprop("name", "Right Shank", timeout=TIMEOUT)
         stream_thigh = resolve_byprop("name", "Right Thigh", timeout=TIMEOUT)
-        stream_foot = resolve_byprop("name", "Right Foot", timeout=TIMEOUT)
-        
-        # Try 'Right Trunk', fallback to 'Custom 2' — short timeout (optional sensor)
-        TRUNK_TIMEOUT = 1.0
-        stream_trunk = resolve_byprop("name", "Right Trunk", timeout=TRUNK_TIMEOUT)
-        if not stream_trunk:
-            stream_trunk = resolve_byprop("name", "Custom 2", timeout=TRUNK_TIMEOUT)
-        
-        shank_inlet = StreamInlet(stream_shank[0]) if stream_shank else None
-        thigh_inlet = StreamInlet(stream_thigh[0]) if stream_thigh else None
-        foot_inlet = StreamInlet(stream_foot[0]) if stream_foot else None
-        trunk_inlet = StreamInlet(stream_trunk[0]) if stream_trunk else None
+        stream_foot  = resolve_byprop("name", "Right Foot",  timeout=TIMEOUT)
 
-        if not any([shank_inlet, thigh_inlet, foot_inlet, trunk_inlet]):
+        shank_inlet  = StreamInlet(stream_shank[0]) if stream_shank else None
+        thigh_inlet  = StreamInlet(stream_thigh[0]) if stream_thigh else None
+        foot_inlet   = StreamInlet(stream_foot[0])  if stream_foot  else None
+        pelvis_inlet = self._resolve_pelvis()
+
+        if not any([shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet]):
             self.message_signal.emit("Right leg streams not found. Please check the LSL streams.")
         else:
             self.message_signal.emit("Right leg streams found. Connecting...")
-            
-        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, trunk_inlet))
+
+        self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet))
             
     @Slot()            
     def move_to_main(self):

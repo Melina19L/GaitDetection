@@ -248,7 +248,7 @@ class SetupMainWindow:
             if new_stim_btn:
                 new_stim_btn.clicked.connect(lambda: (
                     self.ui.left_menu.select_only_one("btn_stimulation_2"),
-                    MainFunctions.set_page(self, self.ui.load_pages.page_10)
+                    MainFunctions.set_page(self, self.ui.load_pages.page_11)
                 ))
         except Exception:
             pass
@@ -625,7 +625,7 @@ class SetupMainWindow:
         # BUTTON CLICKED
         def subj_clicked():
             self.ui.left_menu.select_only_one("btn_stimulation_2")
-            MainFunctions.set_page(self, self.ui.load_pages.page_10)
+            MainFunctions.set_page(self, self.ui.load_pages.page_11)
 
         def task_clicked():
             self.ui.left_menu.select_only_one("btn_task_info")
@@ -1389,8 +1389,8 @@ class SetupMainWindow:
         # BUTTON CLICKED
         def finish_btn_clicked():
             self.ui.left_menu.select_only_one("btn_stimulation_2")
-            MainFunctions.set_page(self, self.ui.load_pages.page_10)
-        
+            MainFunctions.set_page(self, self.ui.load_pages.page_11)
+
         def finish_btn_page3_to_setup():
             # Select "Home" in the left menu and show Page 1
             self.ui.left_menu.select_only_one("btn_home")
@@ -5904,8 +5904,8 @@ class SetupMainWindow:
             self.start_experiment.emit(task_dict)
 
         def cancel_clicked():
-            # Load home page and select the tab
-            MainFunctions.set_page(self, self.ui.load_pages.page_10)
+            # Cancel the confirmation step → return to the Pre-Test parameter review.
+            MainFunctions.set_page(self, self.ui.load_pages.page_11)
             self.ui.left_menu.select_only_one("btn_stimulation_2")
 
         # CONNECT BUTTONS
@@ -5965,8 +5965,8 @@ class SetupMainWindow:
                 if isinstance(line_edit, PyLineEdit):
                     line_edit.deleteLater()
 
-            # Load PAGE 1 and select the tab
-            MainFunctions.set_page(self, self.ui.load_pages.page_10)
+            # After viewing results: return to the Pre-Test parameter review page.
+            MainFunctions.set_page(self, self.ui.load_pages.page_11)
             self.ui.left_menu.select_only_one("btn_stimulation_2")
 
             # Renable menu buttons
@@ -6630,19 +6630,19 @@ class SetupMainWindow:
         def left_hip_state_changed(state: Qt.CheckState):
             if state == Qt.CheckState.Checked:
                 cal = self.angle_calibrator
-                if cal.left_trunk_inlet and cal.left_thigh_inlet:
-                    update_imu_status("Left Hip: sensors connected (Trunk + Thigh).")
+                if cal.pelvis_inlet and cal.left_thigh_inlet:
+                    update_imu_status("Left Hip: sensors connected (Pelvis + Left Thigh).")
                 else:
-                    update_imu_error("Left Hip: Trunk or Thigh sensor not connected. Enable Left Leg first.")
+                    update_imu_error("Left Hip: Pelvis or Left Thigh sensor not connected. Enable Left Leg first.")
                     self.left_hip_toggle.setChecked(False)
 
         def right_hip_state_changed(state: Qt.CheckState):
             if state == Qt.CheckState.Checked:
                 cal = self.angle_calibrator
-                if cal.right_trunk_inlet and cal.right_thigh_inlet:
-                    update_imu_status("Right Hip: sensors connected (Trunk + Thigh).")
+                if cal.pelvis_inlet and cal.right_thigh_inlet:
+                    update_imu_status("Right Hip: sensors connected (Pelvis + Right Thigh).")
                 else:
-                    update_imu_error("Right Hip: Trunk or Thigh sensor not connected. Enable Right Leg first.")
+                    update_imu_error("Right Hip: Pelvis or Right Thigh sensor not connected. Enable Right Leg first.")
                     self.right_hip_toggle.setChecked(False)
 
         # ── CONNECT BUTTONS ──
@@ -6947,6 +6947,72 @@ class SetupMainWindow:
         # self.right_btn_2.setMaximumHeight(40)
         # self.right_btn_2.clicked.connect(lambda: MainFunctions.set_right_column_menu(self, self.ui.right_column.menu_1))
         # self.ui.right_column.btn_2_layout.addWidget(self.right_btn_2)
+
+        # ///////////////////////////////////////////////////////////////
+        # PAGE 11: Pre-Test (Stimulation Parameters review)
+        # ///////////////////////////////////////////////////////////////
+        # Built last so every Page-10 widget already exists. We then move the
+        # stimulation-parameter widgets from page_10 to page_11, leaving page_10
+        # with just the real-time plots + Start/Pause/Stop + Status & Log.
+        try:
+            page_10 = self.ui.load_pages.page_10
+            page_11 = QWidget(self.ui.load_pages.pages)
+            page_11.setObjectName("page_11")
+            page_11_layout = QVBoxLayout(page_11)
+            page_11_layout.setContentsMargins(8, 6, 8, 6)
+            page_11_layout.setSpacing(8)
+            self.ui.load_pages.page_11 = page_11
+
+            page_10_layout = page_10.layout()
+
+            def _move_to_page_11(widget):
+                if widget is None:
+                    return
+                if page_10_layout is not None:
+                    try:
+                        page_10_layout.removeWidget(widget)
+                    except Exception:
+                        pass
+                widget.setParent(page_11)
+                page_11_layout.addWidget(widget)
+
+            # Move the parameter-review widgets (built earlier on page_10) to page_11.
+            for _w in (
+                getattr(self, "stim_params_title_10", None),
+                getattr(self, "cf_row_10", None),
+                getattr(self, "task_view_frame_10", None),
+                getattr(self, "page10_test_frame", None),
+            ):
+                _move_to_page_11(_w)
+
+            # Footer: "Next →" button to advance to the test-execution page.
+            self.page11_next_btn_widget = QWidget(page_11)
+            self.page11_next_btn_widget.setMaximumHeight(60)
+            _next_layout = QHBoxLayout(self.page11_next_btn_widget)
+            _next_layout.setContentsMargins(0, 0, 0, 0)
+            _next_layout.addStretch(1)
+            self.page11_next_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Next →")
+            self.page11_next_btn.setToolTip("Proceed to test execution (real-time plots + Start/Pause/Stop)")
+            self.page11_next_btn.setMinimumWidth(160)
+            self.page11_next_btn.clicked.connect(
+                lambda: MainFunctions.set_page(self, self.ui.load_pages.page_10)
+            )
+            _next_layout.addWidget(self.page11_next_btn)
+            _next_layout.addStretch(1)
+            page_11_layout.addStretch(1)
+            page_11_layout.addWidget(self.page11_next_btn_widget)
+
+            self.ui.load_pages.pages.addWidget(page_11)
+
+            # Page 10 now only hosts plots + control buttons + status/log: add a clean title at top.
+            self.page10_test_title = QLabel("Test Execution — Real-Time Monitoring", page_10)
+            self.page10_test_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.page10_test_title.setStyleSheet("font-size: 16pt; font-weight: bold;")
+            self.page10_test_title.setMaximumHeight(36)
+            if page_10_layout is not None:
+                page_10_layout.insertWidget(0, self.page10_test_title)
+        except Exception as _e:
+            print(f"[Page split] Failed to build Pre-Test page: {_e}")
 
         # ///////////////////////////////////////////////////////////////
         # END - WIDGETS

@@ -81,13 +81,46 @@ def load_data(file_path):
             data["left_ankle_timestamps"] = ts_l
             data["left_ankle_angles"] = ang_l
             print("   -> Ricostruita Caviglia Sinistra")
-            
+
         # Prova a destra (shank + foot)
         ts_r, ang_r = _compute_angle_offline(data, "right_shank_fsm1", "right_foot_fsm1")
         if ts_r is not None:
             data["right_ankle_timestamps"] = ts_r
             data["right_ankle_angles"] = ang_r
             print("   -> Ricostruita Caviglia Destra")
+
+    # Se mancano gli hip ma abbiamo i dati RAW di pelvis + thigh, li ricostruiamo offline.
+    # Per i .pkl più vecchi che usavano left_trunk/right_trunk separati, facciamo fallback
+    # a quelle chiavi così il file legacy resta caricabile senza modifiche.
+    if not has_hip and "rom_data" in data:
+        print(" - Ricostruzione angoli anca offline dai quaternioni raw...")
+        rom_data = data.get("rom_data", {})
+
+        def _pick_pelvis_key():
+            for candidate in ("pelvis_fsm1", "pelvis_fsm2", "Pelvis_fsm1", "Pelvis_fsm2"):
+                if candidate in rom_data:
+                    return candidate
+            return None
+
+        pelvis_key = _pick_pelvis_key()
+
+        # LEFT hip
+        prox_left = pelvis_key or ("left_trunk_fsm1" if "left_trunk_fsm1" in rom_data else None)
+        if prox_left and "left_thigh_fsm1" in rom_data:
+            ts_l, ang_l = _compute_angle_offline(data, prox_left, "left_thigh_fsm1")
+            if ts_l is not None:
+                data["left_hip_timestamps"] = ts_l
+                data["left_hip_angles"] = ang_l
+                print(f"   -> Ricostruita Anca Sinistra (proximal={prox_left})")
+
+        # RIGHT hip
+        prox_right = pelvis_key or ("right_trunk_fsm1" if "right_trunk_fsm1" in rom_data else None)
+        if prox_right and "right_thigh_fsm1" in rom_data:
+            ts_r, ang_r = _compute_angle_offline(data, prox_right, "right_thigh_fsm1")
+            if ts_r is not None:
+                data["right_hip_timestamps"] = ts_r
+                data["right_hip_angles"] = ang_r
+                print(f"   -> Ricostruita Anca Destra (proximal={prox_right})")
             
     # Normalizza i timestamp per farli partire da 0
     print(" - Normalizzazione timestamps (partenza da t=0s)...")
