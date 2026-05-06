@@ -131,7 +131,11 @@ class FSRIMUGaitFSM(QObject):
             self.timestamps_fsr_offline = np.append(self.timestamps_fsr_offline, np.array(timestamps_fsr))
             
         #IMU
-        # Pull data from lsl stream
+        # Pull data from lsl stream — guard against missing IMU inlet:
+        # StimulationFSRandIMU may construct this FSM with inlet_imu=None when
+        # the leg's IMU stream isn't available (see stimulation_classes.py:1790).
+        if self.inlet_imu is None:
+            return
         samples, timestamps = self.inlet_imu.pull_chunk(timeout=0.001, max_samples=1000)
 
         if timestamps:
