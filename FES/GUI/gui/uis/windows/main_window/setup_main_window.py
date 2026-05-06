@@ -6388,19 +6388,23 @@ class SetupMainWindow:
         self.page10_plots_frame.setStyleSheet(
             f"QFrame#page10_plots_frame {{border: 2px solid {self.themes['app_color']['bg_two']}; border-radius: 4px;}}"
         )
-        _page10_plots_layout = QVBoxLayout(self.page10_plots_frame)
+        # Plots arranged side-by-side (3 columns) so each plot gets ~1/3 of the
+        # window width and the FULL plot-frame height — much better aspect ratio
+        # than the previous vertically-stacked layout where every plot was thin
+        # and waveform amplitudes were hard to read.
+        _page10_plots_layout = QHBoxLayout(self.page10_plots_frame)
         _page10_plots_layout.setContentsMargins(8, 6, 8, 6)
-        _page10_plots_layout.setSpacing(4)
+        _page10_plots_layout.setSpacing(8)
 
         _fg = self.themes["app_color"]["text_foreground"]
-        _label_style = f"font-size: 11pt; font-weight: 600; color: {_fg};"
+        _label_style = f"font-size: 12pt; font-weight: 600; color: {_fg};"
 
         def _legend_row(label_left_text, color_left, label_right_text, color_right):
             w = QWidget()
-            w.setMaximumHeight(20)
+            w.setMaximumHeight(22)
             lay = QHBoxLayout(w)
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(20)
+            lay.setSpacing(14)
             lay.addStretch(1)
             ll = QLabel(f"■ {label_left_text}")
             ll.setStyleSheet(f"font-size: 9pt; color: {color_left};")
@@ -6411,12 +6415,22 @@ class SetupMainWindow:
             lay.addStretch(1)
             return w
 
+        def _plot_column(title_text: str, plot_widget, legend_widget):
+            """One vertical column = title on top, plot in the middle, legend at the bottom."""
+            col = QWidget(self.page10_plots_frame)
+            col_layout = QVBoxLayout(col)
+            col_layout.setContentsMargins(0, 0, 0, 0)
+            col_layout.setSpacing(2)
+            title = QLabel(title_text, col)
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title.setStyleSheet(_label_style)
+            title.setMaximumHeight(22)
+            col_layout.addWidget(title)
+            col_layout.addWidget(plot_widget, 1)
+            col_layout.addWidget(legend_widget)
+            return col
+
         # Knee
-        _knee_title = QLabel("Knee Angle")
-        _knee_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        _knee_title.setStyleSheet(_label_style)
-        _knee_title.setMaximumHeight(20)
-        _page10_plots_layout.addWidget(_knee_title)
         self.page10_knee_plot = PyAnglePlot(
             self.angle_calibrator,
             axis_color=_fg,
@@ -6425,18 +6439,14 @@ class SetupMainWindow:
             line_color_right=self.themes["app_color"]["red"],
             max_points=1000,
         )
-        _page10_plots_layout.addWidget(self.page10_knee_plot, 1)
-        _page10_plots_layout.addWidget(_legend_row(
-            "Left Knee", self.themes["app_color"]["yellow"],
-            "Right Knee", self.themes["app_color"]["red"],
-        ))
+        _knee_col = _plot_column(
+            "Knee Angle",
+            self.page10_knee_plot,
+            _legend_row("Left Knee", self.themes["app_color"]["yellow"],
+                        "Right Knee", self.themes["app_color"]["red"]),
+        )
 
         # Ankle
-        _ankle_title = QLabel("Ankle Angle")
-        _ankle_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        _ankle_title.setStyleSheet(_label_style)
-        _ankle_title.setMaximumHeight(20)
-        _page10_plots_layout.addWidget(_ankle_title)
         self.page10_ankle_plot = PyAnklePlot(
             self.angle_calibrator,
             axis_color=_fg,
@@ -6445,18 +6455,13 @@ class SetupMainWindow:
             line_color_right="#bd93f9",
             max_points=1000,
         )
-        _page10_plots_layout.addWidget(self.page10_ankle_plot, 1)
-        _page10_plots_layout.addWidget(_legend_row(
-            "Left Ankle", "#50fa7b",
-            "Right Ankle", "#bd93f9",
-        ))
+        _ankle_col = _plot_column(
+            "Ankle Angle",
+            self.page10_ankle_plot,
+            _legend_row("Left Ankle", "#50fa7b", "Right Ankle", "#bd93f9"),
+        )
 
         # Hip
-        _hip_title = QLabel("Hip Angle")
-        _hip_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        _hip_title.setStyleSheet(_label_style)
-        _hip_title.setMaximumHeight(20)
-        _page10_plots_layout.addWidget(_hip_title)
         self.page10_hip_plot = PyHipPlot(
             self.angle_calibrator,
             axis_color=_fg,
@@ -6465,11 +6470,20 @@ class SetupMainWindow:
             line_color_right="#ffb86c",
             max_points=1000,
         )
-        _page10_plots_layout.addWidget(self.page10_hip_plot, 1)
-        _page10_plots_layout.addWidget(_legend_row(
-            "Left Hip", "#8be9fd",
-            "Right Hip", "#ffb86c",
-        ))
+        _hip_col = _plot_column(
+            "Hip Angle",
+            self.page10_hip_plot,
+            _legend_row("Left Hip", "#8be9fd", "Right Hip", "#ffb86c"),
+        )
+
+        # Stretch=1 on each column so the 3 plots share the row width equally.
+        _page10_plots_layout.addWidget(_knee_col,  1)
+        _page10_plots_layout.addWidget(_ankle_col, 1)
+        _page10_plots_layout.addWidget(_hip_col,   1)
+
+        # Hint a sane minimum height so the plot frame stays tall enough to read
+        # waveform amplitudes even when the Status & Log panel below grows.
+        self.page10_plots_frame.setMinimumHeight(380)
 
         # Show both legs by default; operator doesn't need to toggle here.
         for _p, _l, _r in (
@@ -6494,13 +6508,18 @@ class SetupMainWindow:
         self.page10_plot_timer.start()
 
         # Insert the plots frame just above the existing footer row.
+        # stretch=3 vs the footer's stretch=0 → plots frame keeps the lion's share of
+        # the vertical space even on smaller screens, so each plot stays tall enough
+        # to read waveform amplitudes.
         try:
             _p10_layout = self.ui.load_pages.page_10.layout()
             _idx = _p10_layout.indexOf(self.page10_footer_row)
             if _idx == -1:
-                _p10_layout.addWidget(self.page10_plots_frame, 1)
+                _p10_layout.addWidget(self.page10_plots_frame, 3)
             else:
-                _p10_layout.insertWidget(_idx, self.page10_plots_frame, 1)
+                _p10_layout.insertWidget(_idx, self.page10_plots_frame, 3)
+            # Keep the footer compact relative to the plots.
+            self.page10_footer_row.setMaximumHeight(280)
         except Exception as _e:
             print(f"[Page10] Failed to insert real-time plots frame: {_e}")
 

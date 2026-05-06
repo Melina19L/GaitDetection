@@ -123,6 +123,49 @@ def export_xlsx_log(save_path, data_to_save):
         if df is not None:
             sheets[f"FSR_{side.capitalize()}"] = df
 
+    # 3b) Gait events from FSR (discrete event timestamps per side).
+    # Each column is independent (different lengths) — _frame_from_columns pads with None.
+    fsr_event_cols = {}
+    for side in ("left", "right"):
+        side_cap = side.capitalize()
+        for src_key, col_label in (
+            ("fsr_heel_strike_timestamps", "HS"),
+            ("fsr_mid_stance_timestamps",  "MS"),
+            ("fsr_toe_off_timestamps",     "TO"),
+            ("fsr_valley_timestamps",      "Valleys"),
+        ):
+            vals = data_to_save.get(f"{src_key}_{side}")
+            try:
+                if vals is not None and len(vals) > 0:
+                    fsr_event_cols[f"{col_label}_{side_cap}"] = _series(vals)
+            except Exception:
+                pass
+    df_fsr_events = _frame_from_columns(fsr_event_cols)
+    if df_fsr_events is not None:
+        sheets["Gait_Events_FSR"] = df_fsr_events
+
+    # 3c) Gait events from IMU FSMs (discrete event timestamps per FSM).
+    # Discovers dynamically every key matching `imu_<side>_<placement>_<suffix>_<event>`
+    # where <event> ∈ {heel_strike_peaks, toe_off_peaks, valleys}.
+    imu_event_cols = {}
+    _imu_event_suffixes = ("_heel_strike_peaks", "_toe_off_peaks", "_valleys")
+    for key, val in data_to_save.items():
+        if not isinstance(key, str) or not key.startswith("imu_"):
+            continue
+        for sfx in _imu_event_suffixes:
+            if key.endswith(sfx):
+                try:
+                    if val is not None and len(val) > 0:
+                        # Strip the leading "imu_" so the column reads e.g.
+                        # "right_shank_fsm1_heel_strike_peaks".
+                        imu_event_cols[key[len("imu_"):]] = _series(val)
+                except Exception:
+                    pass
+                break
+    df_imu_events = _frame_from_columns(imu_event_cols)
+    if df_imu_events is not None:
+        sheets["Gait_Events_IMU"] = df_imu_events
+
     # 4) Stim events (timestamps + currents)
     stim_cols = {
         "Timestamp_Stim_Left":    _series(data_to_save.get("imu_timestamps_stim_left")),
@@ -859,11 +902,12 @@ class StimulationFSR(StimulationBasic):
             "fsr_heel_strike_timestamps_right": self.right_fsr_fsm.heel_strike_timestamps,
             "fsr_mid_stance_timestamps_right": self.right_fsr_fsm.mid_stance_timestamps,
             "fsr_toe_off_timestamps_right": self.right_fsr_fsm.toe_off_timestamps,
-            # FSR phase timestamps and counters
-            "fsr_phase_timestamps_left": getattr(self.left_fsr_imu_fsm, "phase_timestamps", None),
-            "fsr_phase_timestamps_right": getattr(self.right_fsr_imu_fsm, "phase_timestamps", None),
-            "fsr_phase_counters_left": getattr(self.left_fsr_imu_fsm, "phase_counters", None),
-            "fsr_phase_counters_right": getattr(self.right_fsr_imu_fsm, "phase_counters", None),
+            # FSR phase timestamps and counters (this class uses *_fsr_fsm — the
+            # *_fsr_imu_fsm attribute only exists in StimulationFSRandIMU).
+            "fsr_phase_timestamps_left":  getattr(self.left_fsr_fsm,  "phase_timestamps", None),
+            "fsr_phase_timestamps_right": getattr(self.right_fsr_fsm, "phase_timestamps", None),
+            "fsr_phase_counters_left":    getattr(self.left_fsr_fsm,  "phase_counters",   None),
+            "fsr_phase_counters_right":   getattr(self.right_fsr_fsm, "phase_counters",   None),
            
             # FSR Method 2 durations (only when using Method 2), safe fallback to empty list
             "fsr_loading_response_durations_right": (
@@ -1825,7 +1869,9 @@ class StimulationFSRandIMU(StimulationIMUs):
     @override
     def save_data(self):
         def rom_block(gait_fsm):
-            return {
+            # Include quaternions so the unified .xlsx Raw_<sensor> sheets carry
+            # the same payload regardless of which Stimulation* subclass runs.
+            block = {
                 "gx": gait_fsm.data_gx_rom,
                 "gy": gait_fsm.data_gy_rom,
                 "gz": gait_fsm.data_gz_rom,
@@ -1834,19 +1880,51 @@ class StimulationFSRandIMU(StimulationIMUs):
                 "accz": gait_fsm.data_accz_rom,
                 "timestamps": gait_fsm.timestamps_rom,
             }
+            for short, attr in (("qw", "data_quatw_rom"), ("qx", "data_quatx_rom"),
+                                ("qy", "data_quaty_rom"), ("qz", "data_quatz_rom")):
+                if hasattr(gait_fsm, attr):
+                    block[short] = getattr(gait_fsm, attr)
+            return block
+
+        # ROM/PI helpers — used to extract joint angles/timestamps when the parent
+        # ROM calibrator may or may not have computed anything yet.
+        def _rom_angles(rom):
+            arr = getattr(rom, "angles", None) if rom is not None else None
+            return arr[:, 1] if arr is not None and getattr(arr, "size", 0) > 0 else None
+
+        def _rom_timestamps(rom):
+            arr = getattr(rom, "angles", None) if rom is not None else None
+            return arr[:, 0] if arr is not None and getattr(arr, "size", 0) > 0 else None
 
         # Create a dictionary to store all the data
         data_to_save = {
             **self._experiment_meta(),  # time information
 
-            # stim metadata
-            "imu_timestamps_stim_right": getattr(self.stim_param, "timestamps_stim_right", None),
-            "imu_timestamps_stim_left":  getattr(self.stim_param, "timestamps_stim_left",  None),
-            "imu_current_right":         getattr(self.stim_param, "stim_values_right",     None),
-            "imu_current_left":          getattr(self.stim_param, "stim_values_left",      None),
+            # stim metadata (timestamps + per-channel currents, both stim and de-stim)
+            "imu_timestamps_stim_right":    getattr(self.stim_param, "timestamps_stim_right",    None),
+            "imu_timestamps_stim_left":     getattr(self.stim_param, "timestamps_stim_left",     None),
+            "imu_timestamps_de_stim_right": getattr(self.stim_param, "timestamps_de_stim_right", None),
+            "imu_timestamps_de_stim_left":  getattr(self.stim_param, "timestamps_de_stim_left",  None),
+            "imu_current_right":            getattr(self.stim_param, "stim_values_right",        None),
+            "imu_current_left":             getattr(self.stim_param, "stim_values_left",         None),
 
             # IMU buckets will be filled below
             "rom_data": {},
+
+            # Joint angles + timestamps for the unified xlsx "Joint_Angles" sheet.
+            # Pulled from the ROM calibrators that StimulationIMUs (parent) builds.
+            "imu_left_knee_angles":      _rom_angles(getattr(self,  "left_knee_rom",  None)),
+            "imu_right_knee_angles":     _rom_angles(getattr(self,  "right_knee_rom", None)),
+            "imu_left_knee_timestamps":  _rom_timestamps(getattr(self, "left_knee_rom",  None)),
+            "imu_right_knee_timestamps": _rom_timestamps(getattr(self, "right_knee_rom", None)),
+            "imu_left_ankle_angles":      _rom_angles(getattr(self,  "left_ankle_rom",  None)),
+            "imu_right_ankle_angles":     _rom_angles(getattr(self,  "right_ankle_rom", None)),
+            "imu_left_ankle_timestamps":  _rom_timestamps(getattr(self, "left_ankle_rom",  None)),
+            "imu_right_ankle_timestamps": _rom_timestamps(getattr(self, "right_ankle_rom", None)),
+            "imu_left_hip_angles":        _rom_angles(getattr(self,  "left_hip_rom",   None)),
+            "imu_right_hip_angles":       _rom_angles(getattr(self,  "right_hip_rom",  None)),
+            "imu_left_hip_timestamps":    _rom_timestamps(getattr(self, "left_hip_rom",   None)),
+            "imu_right_hip_timestamps":   _rom_timestamps(getattr(self, "right_hip_rom",  None)),
 
             # save walking speed used
             "walking_speed": getattr(self, "speed", None),
