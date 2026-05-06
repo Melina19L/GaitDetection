@@ -4989,7 +4989,9 @@ class SetupMainWindow:
             f"border: 1px solid {self.themes['app_color']['bg_two']};"
             "border-radius: 6px; padding: 6px;"
         )
-        self.page10_log_box.setMinimumHeight(180)
+        # Smaller log box so the Status grid (Timer + Step Counter + Active Phase)
+        # always has room. The log box still expands when there's spare vertical space.
+        self.page10_log_box.setMinimumHeight(80)
         status_log_layout.addWidget(self.page10_log_box, 1)
 
         # Assemble row
@@ -6509,8 +6511,9 @@ class SetupMainWindow:
 
         # Insert the plots frame just above the existing footer row.
         # stretch=3 vs the footer's stretch=0 → plots frame keeps the lion's share of
-        # the vertical space even on smaller screens, so each plot stays tall enough
-        # to read waveform amplitudes.
+        # any extra vertical space, BUT the footer is allowed to shrink/grow with
+        # its content. NO max-height cap on the footer: capping it clipped the
+        # Active Phase / Step Counter labels inside the Status & Log frame.
         try:
             _p10_layout = self.ui.load_pages.page_10.layout()
             _idx = _p10_layout.indexOf(self.page10_footer_row)
@@ -6518,8 +6521,11 @@ class SetupMainWindow:
                 _p10_layout.addWidget(self.page10_plots_frame, 3)
             else:
                 _p10_layout.insertWidget(_idx, self.page10_plots_frame, 3)
-            # Keep the footer compact relative to the plots.
-            self.page10_footer_row.setMaximumHeight(280)
+            # Make sure the Status & Log frame can always show the full Step
+            # Counter + Active Phase + Timer grid (each cell ~32px LINE_HEIGHT,
+            # ~6 rows + title + log box). 320px is enough to keep all rows
+            # visible even on a small screen.
+            self.page10_status_log_frame.setMinimumHeight(320)
         except Exception as _e:
             print(f"[Page10] Failed to insert real-time plots frame: {_e}")
 
