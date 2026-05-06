@@ -88,19 +88,27 @@ class PlotDialog(QDialog):
         )
         layout.addWidget(self.knee_plot, 1)
 
-        # Knee legend
+        # Knee legend with live numeric readouts.
+        # Format: "\u25a0 Left Knee  +12.3\u00b0    \u25a0 Right Knee  +10.5\u00b0"
+        # The value labels are updated by update_readouts() on every plot timer tick.
         knee_legend = QWidget()
         knee_legend.setMaximumHeight(22)
         kl = QHBoxLayout(knee_legend)
         kl.setContentsMargins(0, 0, 0, 0)
         kl.setSpacing(20)
         kl.addStretch(1)
-        lbl_lk = QLabel(f"\u25a0 Left Knee")
+        lbl_lk = QLabel("\u25a0 Left Knee")
         lbl_lk.setStyleSheet(f"font-size: 10pt; color: {themes['app_color']['yellow']};")
-        lbl_rk = QLabel(f"\u25a0 Right Knee")
+        self.lbl_lk_value = QLabel("--")
+        self.lbl_lk_value.setStyleSheet(f"font-size: 10pt; font-family: monospace; color: {themes['app_color']['yellow']}; min-width: 60px;")
+        lbl_rk = QLabel("\u25a0 Right Knee")
         lbl_rk.setStyleSheet(f"font-size: 10pt; color: {themes['app_color']['red']};")
+        self.lbl_rk_value = QLabel("--")
+        self.lbl_rk_value.setStyleSheet(f"font-size: 10pt; font-family: monospace; color: {themes['app_color']['red']}; min-width: 60px;")
         kl.addWidget(lbl_lk)
+        kl.addWidget(self.lbl_lk_value)
         kl.addWidget(lbl_rk)
+        kl.addWidget(self.lbl_rk_value)
         kl.addStretch(1)
         layout.addWidget(knee_legend)
 
@@ -121,7 +129,7 @@ class PlotDialog(QDialog):
         )
         layout.addWidget(self.ankle_plot, 1)
 
-        # Ankle legend
+        # Ankle legend with live numeric readouts.
         ankle_legend = QWidget()
         ankle_legend.setMaximumHeight(22)
         al = QHBoxLayout(ankle_legend)
@@ -130,10 +138,16 @@ class PlotDialog(QDialog):
         al.addStretch(1)
         lbl_la = QLabel("\u25a0 Left Ankle")
         lbl_la.setStyleSheet("font-size: 10pt; color: #50fa7b;")
+        self.lbl_la_value = QLabel("--")
+        self.lbl_la_value.setStyleSheet("font-size: 10pt; font-family: monospace; color: #50fa7b; min-width: 60px;")
         lbl_ra = QLabel("\u25a0 Right Ankle")
         lbl_ra.setStyleSheet("font-size: 10pt; color: #bd93f9;")
+        self.lbl_ra_value = QLabel("--")
+        self.lbl_ra_value.setStyleSheet("font-size: 10pt; font-family: monospace; color: #bd93f9; min-width: 60px;")
         al.addWidget(lbl_la)
+        al.addWidget(self.lbl_la_value)
         al.addWidget(lbl_ra)
+        al.addWidget(self.lbl_ra_value)
         al.addStretch(1)
         layout.addWidget(ankle_legend)
 
@@ -154,7 +168,7 @@ class PlotDialog(QDialog):
         )
         layout.addWidget(self.hip_plot, 1)
 
-        # Hip legend
+        # Hip legend with live numeric readouts.
         hip_legend = QWidget()
         hip_legend.setMaximumHeight(22)
         hl = QHBoxLayout(hip_legend)
@@ -163,10 +177,16 @@ class PlotDialog(QDialog):
         hl.addStretch(1)
         lbl_lh = QLabel("\u25a0 Left Hip")
         lbl_lh.setStyleSheet("font-size: 10pt; color: #8be9fd;")
+        self.lbl_lh_value = QLabel("--")
+        self.lbl_lh_value.setStyleSheet("font-size: 10pt; font-family: monospace; color: #8be9fd; min-width: 60px;")
         lbl_rh = QLabel("\u25a0 Right Hip")
         lbl_rh.setStyleSheet("font-size: 10pt; color: #ffb86c;")
+        self.lbl_rh_value = QLabel("--")
+        self.lbl_rh_value.setStyleSheet("font-size: 10pt; font-family: monospace; color: #ffb86c; min-width: 60px;")
         hl.addWidget(lbl_lh)
+        hl.addWidget(self.lbl_lh_value)
         hl.addWidget(lbl_rh)
+        hl.addWidget(self.lbl_rh_value)
         hl.addStretch(1)
         layout.addWidget(hip_legend)
 
@@ -178,9 +198,44 @@ class PlotDialog(QDialog):
         self.timer.timeout.connect(self.knee_plot.update_plot)
         self.timer.timeout.connect(self.ankle_plot.update_plot)
         self.timer.timeout.connect(self.hip_plot.update_plot)
+        self.timer.timeout.connect(self.update_readouts)
 
         # ── Button wiring ──
         self.reset_btn.clicked.connect(self._reset)
+
+    @staticmethod
+    def _fmt_angle(val) -> str:
+        """Format a calibrator angle (numpy scalar / array / float) as ``+12.3°`` or ``--``."""
+        try:
+            import numpy as _np
+            if val is None:
+                return "--"
+            if hasattr(val, "size") and val.size == 0:
+                return "--"
+            if hasattr(val, "item"):
+                v = float(val.item())
+            else:
+                v = float(val)
+            return f"{v:+6.1f}°"
+        except Exception:
+            return "--"
+
+    @Slot()
+    def update_readouts(self):
+        """Read the latest knee/ankle/hip values from the calibrator and update the legend labels."""
+        try:
+            lk, rk = self.calibrator.get_latest_data()
+            la, ra = self.calibrator.get_latest_ankle_data()
+            lh, rh = self.calibrator.get_latest_hip_data()
+            self.lbl_lk_value.setText(self._fmt_angle(lk))
+            self.lbl_rk_value.setText(self._fmt_angle(rk))
+            self.lbl_la_value.setText(self._fmt_angle(la))
+            self.lbl_ra_value.setText(self._fmt_angle(ra))
+            self.lbl_lh_value.setText(self._fmt_angle(lh))
+            self.lbl_rh_value.setText(self._fmt_angle(rh))
+        except Exception:
+            # Silently ignore transient errors (e.g. calibrator stopped mid-tick)
+            pass
 
     # ────────────────────────────────────
     # Public API (called from setup_main_window)

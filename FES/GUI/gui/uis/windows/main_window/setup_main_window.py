@@ -6402,20 +6402,35 @@ class SetupMainWindow:
         _label_style = f"font-size: 12pt; font-weight: 600; color: {_fg};"
 
         def _legend_row(label_left_text, color_left, label_right_text, color_right):
+            """Build a legend row with two static name labels and two LIVE value labels.
+
+            Returns ``(widget, value_label_left, value_label_right)`` so the caller
+            can wire up real-time readouts. The value labels show ``+12.3°`` or ``--``.
+            """
             w = QWidget()
             w.setMaximumHeight(22)
             lay = QHBoxLayout(w)
             lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(14)
+            lay.setSpacing(10)
             lay.addStretch(1)
             ll = QLabel(f"■ {label_left_text}")
             ll.setStyleSheet(f"font-size: 9pt; color: {color_left};")
+            value_l = QLabel("--")
+            value_l.setStyleSheet(
+                f"font-size: 10pt; font-family: monospace; color: {color_left}; min-width: 60px;"
+            )
             lr = QLabel(f"■ {label_right_text}")
             lr.setStyleSheet(f"font-size: 9pt; color: {color_right};")
+            value_r = QLabel("--")
+            value_r.setStyleSheet(
+                f"font-size: 10pt; font-family: monospace; color: {color_right}; min-width: 60px;"
+            )
             lay.addWidget(ll)
+            lay.addWidget(value_l)
             lay.addWidget(lr)
+            lay.addWidget(value_r)
             lay.addStretch(1)
-            return w
+            return w, value_l, value_r
 
         def _plot_column(title_text: str, plot_widget, legend_widget):
             """One vertical column = title on top, plot in the middle, legend at the bottom."""
@@ -6441,12 +6456,11 @@ class SetupMainWindow:
             line_color_right=self.themes["app_color"]["red"],
             max_points=1000,
         )
-        _knee_col = _plot_column(
-            "Knee Angle",
-            self.page10_knee_plot,
-            _legend_row("Left Knee", self.themes["app_color"]["yellow"],
-                        "Right Knee", self.themes["app_color"]["red"]),
+        _knee_legend, self.page10_knee_lvalue, self.page10_knee_rvalue = _legend_row(
+            "Left Knee", self.themes["app_color"]["yellow"],
+            "Right Knee", self.themes["app_color"]["red"],
         )
+        _knee_col = _plot_column("Knee Angle", self.page10_knee_plot, _knee_legend)
 
         # Ankle
         self.page10_ankle_plot = PyAnklePlot(
@@ -6457,11 +6471,10 @@ class SetupMainWindow:
             line_color_right="#bd93f9",
             max_points=1000,
         )
-        _ankle_col = _plot_column(
-            "Ankle Angle",
-            self.page10_ankle_plot,
-            _legend_row("Left Ankle", "#50fa7b", "Right Ankle", "#bd93f9"),
+        _ankle_legend, self.page10_ankle_lvalue, self.page10_ankle_rvalue = _legend_row(
+            "Left Ankle", "#50fa7b", "Right Ankle", "#bd93f9",
         )
+        _ankle_col = _plot_column("Ankle Angle", self.page10_ankle_plot, _ankle_legend)
 
         # Hip
         self.page10_hip_plot = PyHipPlot(
@@ -6472,11 +6485,10 @@ class SetupMainWindow:
             line_color_right="#ffb86c",
             max_points=1000,
         )
-        _hip_col = _plot_column(
-            "Hip Angle",
-            self.page10_hip_plot,
-            _legend_row("Left Hip", "#8be9fd", "Right Hip", "#ffb86c"),
+        _hip_legend, self.page10_hip_lvalue, self.page10_hip_rvalue = _legend_row(
+            "Left Hip", "#8be9fd", "Right Hip", "#ffb86c",
         )
+        _hip_col = _plot_column("Hip Angle", self.page10_hip_plot, _hip_legend)
 
         # Stretch=1 on each column so the 3 plots share the row width equally.
         _page10_plots_layout.addWidget(_knee_col,  1)
@@ -6507,6 +6519,8 @@ class SetupMainWindow:
         self.page10_plot_timer.timeout.connect(self.page10_knee_plot.update_plot)
         self.page10_plot_timer.timeout.connect(self.page10_ankle_plot.update_plot)
         self.page10_plot_timer.timeout.connect(self.page10_hip_plot.update_plot)
+        # Live numeric readouts under each plot legend.
+        self.page10_plot_timer.timeout.connect(self._update_page10_angle_readouts)
         self.page10_plot_timer.start()
 
         # Insert the plots frame just above the existing footer row.

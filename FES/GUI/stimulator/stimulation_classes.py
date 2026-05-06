@@ -1246,15 +1246,23 @@ class StimulationIMUs(StimulationBasic):
                 except Exception:
                     pass
         self.step_count_changed.emit(int(total))
-    @override 
+    @override
     def update_sensors(self):
+        # Pull raw samples from every IMU FSM, including the pelvis FSM —
+        # the pelvis quaternions feed hip ROM computation in update_closed_loop.
         for _side, _placement, _suffix, fsm in self._iter_all_fsms():
-          fsm.update_imu()
-          
+            fsm.update_imu()
+
     @override
     def phase_detection(self):
-        
-        for _side, _placement, _suffix, fsm in self._iter_all_fsms():
+        # The pelvis sensor is a kinematic source only (hip angle reference); it
+        # does NOT participate in gait-phase detection. Its IMUGaitFSM never
+        # receives stream-name-based threshold initialization (TO_threshold /
+        # HS_threshold are only set for shank/foot/thigh streams), so calling
+        # imu_phase_detection on it raises AttributeError. Skip it.
+        for side, _placement, _suffix, fsm in self._iter_all_fsms():
+            if side == "pelvis":
+                continue
             fsm.imu_phase_detection()
             
 
@@ -1829,8 +1837,10 @@ class StimulationFSRandIMU(StimulationIMUs):
 
     @override
     def phase_detection(self):
-        # IMUs
-        for _side, _placement, _suffix, fsm in self._iter_all_fsms():
+        # IMUs — skip pelvis (kinematic source only, no phase detection).
+        for side, _placement, _suffix, fsm in self._iter_all_fsms():
+            if side == "pelvis":
+                continue
             fsm.imu_phase_detection()
         # FSRs (no subphase per your current design)
         self.right_fsr_imu_fsm.fsr_phase_detection()

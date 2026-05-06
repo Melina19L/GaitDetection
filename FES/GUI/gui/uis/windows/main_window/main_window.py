@@ -487,6 +487,45 @@ class MainWindow(QMainWindow):
         if hasattr(self, "page10_timer_value") and self.page10_timer_value is not None:
             self.page10_timer_value.setText(time_text)
     
+    @staticmethod
+    def _fmt_live_angle(val) -> str:
+        """Format a calibrator angle (numpy scalar / array / float) as ``+12.3°`` or ``--``."""
+        try:
+            if val is None:
+                return "--"
+            if hasattr(val, "size") and val.size == 0:
+                return "--"
+            v = float(val.item()) if hasattr(val, "item") else float(val)
+            return f"{v:+6.1f}°"
+        except Exception:
+            return "--"
+
+    @Slot()
+    def _update_page10_angle_readouts(self):
+        """Refresh the live numeric readouts next to each Page-10 plot legend.
+
+        Driven by ``page10_plot_timer`` at 20 Hz. Reads the latest angle samples
+        from ``self.angle_calibrator`` and writes them into the small per-leg
+        labels under the Knee/Ankle/Hip plots.  Silent on errors so a transient
+        calibrator hiccup never breaks the timer chain.
+        """
+        cal = getattr(self, "angle_calibrator", None)
+        if cal is None:
+            return
+        try:
+            lk, rk = cal.get_latest_data()
+            la, ra = cal.get_latest_ankle_data()
+            lh, rh = cal.get_latest_hip_data()
+            if hasattr(self, "page10_knee_lvalue"):
+                self.page10_knee_lvalue.setText(self._fmt_live_angle(lk))
+                self.page10_knee_rvalue.setText(self._fmt_live_angle(rk))
+                self.page10_ankle_lvalue.setText(self._fmt_live_angle(la))
+                self.page10_ankle_rvalue.setText(self._fmt_live_angle(ra))
+                self.page10_hip_lvalue.setText(self._fmt_live_angle(lh))
+                self.page10_hip_rvalue.setText(self._fmt_live_angle(rh))
+        except Exception:
+            pass
+
     @Slot(float)
     def on_active_run_seconds_changed(self, secs: float):
         # During pause backend stops emitting; no change shown
