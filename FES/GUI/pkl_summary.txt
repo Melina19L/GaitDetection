@@ -1,0 +1,60 @@
+=== PKL STRUCTURE ===
+experiment_start_unix: float (e.g. 1777628212.825166)
+experiment_end_unix: float (e.g. 1777628287.6995082)
+experiment_start_iso: str (e.g. 2026-05-01T11:36:52)
+experiment_end_iso: str (e.g. 2026-05-01T11:38:07)
+experiment_duration_s: float (e.g. 74.87434220314026)
+imu_timestamps_stim_right: dict with keys [0, 1, 2, 3, 4, 5, 6, 7]
+imu_timestamps_stim_left: dict with keys [0, 1, 2, 3, 4, 5, 6, 7]
+imu_current_right: dict with keys [0, 1, 2, 3, 4, 5, 6, 7]
+imu_current_left: dict with keys [0, 1, 2, 3, 4, 5, 6, 7]
+rom_data: dict with keys ['right_shank_fsm2', 'right_foot_fsm2', 'right_thigh_fsm2']
+walking_speed: float (e.g. 1.0)
+fsr_data_ff_left: numpy array of shape (0,)
+fsr_data_mf_left: numpy array of shape (0,)
+fsr_data_bf_left: numpy array of shape (0,)
+fsr_timestamps_left: numpy array of shape (0,)
+fsr_heel_strike_left: numpy array of shape (0,)
+fsr_mid_stance_left: numpy array of shape (0,)
+fsr_toe_off_left: numpy array of shape (0,)
+fsr_heel_strike_timestamps_left: numpy array of shape (0,)
+fsr_mid_stance_timestamps_left: numpy array of shape (0,)
+fsr_toe_off_timestamps_left: numpy array of shape (0,)
+fsr_data_ff_right: numpy array of shape (3499,)
+fsr_data_mf_right: numpy array of shape (3499,)
+fsr_data_bf_right: numpy array of shape (3499,)
+fsr_timestamps_right: numpy array of shape (3499,)
+fsr_heel_strike_right: numpy array of shape (33,)
+fsr_mid_stance_right: numpy array of shape (0,)
+fsr_toe_off_right: numpy array of shape (32,)
+fsr_heel_strike_timestamps_right: numpy array of shape (33,)
+fsr_mid_stance_timestamps_right: numpy array of shape (0,)
+fsr_toe_off_timestamps_right: numpy array of shape (32,)
+fsr_valley_timestamps_left: numpy array of shape (0,)
+fsr_valley_timestamps_right: numpy array of shape (0,)
+fsr_phase_timestamps_left: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>]
+fsr_phase_timestamps_right: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>]
+fsr_phase_counters_left: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>]
+fsr_phase_counters_right: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>]
+active_run_seconds: NoneType (e.g. None)
+fsr_loading_response_durations_right: numpy array of shape (32,)
+fsr_loading_response_durations_left: numpy array of shape (0,)
+fsr_mid_stance_durations_right: numpy array of shape (32,)
+fsr_mid_stance_durations_left: numpy array of shape (0,)
+fsr_stance_durations_right: numpy array of shape (32,)
+fsr_stance_durations_left: numpy array of shape (0,)
+imu_right_shank_fsm2_phase_timestamps: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_shank_fsm2_phase_counters: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_shank_fsm2_subphase_timestamps: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.PRE_SWING: 6>, <Phase.MID_SWING: 8>, <Phase.TERMINAL_SWING: 9>, <Phase.UNKNOWN: 1>]
+imu_right_shank_fsm2_heel_strike_peaks: numpy array of shape (9,)
+imu_right_shank_fsm2_toe_off_peaks: numpy array of shape (9,)
+imu_right_foot_fsm2_phase_timestamps: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_foot_fsm2_phase_counters: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_foot_fsm2_subphase_timestamps: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.PRE_SWING: 6>, <Phase.MID_SWING: 8>, <Phase.TERMINAL_SWING: 9>, <Phase.UNKNOWN: 1>]
+imu_right_foot_fsm2_heel_strike_peaks: numpy array of shape (38,)
+imu_right_foot_fsm2_toe_off_peaks: numpy array of shape (38,)
+imu_right_thigh_fsm2_phase_timestamps: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_thigh_fsm2_phase_counters: dict with keys [<Phase.STANCE: 2>, <Phase.SWING: 7>, <Phase.UNKNOWN: 1>, <Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.TERMINAL_STANCE: 5>, <Phase.PRE_SWING: 6>]
+imu_right_thigh_fsm2_subphase_timestamps: dict with keys [<Phase.LOADING_RESPONSE: 3>, <Phase.MID_STANCE: 4>, <Phase.PRE_SWING: 6>, <Phase.MID_SWING: 8>, <Phase.TERMINAL_SWING: 9>, <Phase.UNKNOWN: 1>]
+imu_right_thigh_fsm2_heel_strike_peaks: numpy array of shape (16,)
+imu_right_thigh_fsm2_toe_off_peaks: numpy array of shape (17,)
