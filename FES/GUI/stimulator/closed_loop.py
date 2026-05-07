@@ -179,7 +179,7 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
     html += (
         '<p style="color:#95a5a6; font-size:10px;">'
         'Vertical ↕ = aligned with gravity | Horizontal ↔ = parallel to floor<br/>'
-        'Forward = foot axis most aligned with shank\'s horizontal direction<br/>'
+        'Forward = X when Z is gravity (Xsens DOT convention)<br/>'
         'Medio-lateral = ankle rotation axis (perpendicular to both vertical and forward)</p>'
     )
     return html
@@ -310,103 +310,61 @@ def detect_most_vertical_axis(q: np.ndarray) -> str:
 
 
 def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> str:
-    """Return the local axis name ('X' | 'Y' | 'Z') of the foot sensor whose
-    world projection is most parallel to the floor AND most aligned with the
-    foot's "forward" (toward-toes) direction.
+    """Return the local axis name ('X' | 'Y' | 'Z') of the foot sensor that
+    points along the foot (toward the toes) — i.e. the "forward" axis.
 
-    When ``q_shank`` is provided, the shank's horizontal projection is used as
-    a reference for the "forward" direction.  This disambiguates the common
-    case where two local axes are equally horizontal (e.g. when the sensor's
-    Z-axis is aligned with gravity, both X and Y lie flat on the floor).
+    Detection strategy
+    ------------------
+    The Xsens DOT sensors have a **fixed** relationship between their physical
+    axes and the quaternion output:
 
-    Without ``q_shank``, falls back to the legacy behaviour (first-wins tie).
+    * **Leg/shank mounting** (X along the segment → gravity axis = X):
+      the forward axis is the most horizontal of the remaining axes (Y or Z).
+
+    * **Foot mounting** (Z pointing down → gravity axis = Z):
+      the forward axis is **always X** (toward the toes), and Y is
+      medio-lateral.  This is the Xsens DOT convention confirmed by the
+      Movella native GUI.
+
+    The old "most-horizontal" heuristic fails for the foot because even a
+    small foot tilt gives the ML axis (Y) a *higher* horizontal score than X,
+    causing it to be mis-identified as forward.  Using the deterministic rule
+    avoids this problem entirely.
+
+    Parameters
+    ----------
+    q : quaternion [w,x,y,z] of the foot (or distal) sensor.
+    q_shank : ignored (kept for API compatibility).
     """
-    # Step 1: collect horizontal scores for each local axis
-    candidates = []  # list of (name, horizontal_score, global_vector)
-    for name, v in AXIS_VECTORS.items():
-        gv = rotate_vector_by_quaternion(v, q)
-        gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
-        horiz_score = 1.0 - abs(float(gv_norm[2]))  # 1 = perfectly horizontal
-        candidates.append((name, horiz_score, gv))
+    gravity_axis = detect_most_vertical_axis(q)
 
-    # Step 2: find the best horizontal score
-    best_score = max(c[1] for c in candidates)
-
-    # Step 3: collect axes within 0.05 of the best (= "tied" axes)
-    TIE_THRESHOLD = 0.05
-    tied = [(name, score, gv) for name, score, gv in candidates
-            if best_score - score < TIE_THRESHOLD]
-
-    if len(tied) == 1 or q_shank is None:
-        # No tie, or no shank reference — pick the highest scorer
-        tied.sort(key=lambda c: c[1], reverse=True)
-        return tied[0][0]
-
-    # Step 4: disambiguate using the sagittal plane.
-    #
-    # Anatomical constraint: the shank and foot lie in the sagittal plane.
-    # The sagittal plane contains both segments' gravity axes.  The cross
-    # product of the shank-gravity and foot-gravity world vectors gives the
-    # medio-lateral direction (perpendicular to the sagittal plane).
-    # The foot "forward" axis is the one most PERPENDICULAR to this ML
-    # direction (i.e., it lies IN the sagittal plane), while the foot ML
-    # axis is the one most PARALLEL to it.
-    shank_grav_name = detect_most_vertical_axis(q_shank)
-    foot_grav_name  = detect_most_vertical_axis(q)
-    shank_grav_global = rotate_vector_by_quaternion(AXIS_VECTORS[shank_grav_name], q_shank)
-    foot_grav_global  = rotate_vector_by_quaternion(AXIS_VECTORS[foot_grav_name],  q)
-
-    # Cross product gives the ML direction (perpendicular to the sagittal plane)
-    ml_dir = np.cross(shank_grav_global, foot_grav_global)
-    ml_norm = np.linalg.norm(ml_dir)
-
-    if ml_norm < 1e-6:
-        # Gravity axes are parallel (both perfectly vertical in standing) — use
-        # shank's non-vertical axes as a secondary sagittal-plane reference.
-        # Pick the shank horizontal axis with the largest X or Y component as
-        # the sagittal direction, then the foot axis most aligned with it.
-        shank_horiz_dirs = []
-        for s_name, s_vec in AXIS_VECTORS.items():
-            if s_name == shank_grav_name:
-                continue
-            s_global = rotate_vector_by_quaternion(s_vec, q_shank)
-            s_horiz = np.array([s_global[0], s_global[1], 0.0])
-            n = np.linalg.norm(s_horiz)
-            if n > 1e-6:
-                shank_horiz_dirs.append(s_horiz / n)
-
-        if not shank_horiz_dirs:
-            return tied[0][0]
-
-        best_name = tied[0][0]
-        best_align = -1.0
-        for name, _, gv in tied:
-            gv_horiz = np.array([gv[0], gv[1], 0.0])
-            gv_horiz_norm = np.linalg.norm(gv_horiz)
-            if gv_horiz_norm < 1e-6:
-                continue
-            gv_horiz = gv_horiz / gv_horiz_norm
-            for s_dir in shank_horiz_dirs:
-                align = abs(float(np.dot(gv_horiz, s_dir)))
-                if align > best_align:
-                    best_align = align
-                    best_name = name
+    if gravity_axis == 'Z':
+        # Foot mounting: Z = gravity → X = forward (Xsens DOT convention)
+        return 'X'
+    elif gravity_axis == 'X':
+        # Leg mounting: X = gravity → pick the most horizontal of Y, Z
+        best_name = 'Y'
+        best_horiz = -1.0
+        for name in ('Y', 'Z'):
+            gv = rotate_vector_by_quaternion(AXIS_VECTORS[name], q)
+            gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
+            horiz = 1.0 - abs(float(gv_norm[2]))
+            if horiz > best_horiz:
+                best_horiz = horiz
+                best_name = name
         return best_name
-
-    ml_dir = ml_dir / ml_norm
-
-    # The "forward" axis is the tied axis LEAST aligned with ML direction
-    # (= most in the sagittal plane).
-    best_name = tied[0][0]
-    best_sagittal = -1.0  # higher = more sagittal = less ML
-    for name, _, gv in tied:
-        gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
-        ml_alignment = abs(float(np.dot(gv_norm, ml_dir)))
-        sagittal_score = 1.0 - ml_alignment  # 1 = in sagittal plane, 0 = ML
-        if sagittal_score > best_sagittal:
-            best_sagittal = sagittal_score
-            best_name = name
-    return best_name
+    else:
+        # gravity_axis == 'Y' (unusual mounting) → pick most horizontal of X, Z
+        best_name = 'X'
+        best_horiz = -1.0
+        for name in ('X', 'Z'):
+            gv = rotate_vector_by_quaternion(AXIS_VECTORS[name], q)
+            gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
+            horiz = 1.0 - abs(float(gv_norm[2]))
+            if horiz > best_horiz:
+                best_horiz = horiz
+                best_name = name
+        return best_name
 
 
 def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = None) -> str:
