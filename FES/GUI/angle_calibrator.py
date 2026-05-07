@@ -499,18 +499,14 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.left_angle_timestamps = np.append(self.left_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle LEFT — signed relative-quaternion algorithm (uses both
-                # the auto-detected axes AND the calibration-pose ref quaternions
-                # so it stays decoupled from knee-flexion-induced shank tilt).
+                # Ankle LEFT — same simple algorithm as knee/hip:
+                # unsigned arccos between shank-X and foot-X axes, minus offset.
+                # The calibration captures the standing-pose offset so the live
+                # signal is centred on 0° at neutral. No special ankle math.
                 if self.left_shank_inlet and self.left_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         l_shank_s, [], l_foot_s, [],
                         self.left_ankle_offset, self._diag["left_shank"],
-                        is_ankle=True,
-                        proximal_axis=self.left_ankle_shank_axis,
-                        distal_axis=self.left_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, "left_ankle_qshank_ref", None),
-                        q_distal_ref=getattr(self,   "left_ankle_qfoot_ref",  None),
                     )
                     self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -553,16 +549,11 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.right_angle_timestamps = np.append(self.right_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle RIGHT — signed relative-quaternion algorithm.
+                # Ankle RIGHT — same simple knee-style algorithm.
                 if self.right_shank_inlet and self.right_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         r_shank_s, [], r_foot_s, [],
                         self.right_ankle_offset, self._diag["right_shank"],
-                        is_ankle=True,
-                        proximal_axis=self.right_ankle_shank_axis,
-                        distal_axis=self.right_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, "right_ankle_qshank_ref", None),
-                        q_distal_ref=getattr(self,   "right_ankle_qfoot_ref",  None),
                     )
                     self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -836,24 +827,23 @@ class AngleCalibrator(QObject):
             return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
 
         def _one_side_ankle(shank_inlet, foot_inlet):
-            """Return ``(offset, q_shank, q_foot, shank_axis, foot_axis)`` or all-None.
+            """Same simple algorithm as the knee calibrator, just with shank+foot:
+            average the calibration-pose quaternions over 1 s, compute the
+            unsigned angle between the shank-X and foot-X axes — that's the
+            offset that gets subtracted from every runtime measurement.
 
-            Auto-detects the per-side axes from the AVERAGED calibration-pose
-            quaternions (1 s of samples). The offset is then computed using
-            those detected axes so the live signal is centred on 0° at neutral.
+            Returns ``(offset, q_shank, q_foot)`` (the q_*_ref are kept for
+            optional diagnostic / future axis-projection paths but the runtime
+            ankle math is identical to the knee math).
             """
             if not (shank_inlet and foot_inlet):
-                return None, None, None, None, None
+                return None, None, None
             q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
             q_foot  = self.__get_averaged_quaternion(foot_inlet,  duration_s=AVG_DURATION_S)
             if q_shank is None or q_foot is None:
-                return None, None, None, None, None
-            shank_axis = detect_most_vertical_axis(q_shank)
-            foot_axis  = detect_most_horizontal_axis(q_foot)
-            offset = ROM.ankle_functional_calibration(
-                q_shank, q_foot, foot_axis=foot_axis, shank_axis=shank_axis,
-            )
-            return offset, q_shank, q_foot, shank_axis, foot_axis
+                return None, None, None
+            offset = ROM.functional_calibration(q_shank, q_foot)
+            return offset, q_shank, q_foot
 
         def _one_side_hip(thigh_inlet, offset_val):
             """Calibrate hip using the shared pelvis sensor as the proximal reference."""
@@ -886,18 +876,14 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip LEFT] skipped: {e}")
 
-            ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_ax_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
+            ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
-                self.left_ankle_shank_axis = sh_ax_l
-                self.left_ankle_foot_axis  = ft_ax_l
-                # Store reference quaternions for the stable relative-quat path
+                # Keep refs only for diagnostics / dump to .pkl (not used in runtime math)
                 self.left_ankle_qshank_ref = q_sh_l
                 self.left_ankle_qfoot_ref  = q_ft_l
-                print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}° shank_axis={sh_ax_l} foot_axis={ft_ax_l}")
-                self.message_signal.emit(
-                    f"Left ankle calibrated.  shank={sh_ax_l}  foot={ft_ax_l}  offset={ankle_off:+.1f}°"
-                )
+                print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}°")
+                self.message_signal.emit(f"Left ankle calibrated.  offset={ankle_off:+.1f}°")
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
                 self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
@@ -928,18 +914,13 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip RIGHT] skipped: {e}")
 
-            ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_ax_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
+            ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
-                self.right_ankle_shank_axis = sh_ax_r
-                self.right_ankle_foot_axis  = ft_ax_r
-                # Store reference quaternions for the stable relative-quat path
                 self.right_ankle_qshank_ref = q_sh_r
                 self.right_ankle_qfoot_ref  = q_ft_r
-                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}° shank_axis={sh_ax_r} foot_axis={ft_ax_r}")
-                self.message_signal.emit(
-                    f"Right ankle calibrated.  shank={sh_ax_r}  foot={ft_ax_r}  offset={ankle_off:+.1f}°"
-                )
+                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°")
+                self.message_signal.emit(f"Right ankle calibrated.  offset={ankle_off:+.1f}°")
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
                 self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
