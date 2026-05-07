@@ -499,9 +499,9 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.left_angle_timestamps = np.append(self.left_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle LEFT — uses per-side axes detected at calibration so
-                # the algorithm picks the actual longitudinal axes regardless
-                # of strap orientation (proximal=shank, distal=foot).
+                # Ankle LEFT — signed relative-quaternion algorithm (uses both
+                # the auto-detected axes AND the calibration-pose ref quaternions
+                # so it stays decoupled from knee-flexion-induced shank tilt).
                 if self.left_shank_inlet and self.left_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         l_shank_s, [], l_foot_s, [],
@@ -509,6 +509,8 @@ class AngleCalibrator(QObject):
                         is_ankle=True,
                         proximal_axis=self.left_ankle_shank_axis,
                         distal_axis=self.left_ankle_foot_axis,
+                        q_proximal_ref=getattr(self, "left_ankle_qshank_ref", None),
+                        q_distal_ref=getattr(self,   "left_ankle_qfoot_ref",  None),
                     )
                     self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -551,7 +553,7 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.right_angle_timestamps = np.append(self.right_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle RIGHT — uses per-side axes detected at calibration.
+                # Ankle RIGHT — signed relative-quaternion algorithm.
                 if self.right_shank_inlet and self.right_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         r_shank_s, [], r_foot_s, [],
@@ -559,6 +561,8 @@ class AngleCalibrator(QObject):
                         is_ankle=True,
                         proximal_axis=self.right_ankle_shank_axis,
                         distal_axis=self.right_ankle_foot_axis,
+                        q_proximal_ref=getattr(self, "right_ankle_qshank_ref", None),
+                        q_distal_ref=getattr(self,   "right_ankle_qfoot_ref",  None),
                     )
                     self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -818,56 +822,48 @@ class AngleCalibrator(QObject):
     #         self.right_angle_offset = ROM.functional_calibration(q_thigh, q_shank) - self.extension_target_right.value()
 
     def __functional_calibration(self):
+        # All offset captures average ~1 s of samples instead of grabbing a
+        # single jittery quaternion. Eliminates the ±10° "standing pose" drift.
+        AVG_DURATION_S = 1.0
+
         def _one_side_knee(shank_inlet, thigh_inlet, target_spinbox):
             if not (shank_inlet and thigh_inlet):
                 return None
-            max_tries = 10
-            for _ in range(max_tries):
-                q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
-                q_thigh = self.__get_latest_quaternion_nonblocking(thigh_inlet)
-                if q_shank is not None and q_thigh is not None:
-                    return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
-                QCoreApplication.processEvents()
-            return None
+            q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
+            q_thigh = self.__get_averaged_quaternion(thigh_inlet, duration_s=AVG_DURATION_S)
+            if q_shank is None or q_thigh is None:
+                return None
+            return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
 
         def _one_side_ankle(shank_inlet, foot_inlet):
-            """Return ``(offset, q_shank, q_foot, shank_axis, foot_axis)`` or all-None on failure.
+            """Return ``(offset, q_shank, q_foot, shank_axis, foot_axis)`` or all-None.
 
-            The two axes are auto-detected from the calibration-pose quaternions:
-              - shank: most-vertical local axis (longitudinal = along tibia)
-              - foot:  most-horizontal local axis (longitudinal = toward toes)
-            so the algorithm adapts to whatever orientation the operator picked
-            when strapping the Movella DOTs to the segments.  The offset is then
-            computed using these detected axes so it stays consistent.
+            Auto-detects the per-side axes from the AVERAGED calibration-pose
+            quaternions (1 s of samples). The offset is then computed using
+            those detected axes so the live signal is centred on 0° at neutral.
             """
             if not (shank_inlet and foot_inlet):
                 return None, None, None, None, None
-            max_tries = 10
-            for _ in range(max_tries):
-                q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
-                q_foot  = self.__get_latest_quaternion_nonblocking(foot_inlet)
-                if q_shank is not None and q_foot is not None:
-                    shank_axis = detect_most_vertical_axis(q_shank)
-                    foot_axis  = detect_most_horizontal_axis(q_foot)
-                    offset = ROM.ankle_functional_calibration(
-                        q_shank, q_foot, foot_axis=foot_axis, shank_axis=shank_axis,
-                    )
-                    return offset, q_shank, q_foot, shank_axis, foot_axis
-                QCoreApplication.processEvents()
-            return None, None, None, None, None
+            q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
+            q_foot  = self.__get_averaged_quaternion(foot_inlet,  duration_s=AVG_DURATION_S)
+            if q_shank is None or q_foot is None:
+                return None, None, None, None, None
+            shank_axis = detect_most_vertical_axis(q_shank)
+            foot_axis  = detect_most_horizontal_axis(q_foot)
+            offset = ROM.ankle_functional_calibration(
+                q_shank, q_foot, foot_axis=foot_axis, shank_axis=shank_axis,
+            )
+            return offset, q_shank, q_foot, shank_axis, foot_axis
 
         def _one_side_hip(thigh_inlet, offset_val):
             """Calibrate hip using the shared pelvis sensor as the proximal reference."""
             if not (self.pelvis_inlet and thigh_inlet):
                 return None
-            max_tries = 10
-            for _ in range(max_tries):
-                q_pelvis = self.__get_latest_quaternion_nonblocking(self.pelvis_inlet)
-                q_thigh  = self.__get_latest_quaternion_nonblocking(thigh_inlet)
-                if q_pelvis is not None and q_thigh is not None:
-                    return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
-                QCoreApplication.processEvents()
-            return None
+            q_pelvis = self.__get_averaged_quaternion(self.pelvis_inlet, duration_s=AVG_DURATION_S)
+            q_thigh  = self.__get_averaged_quaternion(thigh_inlet,       duration_s=AVG_DURATION_S)
+            if q_pelvis is None or q_thigh is None:
+                return None
+            return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
 
         # Collect quaternions for combined axis diagnostic emitted once at end
         diag_sections = []
@@ -992,6 +988,46 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(poll_interval)  # small delay to prevent CPU spinning
         return None
+
+    def __get_averaged_quaternion(self, inlet: StreamInlet, duration_s: float = 1.0,
+                                  poll_interval: float = 0.02):
+        """Collect ~N quaternion samples for ``duration_s`` seconds and return their mean.
+
+        Quaternion-aware averaging: each new sample is sign-flipped if its dot
+        product with the running reference is negative (q and -q represent the
+        same rotation). The arithmetic mean is renormalised at the end.
+
+        Used for **stable calibration offset capture** — sampling a single
+        quaternion produces ±10° jitter at standing, which translates directly
+        into a wrong "zero" for the joint angles. Averaging over 1 s gives a
+        sub-degree offset.
+        """
+        if inlet is None:
+            return None
+        t_start = time.time()
+        ref = None
+        acc = np.zeros(4, dtype=np.float64)
+        n = 0
+        while time.time() - t_start < duration_s:
+            if inlet.samples_available() > 0:
+                sample, _ = inlet.pull_sample(timeout=0.0)
+                if sample:
+                    q = np.asarray(sample[6:10], dtype=np.float64)
+                    if ref is None:
+                        ref = q
+                    if float(np.dot(q, ref)) < 0:
+                        q = -q
+                    acc += q
+                    n += 1
+            QCoreApplication.processEvents()
+            time.sleep(poll_interval)
+        if n == 0:
+            return None
+        avg = acc / float(n)
+        norm = float(np.linalg.norm(avg))
+        if norm < 1e-9:
+            return None
+        return avg / norm
 
 
     def __connect_to_streams_for_left(self):
@@ -1123,6 +1159,8 @@ class AngleCalibrator(QObject):
         is_ankle: bool = False,
         proximal_axis: str = 'X',
         distal_axis:   str = 'X',
+        q_proximal_ref: np.ndarray = None,
+        q_distal_ref:   np.ndarray = None,
     ) -> np.ndarray:
         """Compute joint angles from pre-fetched sample lists using index-based matching.
 
@@ -1156,13 +1194,14 @@ class AngleCalibrator(QObject):
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
                 if is_ankle:
-                    # Use the per-side axes detected at calibration so the
-                    # algorithm picks the longitudinal axis of each Movella DOT
-                    # regardless of strap orientation. ``proximal`` is shank,
-                    # ``distal`` is foot.
+                    # Use the per-side axes detected at calibration. When the
+                    # reference quaternions are also available (always, after
+                    # Calibrate Offsets), the new signed relative-quaternion
+                    # algorithm runs — decoupled from knee flexion contamination.
                     angle = ROM.calculate_ankle_angle(
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
+                        q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
                     )
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)

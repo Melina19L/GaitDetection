@@ -182,6 +182,77 @@ def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
     return np.arccos(dot_product)
 
 
+# ── Swing-twist decomposition ────────────────────────────────────────────────
+def twist_angle_around_axis(q: np.ndarray, axis: np.ndarray) -> float:
+    """Return the signed twist angle (radians) of quaternion ``q`` around ``axis``.
+
+    Implements the standard swing-twist decomposition: projects ``q``'s vector
+    part onto ``axis``, builds the twist quaternion, extracts its angle.
+    Sign follows the sign of the projection along the axis.
+    """
+    axis = np.asarray(axis, dtype=float)
+    n = float(np.linalg.norm(axis))
+    if n < 1e-9:
+        return 0.0
+    axis = axis / n
+    proj = float(np.dot(q[1:], axis))
+    twist_v = proj * axis
+    tw = np.array([q[0], twist_v[0], twist_v[1], twist_v[2]], dtype=float)
+    tw_norm = float(np.linalg.norm(tw))
+    if tw_norm < 1e-9:
+        return 0.0
+    tw = tw / tw_norm
+    angle = 2.0 * float(np.arctan2(np.linalg.norm(tw[1:]), tw[0]))
+    if proj < 0:
+        angle = -angle
+    return angle
+
+
+def signed_ankle_angle(
+    q_shank: np.ndarray,
+    q_foot: np.ndarray,
+    q_shank_ref: np.ndarray,
+    q_foot_ref: np.ndarray,
+    foot_axis: str = 'Y',
+) -> float:
+    """Return signed ankle dorsi-/plantar-flexion in degrees.
+
+    Uses the relative-quaternion approach (decoupled from knee flexion):
+      1. Compute relative orientations shank-in-foot at calibration and at
+         current time.
+      2. q_delta = q_rel_now * q_rel_ref⁻¹ — rotation from neutral to current,
+         expressed in the foot's local frame.
+      3. Project q_delta onto the ankle axis (default: foot-local Y) to extract
+         the twist component → that's pure dorsi/plantarflexion.
+
+    Compared to the older unsigned ``angle_between_quaternions`` algorithm:
+      - Returns a SIGNED value (no offset bookkeeping needed; 0° at neutral pose).
+      - Independent of shank tilt due to knee flexion (the shank's orientation
+        cancels out via the relative-quaternion formulation).
+      - Filters out ankle inversion/eversion contamination by projecting onto
+        the chosen ankle axis only.
+
+    ``foot_axis`` selects which sensor-local axis is the ankle's medio-lateral
+    axis. Auto-detected at calibration via ``detect_most_horizontal_axis``.
+    """
+    qs = normalize(np.asarray(q_shank,     dtype=float))
+    qf = normalize(np.asarray(q_foot,      dtype=float))
+    qs_ref = normalize(np.asarray(q_shank_ref, dtype=float))
+    qf_ref = normalize(np.asarray(q_foot_ref,  dtype=float))
+
+    # Relative orientation of shank in foot frame: q_rel = q_foot⁻¹ * q_shank
+    q_rel_now = quat_mul(quat_conjugate(qf),     qs)
+    q_rel_ref = quat_mul(quat_conjugate(qf_ref), qs_ref)
+
+    # Change in relative orientation since calibration (in foot frame)
+    q_delta = quat_mul(q_rel_now, quat_conjugate(q_rel_ref))
+    q_delta = normalize(q_delta)
+
+    axis_vec = AXIS_VECTORS.get(foot_axis, AXIS_VECTORS['Y'])
+    rad = twist_angle_around_axis(q_delta, axis_vec)
+    return float(np.degrees(rad))
+
+
 # ── Sensor-axis detection ────────────────────────────────────────────────────
 # At calibration time we look at the world projection of each sensor's local
 # axes (X / Y / Z) and pick the one most aligned with gravity (= longitudinal
@@ -309,8 +380,18 @@ class ROM:
         offset: float,
         foot_axis: str = 'X',
         shank_axis: str = 'X',
+        q_shank_ref: np.ndarray = None,
+        q_foot_ref:  np.ndarray = None,
     ) -> float:
-        """Return the calibrated signed ankle angle in degrees (static helper)."""
+        """Return the calibrated ankle angle in degrees.
+
+        If ``q_shank_ref`` AND ``q_foot_ref`` are provided, uses the new
+        relative-quaternion algorithm (signed, decoupled from knee flexion).
+        Otherwise falls back to the legacy unsigned ``angle_between_quaternions``
+        with offset subtraction.
+        """
+        if q_shank_ref is not None and q_foot_ref is not None:
+            return signed_ankle_angle(q_shank, q_foot, q_shank_ref, q_foot_ref, foot_axis)
         return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis) - offset
 
     def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:
