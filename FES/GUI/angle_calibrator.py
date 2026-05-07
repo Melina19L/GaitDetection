@@ -440,6 +440,39 @@ class AngleCalibrator(QObject):
             if not self.left_checkbox.isChecked():
                 self.timer.stop()
 
+    def _match_snapshots(self, snap_prox: list, snap_dist: list, tolerance: float = 0.04) -> tuple:
+        """Match two lists of (timestamp, sample) tuples by timestamp.
+        Returns:
+            matched_prox (list): matched proximal samples
+            matched_dist (list): matched distal samples
+            ts_prox_out (list): timestamps for proximal
+            ts_dist_out (list): timestamps for distal
+            consumed_prox (int): number of proximal items to pop from queue
+            consumed_dist (int): number of distal items to pop from queue
+        """
+        matched_prox, matched_dist = [], []
+        ts_prox_out, ts_dist_out = [], []
+        i, j = 0, 0
+        while i < len(snap_prox) and j < len(snap_dist):
+            ts_p, s_p = snap_prox[i]
+            ts_d, s_d = snap_dist[j]
+            diff = ts_p - ts_d
+            if abs(diff) <= tolerance:
+                matched_prox.append(s_p)
+                matched_dist.append(s_d)
+                ts_prox_out.append(ts_p)
+                ts_dist_out.append(ts_d)
+                i += 1
+                j += 1
+            elif diff > tolerance:
+                # ts_p is newer than ts_d by more than tolerance.
+                # s_d is too old, discard it.
+                j += 1
+            else:
+                # ts_d is newer than ts_p. s_p is too old, discard it.
+                i += 1
+        return matched_prox, ts_prox_out, matched_dist, ts_dist_out, i, j
+
     @Slot()
     def record_data(self):
         """Accumulate raw samples from every inlet and drain matched pairs.
@@ -467,15 +500,17 @@ class AngleCalibrator(QObject):
         ):
             if inlet is None:
                 continue
-            samples, _ = inlet.pull_chunk(timeout=0.0, max_samples=128)
+            samples, timestamps = inlet.pull_chunk(timeout=0.0, max_samples=128)
             if samples:
-                self._acc[key].extend(samples)
+                # Store as (timestamp, sample) tuples to allow time-sync matching
+                paired = list(zip(timestamps, samples))
+                self._acc[key].extend(paired)
                 self._diag[key]["count"]  += len(samples)
                 self._diag[key]["last_ts"] = now
                 if hasattr(self, '_raw_log') and key in self._raw_log:
                     # Save raw samples with arrival timestamp for debugging
-                    for s in samples:
-                        self._raw_log[key].append([now] + list(s))
+                    for ts, s in paired:
+                        self._raw_log[key].append([ts] + list(s))
 
         # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
         # Pelvis samples feed BOTH left and right hip computations, so they are
@@ -486,115 +521,133 @@ class AngleCalibrator(QObject):
         pelvis_used = 0
 
         # ── 3. Process LEFT LEG ───────────────────────────────────────────────
-        left_queues = []
-        if self.left_thigh_inlet: left_queues.append(self._acc["left_thigh"])
-        if self.left_shank_inlet: left_queues.append(self._acc["left_shank"])
-        if self.left_foot_inlet:  left_queues.append(self._acc["left_foot"])
+        l_thigh_q = list(self._acc["left_thigh"]) if self.left_thigh_inlet else []
+        l_shank_q = list(self._acc["left_shank"]) if self.left_shank_inlet else []
+        l_foot_q  = list(self._acc["left_foot"]) if self.left_foot_inlet else []
 
-        if left_queues:
-            n_left = min((len(q) for q in left_queues))
-            if n_left > 0:
-                l_thigh_s = [self._acc["left_thigh"].popleft() for _ in range(n_left)] if self.left_thigh_inlet else []
-                l_shank_s = [self._acc["left_shank"].popleft() for _ in range(n_left)] if self.left_shank_inlet else []
-                l_foot_s  = [self._acc["left_foot"].popleft()  for _ in range(n_left)] if self.left_foot_inlet  else []
+        l_thigh_used = 0
+        l_shank_used = 0
+        l_foot_used  = 0
 
-                # Hip LEFT — pelvis (proximal) vs left thigh (distal)
-                if self.pelvis_inlet and self.left_thigh_inlet and l_thigh_s:
-                    n_hip_l = min(len(pelvis_snapshot), len(l_thigh_s))
-                    if n_hip_l > 0:
-                        p_s = pelvis_snapshot[:n_hip_l]
-                        hip_angles = self.__compute_angles_from_data(
-                            p_s, [], l_thigh_s[:n_hip_l], [],
-                            self.left_hip_offset, self._diag["pelvis"],
-                        )
-                        self.left_hip_data = np.append(self.left_hip_data, hip_angles)
-                        if len(hip_angles):
-                            self.left_hip_timestamps = np.append(self.left_hip_timestamps, np.full(len(hip_angles), now))
-                        pelvis_used = max(pelvis_used, n_hip_l)
+        # Hip LEFT
+        if self.pelvis_inlet and self.left_thigh_inlet:
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, l_thigh_q)
+            if p_s:
+                hip_angles = self.__compute_angles_from_data(
+                    p_s, p_ts, t_s, t_ts,
+                    self.left_hip_offset, self._diag["pelvis"],
+                )
+                self.left_hip_data = np.append(self.left_hip_data, hip_angles)
+                self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
+                pelvis_used = max(pelvis_used, c_p)
+                l_thigh_used = max(l_thigh_used, c_t)
 
-                # Knee LEFT
-                if self.left_thigh_inlet and self.left_shank_inlet:
-                    angles = self.__compute_angles_from_data(
-                        l_thigh_s, [], l_shank_s, [],
-                        self.left_angle_offset, self._diag["left_thigh"],
-                    )
-                    self.left_angle_data = np.append(self.left_angle_data, angles)
-                    if len(angles):
-                        self.left_angle_timestamps = np.append(self.left_angle_timestamps, np.full(len(angles), now))
+        # Knee LEFT
+        if self.left_thigh_inlet and self.left_shank_inlet:
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(l_thigh_q, l_shank_q)
+            if t_s:
+                angles = self.__compute_angles_from_data(
+                    t_s, t_ts, s_s, s_ts,
+                    self.left_angle_offset, self._diag["left_thigh"],
+                )
+                self.left_angle_data = np.append(self.left_angle_data, angles)
+                self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
+                l_thigh_used = max(l_thigh_used, c_t)
+                l_shank_used = max(l_shank_used, c_s)
 
-                # Ankle LEFT — uses signed_ankle_angle (twist decomposition
-                # around the foot's ML axis) to isolate pure dorsi/plantar-
-                # flexion from knee flexion and yaw contamination.
-                if self.left_shank_inlet and self.left_foot_inlet:
-                    ankle_angles = self.__compute_angles_from_data(
-                        l_shank_s, [], l_foot_s, [],
-                        self.left_ankle_offset, self._diag["left_shank"],
-                        is_ankle=True,
-                        proximal_axis=self.left_ankle_shank_axis,
-                        distal_axis=self.left_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
-                        q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
-                    )
-                    self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
-                    if len(ankle_angles):
-                        self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, np.full(len(ankle_angles), now))
+        # Ankle LEFT
+        if self.left_shank_inlet and self.left_foot_inlet:
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(l_shank_q, l_foot_q)
+            if s_s:
+                ankle_angles = self.__compute_angles_from_data(
+                    s_s, s_ts, f_s, f_ts,
+                    self.left_ankle_offset, self._diag["left_shank"],
+                    is_ankle=True,
+                    proximal_axis=self.left_ankle_shank_axis,
+                    distal_axis=self.left_ankle_foot_axis,
+                    q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
+                    q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
+                )
+                self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
+                self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
+                l_shank_used = max(l_shank_used, c_s)
+                l_foot_used = max(l_foot_used, c_f)
 
         # ── 4. Process RIGHT LEG ──────────────────────────────────────────────
-        right_queues = []
-        if self.right_thigh_inlet: right_queues.append(self._acc["right_thigh"])
-        if self.right_shank_inlet: right_queues.append(self._acc["right_shank"])
-        if self.right_foot_inlet:  right_queues.append(self._acc["right_foot"])
+        r_thigh_q = list(self._acc["right_thigh"]) if self.right_thigh_inlet else []
+        r_shank_q = list(self._acc["right_shank"]) if self.right_shank_inlet else []
+        r_foot_q  = list(self._acc["right_foot"]) if self.right_foot_inlet else []
 
-        if right_queues:
-            n_right = min((len(q) for q in right_queues))
-            if n_right > 0:
-                r_thigh_s = [self._acc["right_thigh"].popleft() for _ in range(n_right)] if self.right_thigh_inlet else []
-                r_shank_s = [self._acc["right_shank"].popleft() for _ in range(n_right)] if self.right_shank_inlet else []
-                r_foot_s  = [self._acc["right_foot"].popleft()  for _ in range(n_right)] if self.right_foot_inlet  else []
+        r_thigh_used = 0
+        r_shank_used = 0
+        r_foot_used  = 0
 
-                # Hip RIGHT — pelvis (proximal) vs right thigh (distal)
-                if self.pelvis_inlet and self.right_thigh_inlet and r_thigh_s:
-                    n_hip_r = min(len(pelvis_snapshot), len(r_thigh_s))
-                    if n_hip_r > 0:
-                        p_s = pelvis_snapshot[:n_hip_r]
-                        hip_angles = self.__compute_angles_from_data(
-                            p_s, [], r_thigh_s[:n_hip_r], [],
-                            self.right_hip_offset, self._diag["pelvis"],
-                        )
-                        self.right_hip_data = np.append(self.right_hip_data, hip_angles)
-                        if len(hip_angles):
-                            self.right_hip_timestamps = np.append(self.right_hip_timestamps, np.full(len(hip_angles), now))
-                        pelvis_used = max(pelvis_used, n_hip_r)
+        # Hip RIGHT
+        if self.pelvis_inlet and self.right_thigh_inlet:
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, r_thigh_q)
+            if p_s:
+                hip_angles = self.__compute_angles_from_data(
+                    p_s, p_ts, t_s, t_ts,
+                    self.right_hip_offset, self._diag["pelvis"],
+                )
+                self.right_hip_data = np.append(self.right_hip_data, hip_angles)
+                self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
+                pelvis_used = max(pelvis_used, c_p)
+                r_thigh_used = max(r_thigh_used, c_t)
 
-                # Knee RIGHT
-                if self.right_thigh_inlet and self.right_shank_inlet:
-                    angles = self.__compute_angles_from_data(
-                        r_thigh_s, [], r_shank_s, [],
-                        self.right_angle_offset, self._diag["right_thigh"],
-                    )
-                    self.right_angle_data = np.append(self.right_angle_data, angles)
-                    if len(angles):
-                        self.right_angle_timestamps = np.append(self.right_angle_timestamps, np.full(len(angles), now))
+        # Knee RIGHT
+        if self.right_thigh_inlet and self.right_shank_inlet:
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(r_thigh_q, r_shank_q)
+            if t_s:
+                angles = self.__compute_angles_from_data(
+                    t_s, t_ts, s_s, s_ts,
+                    self.right_angle_offset, self._diag["right_thigh"],
+                )
+                self.right_angle_data = np.append(self.right_angle_data, angles)
+                self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
+                r_thigh_used = max(r_thigh_used, c_t)
+                r_shank_used = max(r_shank_used, c_s)
 
-                # Ankle RIGHT — signed_ankle_angle with twist around ML axis
-                if self.right_shank_inlet and self.right_foot_inlet:
-                    ankle_angles = self.__compute_angles_from_data(
-                        r_shank_s, [], r_foot_s, [],
-                        self.right_ankle_offset, self._diag["right_shank"],
-                        is_ankle=True,
-                        proximal_axis=self.right_ankle_shank_axis,
-                        distal_axis=self.right_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
-                        q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
-                    )
-                    self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
-                    if len(ankle_angles):
-                        self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, np.full(len(ankle_angles), now))
+        # Ankle RIGHT
+        if self.right_shank_inlet and self.right_foot_inlet:
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(r_shank_q, r_foot_q)
+            if s_s:
+                ankle_angles = self.__compute_angles_from_data(
+                    s_s, s_ts, f_s, f_ts,
+                    self.right_ankle_offset, self._diag["right_shank"],
+                    is_ankle=True,
+                    proximal_axis=self.right_ankle_shank_axis,
+                    distal_axis=self.right_ankle_foot_axis,
+                    q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
+                    q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
+                )
+                self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
+                self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
+                r_shank_used = max(r_shank_used, c_s)
+                r_foot_used = max(r_foot_used, c_f)
 
-        # ── 5. Drop the pelvis samples consumed by hip computations ───────────
+        # ── 5. Drop the samples consumed by computations ───────────
         if self.pelvis_inlet and pelvis_used > 0:
             for _ in range(min(pelvis_used, len(self._acc["pelvis"]))):
                 self._acc["pelvis"].popleft()
+        if self.left_thigh_inlet and l_thigh_used > 0:
+            for _ in range(min(l_thigh_used, len(self._acc["left_thigh"]))):
+                self._acc["left_thigh"].popleft()
+        if self.left_shank_inlet and l_shank_used > 0:
+            for _ in range(min(l_shank_used, len(self._acc["left_shank"]))):
+                self._acc["left_shank"].popleft()
+        if self.left_foot_inlet and l_foot_used > 0:
+            for _ in range(min(l_foot_used, len(self._acc["left_foot"]))):
+                self._acc["left_foot"].popleft()
+        if self.right_thigh_inlet and r_thigh_used > 0:
+            for _ in range(min(r_thigh_used, len(self._acc["right_thigh"]))):
+                self._acc["right_thigh"].popleft()
+        if self.right_shank_inlet and r_shank_used > 0:
+            for _ in range(min(r_shank_used, len(self._acc["right_shank"]))):
+                self._acc["right_shank"].popleft()
+        if self.right_foot_inlet and r_foot_used > 0:
+            for _ in range(min(r_foot_used, len(self._acc["right_foot"]))):
+                self._acc["right_foot"].popleft()
 
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
@@ -1174,23 +1227,17 @@ class AngleCalibrator(QObject):
         if not samples_thigh or not samples_shank:
             return np.array([])
 
-        # Convert timestamp lists to numpy once for vectorised nearest-neighbour search
-        ts_shank_arr = np.array(ts_shank, dtype=np.float64)
-
         angles = []
-        for sample_thigh, t_thigh in zip(samples_thigh, ts_thigh):
-            # Find the shank sample whose timestamp is closest to this thigh timestamp
-            closest_idx = int(np.argmin(np.abs(ts_shank_arr - t_thigh)))
-            if np.abs(ts_shank_arr[closest_idx] - t_thigh) < TIME_TOLERANCE:
-                q_thigh = np.array(sample_thigh[6:10], dtype=np.float64)
-                q_shank = np.array(samples_shank[closest_idx][6:10], dtype=np.float64)
-                try:
-                    angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
-                    angles.append(float(angle))
-                except Exception:
-                    pass  # skip numerically degenerate quaternions
+        for sample_thigh, sample_shank in zip(samples_thigh, samples_shank):
+            q_thigh = np.array(sample_thigh[6:10], dtype=np.float64)
+            q_shank = np.array(sample_shank[6:10], dtype=np.float64)
+            try:
+                angle = ROM.calculate_joint_angle(q_thigh, q_shank, angle_offset)
+                angles.append(float(angle))
+            except Exception:
+                pass  # skip numerically degenerate quaternions
 
-        return angles
+        return np.array(angles)
 
     # ─────────────────────────────────────────────────
     # Diagnostics / angle computation helpers
@@ -1210,31 +1257,25 @@ class AngleCalibrator(QObject):
         q_proximal_ref: np.ndarray = None,
         q_distal_ref:   np.ndarray = None,
     ) -> np.ndarray:
-        """Compute joint angles from pre-fetched sample lists using index-based matching.
-
-        Since Xsens Dot sensors are hardware-synchronized (same BLE clock, same
-        sample rate), the Nth sample from the proximal sensor corresponds to the
-        Nth sample from the distal sensor BY CONSTRUCTION — no timestamp matching
-        is needed, and in fact timestamp matching is unreliable because LSL applies
-        host-clock timestamps on BLE reception, which can vary per device by more
-        than the TIME_TOLERANCE threshold.
-
-        Timestamps are still compared and reported in the diagnostic for monitoring
-        sync quality, but are NOT used as a filter for angle computation.
+        """Compute joint angles from pre-matched sample lists.
+        
+        The lists `samples_proximal` and `samples_distal` have already been 
+        aligned by timestamp in `_record_data`, so they are guaranteed to be 
+        the exact same length and correspond to the same instant in time.
         """
         if not samples_proximal or not samples_distal:
             return np.array([])
 
-        # Pair samples by index (hardware-synced sensors: same position = same time)
         n_pairs = min(len(samples_proximal), len(samples_distal))
-        ts_prox_arr = np.array(ts_proximal[:n_pairs], dtype=np.float64)
-        ts_dist_arr = np.array(ts_distal[:n_pairs],   dtype=np.float64)
-
-        # Record average timestamp gap for diagnostics (informational only)
-        gaps = np.abs(ts_prox_arr - ts_dist_arr)
-        if gaps.size > 0:
-            diag_proximal["sync_gap_sum"] += float(gaps.mean())
-            diag_proximal["sync_gap_n"]   += 1
+        
+        if ts_proximal and ts_distal:
+            ts_prox_arr = np.array(ts_proximal[:n_pairs], dtype=np.float64)
+            ts_dist_arr = np.array(ts_distal[:n_pairs],   dtype=np.float64)
+            # Record average timestamp gap for diagnostics (informational only)
+            gaps = np.abs(ts_prox_arr - ts_dist_arr)
+            if gaps.size > 0:
+                diag_proximal["sync_gap_sum"] += float(gaps.mean())
+                diag_proximal["sync_gap_n"]   += 1
 
         angles = []
         for i in range(n_pairs):
