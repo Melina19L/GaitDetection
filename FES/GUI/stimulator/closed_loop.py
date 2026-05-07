@@ -116,10 +116,9 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
     }
     gravity = np.array([0.0, 0.0, -1.0])   # global frame: Z points up, gravity is −Z
 
-    def axis_info(q, label):
+    def axis_info(q, label, fwd_axis=None):
         rows = []
         best_grav  = ('?', 0.0)
-        best_floor = ('?', 0.0)
         for name, v in axes.items():
             gv = rotate_vector_by_quaternion(v, q)
             gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
@@ -134,13 +133,21 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
                 f'<td title="horizontal">{bar_f} {alignment_floor:.2f}</td></tr>'
             )
             if alignment_grav  > best_grav[1]:  best_grav  = (name, alignment_grav)
-            if alignment_floor > best_floor[1]: best_floor = (name, alignment_floor)
+            
+        floor_label = fwd_axis if fwd_axis else '?'
         rows.append(
             f'<tr style="color:#f39c12"><td><b>{label} summary</b></td>'
             f'<td colspan="2">↕ Vertical axis: <b>{label}-{best_grav[0]}</b></td>'
-            f'<td>↔ Floor axis: <b>{label}-{best_floor[0]}</b></td></tr>'
+            f'<td>↔ Forward axis: <b>{label}-{floor_label}</b></td></tr>'
         )
         return rows
+
+    # ── Pre-detect axes for accurate summary labels ──
+    det_shank_fwd = '?'
+    det_foot_fwd  = '?'
+    if q_shank is not None and q_foot is not None:
+        det_shank_fwd = detect_most_horizontal_axis(q_shank)
+        det_foot_fwd  = detect_most_horizontal_axis(q_foot, q_shank)
 
     html = (
         '<p style="color:#3498db; font-weight:bold; font-size:12px;">📐 Sensor Axis Diagnostic</p>'
@@ -150,9 +157,9 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
         '<th>Vertical ↕</th><th>Horizontal ↔</th></tr>'
     )
     if q_shank is not None:
-        html += ''.join(axis_info(q_shank, 'Shank'))
+        html += ''.join(axis_info(q_shank, 'Shank', det_shank_fwd))
     if q_foot is not None:
-        html += ''.join(axis_info(q_foot, 'Foot'))
+        html += ''.join(axis_info(q_foot, 'Foot', det_foot_fwd))
     html += '</table>'
 
     # ── Auto-detected axis summary ──
