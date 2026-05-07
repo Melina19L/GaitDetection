@@ -268,10 +268,14 @@ class PlotDialog(QDialog):
     def closeEvent(self, event):
         """Hide instead of closing so the dialog can be re-opened without crashes."""
         self.timer.stop()
+        if hasattr(self, 'calibrator') and hasattr(self.calibrator, 'save_raw_data'):
+            self.calibrator.save_raw_data()
         event.ignore()   # don't destroy the widget
         self.hide()
 
     def reject(self):
         """Intercept Escape key (QDialog default) — same behaviour as X button."""
         self.timer.stop()
+        if hasattr(self, 'calibrator') and hasattr(self.calibrator, 'save_raw_data'):
+            self.calibrator.save_raw_data()
         self.hide()

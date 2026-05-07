@@ -88,6 +88,9 @@ class AngleCalibrator(QObject):
         self.left_ankle_foot_axis   = 'X'
         self.right_ankle_shank_axis = 'X'
         self.right_ankle_foot_axis  = 'X'
+        
+        # Raw data logging for debugging time-sync issues
+        self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -239,10 +242,25 @@ class AngleCalibrator(QObject):
         self.__disconnect_pelvis_if_idle()
         if self.worker_thread:
             # If a worker thread is running, stop it
-            self.worker_thread.quit()
             self.worker_thread.wait()
             self.worker_thread.deleteLater()
+            
+        self.save_raw_data()
         self.message_signal.emit("Angle calibration stopped (knee + ankle + hip).")
+
+    def save_raw_data(self):
+        """Save raw LSL data for debugging time sync."""
+        try:
+            import numpy as np
+            raw_file = "raw_imu_data_from_gui.npz"
+            np.savez(raw_file, 
+                     left_shank=np.array(self._raw_log['left_shank']),
+                     left_foot=np.array(self._raw_log['left_foot']),
+                     right_shank=np.array(self._raw_log['right_shank']),
+                     right_foot=np.array(self._raw_log['right_foot']))
+            print(f"Raw LSL data saved to {raw_file}")
+        except Exception as e:
+            print(f"Failed to save raw data: {e}")
 
     def calibration(self):
         """Single-press calibration: reads current sensor pose as the zero reference."""
@@ -454,6 +472,10 @@ class AngleCalibrator(QObject):
                 self._acc[key].extend(samples)
                 self._diag[key]["count"]  += len(samples)
                 self._diag[key]["last_ts"] = now
+                if hasattr(self, '_raw_log') and key in self._raw_log:
+                    # Save raw samples with arrival timestamp for debugging
+                    for s in samples:
+                        self._raw_log[key].append([now] + list(s))
 
         # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
         # Pelvis samples feed BOTH left and right hip computations, so they are
