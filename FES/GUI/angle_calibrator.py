@@ -3,7 +3,10 @@ from pylsl import StreamInlet, resolve_byprop
 from qt_core import *
 from enum import Enum
 import numpy as np
-from stimulator.closed_loop import ROM, TIME_TOLERANCE, sensor_axes_diagnostic
+from stimulator.closed_loop import (
+    ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
+    detect_most_vertical_axis, detect_most_horizontal_axis,
+)
 import time
 from typing import Optional
 
@@ -77,6 +80,14 @@ class AngleCalibrator(QObject):
         self.left_hip_offset = 0.0
         self.right_hip_offset = 0.0
 
+        # Per-side ankle axes (auto-detected at functional calibration so the
+        # algorithm picks the longitudinal axis of each Movella DOT regardless
+        # of strap orientation). Defaults preserve the historic X/X behaviour.
+        self.left_ankle_shank_axis  = 'X'
+        self.left_ankle_foot_axis   = 'X'
+        self.right_ankle_shank_axis = 'X'
+        self.right_ankle_foot_axis  = 'X'
+
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
         self.timer = QTimer(self)
@@ -126,6 +137,94 @@ class AngleCalibrator(QObject):
         left_hip = self.left_thigh_inlet is not None and self.pelvis_inlet is not None
         right_hip = self.right_thigh_inlet is not None and self.pelvis_inlet is not None
         return left_knee or right_knee or left_ankle or right_ankle or left_hip or right_hip
+
+    def _connected_inlets(self) -> list:
+        """Return the list of ``(display_name, inlet, diag_key)`` for inlets the
+        operator has currently connected. Used by the readiness gate so it only
+        waits on sensors that are actually expected to stream."""
+        candidates = (
+            ("Left Thigh",  self.left_thigh_inlet,  "left_thigh"),
+            ("Left Shank",  self.left_shank_inlet,  "left_shank"),
+            ("Left Foot",   self.left_foot_inlet,   "left_foot"),
+            ("Right Thigh", self.right_thigh_inlet, "right_thigh"),
+            ("Right Shank", self.right_shank_inlet, "right_shank"),
+            ("Right Foot",  self.right_foot_inlet,  "right_foot"),
+            ("Pelvis",      self.pelvis_inlet,      "pelvis"),
+        )
+        return [(n, i, k) for n, i, k in candidates if i is not None]
+
+    def is_all_sensors_streaming(self, freshness_s: float = 0.5) -> tuple[bool, dict]:
+        """Return ``(all_ready, status_per_sensor)``.
+
+        A sensor is "ready" when its diagnostic counter reports a sample within
+        the last ``freshness_s`` seconds. Sensors that are not connected are
+        skipped — they don't block the gate.
+
+        Used by the SensorReadinessDialog to wait for all connected Movella DOTs
+        to actually stream before the test starts, so the recording doesn't
+        contain the BLE warm-up transient.
+        """
+        now = time.time()
+        status: dict[str, bool] = {}
+        all_ready = True
+        for name, _inlet, key in self._connected_inlets():
+            last_ts = self._diag.get(key, {}).get("last_ts", 0.0)
+            is_fresh = (last_ts > 0.0) and (now - last_ts < freshness_s)
+            status[name] = is_fresh
+            if not is_fresh:
+                all_ready = False
+        return all_ready, status
+
+    def flush_buffers(self) -> None:
+        """Drop everything currently buffered: deques, computed angle arrays,
+        and the diagnostic counters. Called right before the test starts so
+        the recording (and the live plot) begin from a clean baseline,
+        without the warm-up transient that BLE often produces in the first
+        seconds after sensors come online.
+        """
+        # 1. Drop any sample backlog in the per-inlet deques. We can't iterate
+        #    while clearing, so use a snapshot of the keys.
+        for key in list(self._acc.keys()):
+            try:
+                self._acc[key].clear()
+            except Exception:
+                pass
+
+        # 2. Reset all computed-angle arrays + their timestamp arrays so the
+        #    plot widgets repaint from scratch.
+        self.left_angle_data       = np.array([])
+        self.right_angle_data      = np.array([])
+        self.left_ankle_data       = np.array([])
+        self.right_ankle_data      = np.array([])
+        self.left_hip_data         = np.array([])
+        self.right_hip_data        = np.array([])
+        self.left_angle_timestamps  = np.array([])
+        self.right_angle_timestamps = np.array([])
+        self.left_ankle_timestamps  = np.array([])
+        self.right_ankle_timestamps = np.array([])
+        self.left_hip_timestamps    = np.array([])
+        self.right_hip_timestamps   = np.array([])
+
+        # 3. Drop any pending samples sitting on the LSL inlet socket buffers
+        #    (each pull_chunk after this returns only freshly arrived samples).
+        for _name, inlet, _key in self._connected_inlets():
+            try:
+                inlet.flush()
+            except Exception:
+                pass
+
+        # 4. Reset diagnostic windowing (rate counters + sync-gap accumulators)
+        for key in list(self._diag.keys()):
+            d = self._diag[key]
+            d["count"] = 0
+            d["sync_gap_sum"] = 0.0
+            d["sync_gap_n"] = 0
+            # NOTE: we keep last_ts so is_all_sensors_streaming() still reports
+            # recently-arrived sensors as "ready"; record_data will refresh it
+            # on the very next tick.
+
+        # 5. Mark a new session start for offline saving / plot pkl naming.
+        self._session_start = time.time()
 
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
@@ -400,12 +499,16 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.left_angle_timestamps = np.append(self.left_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle LEFT
+                # Ankle LEFT — uses per-side axes detected at calibration so
+                # the algorithm picks the actual longitudinal axes regardless
+                # of strap orientation (proximal=shank, distal=foot).
                 if self.left_shank_inlet and self.left_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         l_shank_s, [], l_foot_s, [],
                         self.left_ankle_offset, self._diag["left_shank"],
-                        is_ankle=True
+                        is_ankle=True,
+                        proximal_axis=self.left_ankle_shank_axis,
+                        distal_axis=self.left_ankle_foot_axis,
                     )
                     self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -448,12 +551,14 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.right_angle_timestamps = np.append(self.right_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle RIGHT
+                # Ankle RIGHT — uses per-side axes detected at calibration.
                 if self.right_shank_inlet and self.right_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         r_shank_s, [], r_foot_s, [],
                         self.right_ankle_offset, self._diag["right_shank"],
-                        is_ankle=True
+                        is_ankle=True,
+                        proximal_axis=self.right_ankle_shank_axis,
+                        distal_axis=self.right_ankle_foot_axis,
                     )
                     self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -726,18 +831,30 @@ class AngleCalibrator(QObject):
             return None
 
         def _one_side_ankle(shank_inlet, foot_inlet):
-            """Return (offset, q_shank, q_foot) or (None, None, None) on failure."""
+            """Return ``(offset, q_shank, q_foot, shank_axis, foot_axis)`` or all-None on failure.
+
+            The two axes are auto-detected from the calibration-pose quaternions:
+              - shank: most-vertical local axis (longitudinal = along tibia)
+              - foot:  most-horizontal local axis (longitudinal = toward toes)
+            so the algorithm adapts to whatever orientation the operator picked
+            when strapping the Movella DOTs to the segments.  The offset is then
+            computed using these detected axes so it stays consistent.
+            """
             if not (shank_inlet and foot_inlet):
-                return None, None, None
+                return None, None, None, None, None
             max_tries = 10
             for _ in range(max_tries):
                 q_shank = self.__get_latest_quaternion_nonblocking(shank_inlet)
                 q_foot  = self.__get_latest_quaternion_nonblocking(foot_inlet)
                 if q_shank is not None and q_foot is not None:
-                    offset = ROM.ankle_functional_calibration(q_shank, q_foot)
-                    return offset, q_shank, q_foot
+                    shank_axis = detect_most_vertical_axis(q_shank)
+                    foot_axis  = detect_most_horizontal_axis(q_foot)
+                    offset = ROM.ankle_functional_calibration(
+                        q_shank, q_foot, foot_axis=foot_axis, shank_axis=shank_axis,
+                    )
+                    return offset, q_shank, q_foot, shank_axis, foot_axis
                 QCoreApplication.processEvents()
-            return None, None, None
+            return None, None, None, None, None
 
         def _one_side_hip(thigh_inlet, offset_val):
             """Calibrate hip using the shared pelvis sensor as the proximal reference."""
@@ -773,14 +890,18 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip LEFT] skipped: {e}")
 
-            ankle_off, q_sh_l, q_ft_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
+            ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_ax_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
+                self.left_ankle_shank_axis = sh_ax_l
+                self.left_ankle_foot_axis  = ft_ax_l
                 # Store reference quaternions for the stable relative-quat path
                 self.left_ankle_qshank_ref = q_sh_l
                 self.left_ankle_qfoot_ref  = q_ft_l
-                print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}°  q_shank={q_sh_l}  q_foot={q_ft_l}")
-                self.message_signal.emit("Left ankle offset calibrated.  ✔ Reference quaternions saved.")
+                print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}° shank_axis={sh_ax_l} foot_axis={ft_ax_l}")
+                self.message_signal.emit(
+                    f"Left ankle calibrated.  shank={sh_ax_l}  foot={ft_ax_l}  offset={ankle_off:+.1f}°"
+                )
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
                 self.message_signal.emit("Left ankle: no data yet. Try again when streams are active.")
@@ -811,14 +932,18 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip RIGHT] skipped: {e}")
 
-            ankle_off, q_sh_r, q_ft_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
+            ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_ax_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
+                self.right_ankle_shank_axis = sh_ax_r
+                self.right_ankle_foot_axis  = ft_ax_r
                 # Store reference quaternions for the stable relative-quat path
                 self.right_ankle_qshank_ref = q_sh_r
                 self.right_ankle_qfoot_ref  = q_ft_r
-                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°  q_shank={q_sh_r}  q_foot={q_ft_r}")
-                self.message_signal.emit("Right ankle offset calibrated.  ✔ Reference quaternions saved.")
+                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}° shank_axis={sh_ax_r} foot_axis={ft_ax_r}")
+                self.message_signal.emit(
+                    f"Right ankle calibrated.  shank={sh_ax_r}  foot={ft_ax_r}  offset={ankle_off:+.1f}°"
+                )
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
                 self.message_signal.emit("Right ankle: no data yet. Try again when streams are active.")
@@ -995,7 +1120,9 @@ class AngleCalibrator(QObject):
         ts_distal: list,
         angle_offset: float,
         diag_proximal: dict,
-        is_ankle: bool = False
+        is_ankle: bool = False,
+        proximal_axis: str = 'X',
+        distal_axis:   str = 'X',
     ) -> np.ndarray:
         """Compute joint angles from pre-fetched sample lists using index-based matching.
 
@@ -1029,7 +1156,14 @@ class AngleCalibrator(QObject):
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
                 if is_ankle:
-                    angle = ROM.calculate_ankle_angle(q_prox, q_dist, angle_offset)
+                    # Use the per-side axes detected at calibration so the
+                    # algorithm picks the longitudinal axis of each Movella DOT
+                    # regardless of strap orientation. ``proximal`` is shank,
+                    # ``distal`` is foot.
+                    angle = ROM.calculate_ankle_angle(
+                        q_prox, q_dist, angle_offset,
+                        foot_axis=distal_axis, shank_axis=proximal_axis,
+                    )
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))

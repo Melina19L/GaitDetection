@@ -60,43 +60,40 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
     return angleDeg
 
 
-def ankle_angle_between_quaternions(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
-    """Signed ankle dorsiflexion/plantarflexion angle in degrees.
+def ankle_angle_between_quaternions(
+    q_shank: np.ndarray,
+    q_foot: np.ndarray,
+    foot_axis: str = 'X',
+    shank_axis: str = 'X',
+) -> float:
+    """Unsigned angle between the chosen shank and foot longitudinal axes, in degrees.
 
-    Sensor axes confirmed by sensor_axes_diagnostic on 2026-04-23:
-      - Shank-X  global ≈ [−0.05, +0.03, +1.00]  → vertical (along tibia)  ✓
-      - Foot-X   global ≈ [+0.78, +0.25, +0.57]  → LONGITUDINAL (toward toes) ✓
-      - Foot-Y   global ≈ [−0.21, +0.97, −0.15]  → medio-lateral (Gy≈1 = sideways) ✗
+    The choice of which sensor-local axis represents "along the segment" depends
+    on how the strap orients the Movella DOT on the body:
+      - Shank: the axis most aligned with gravity in standing pose (vertical = along tibia).
+      - Foot: the axis most parallel to the floor in standing pose (horizontal = along toes).
 
-    Why Foot-X (not Foot-Y):
-      Foot-Y is the medio-lateral (inversion/eversion) axis.  It stays
-      approximately perpendicular to the sagittal plane during normal gait and
-      therefore barely changes its angle with Shank-X during dorsi/plantarflexion.
-      Foot-X is the longitudinal axis of the foot (pointing toward the toes); as
-      the foot rotates at the ankle, this axis changes its angle with the tibial
-      axis Shank-X, correctly encoding the flexion angle.
+    These are determined per-side at calibration via ``detect_most_vertical_axis``
+    / ``detect_most_horizontal_axis`` and stored on ``ROM`` (or passed explicitly).
+
+    Default ``shank_axis='X'`` and ``foot_axis='X'`` preserve the historic
+    behaviour for the legacy mounting where both X-axes were already correct.
 
     Measurement principle:
-      angle(Shank-X_global, Foot-X_global) at neutral ≈ 55-60° (sensor-specific).
-      Subtracting the calibration offset (measured at neutral) centres the output
-      on 0°; larger angle = plantarflexion (+°), smaller angle = dorsiflexion (−°).
-
-    No sign trick required: plantarflexion moves Foot-X away from vertical
-    (angle increases above offset → +), dorsiflexion moves it closer to vertical
-    (angle decreases below offset → −).
-
-    Expected range during normal gait:
-      Plantarflexion (toe-off)  : +5° to +20°
-      Neutral (quiet standing)  :  ~0°
-      Dorsiflexion (mid-stance) : −5° to −15°
+      angle(Shank<axis>_global, Foot<axis>_global) at neutral is recorded as the
+      calibration offset.  Subtracting it from each runtime measurement centres
+      the output on 0° at neutral.  Larger angle = plantarflexion (+°), smaller
+      angle = dorsiflexion (−°).  Picking the truly-longitudinal axes prevents
+      the output from being contaminated by inversion/eversion or vertical-axis
+      rotation when the sensor is mounted in a non-canonical orientation.
     """
-    xAxis = np.array([1.0, 0.0, 0.0])
+    sax = AXIS_VECTORS[shank_axis]
+    fax = AXIS_VECTORS[foot_axis]
 
-    shank_x_global = rotate_vector_by_quaternion(xAxis, q_shank)
-    foot_x_global  = rotate_vector_by_quaternion(xAxis, q_foot)  # longitudinal foot axis
+    shank_global = rotate_vector_by_quaternion(sax, q_shank)
+    foot_global  = rotate_vector_by_quaternion(fax, q_foot)
 
-    # Unsigned angle; offset subtraction in ROM.get_ankle_angle supplies the sign
-    angle_rad = angle_between_vectors(shank_x_global, foot_x_global)
+    angle_rad = angle_between_vectors(shank_global, foot_global)
     return float(np.degrees(angle_rad))
 
 
@@ -185,6 +182,53 @@ def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
     return np.arccos(dot_product)
 
 
+# ── Sensor-axis detection ────────────────────────────────────────────────────
+# At calibration time we look at the world projection of each sensor's local
+# axes (X / Y / Z) and pick the one most aligned with gravity (= longitudinal
+# for vertical segments like shank/thigh/pelvis) or most parallel to the floor
+# (= longitudinal for the foot, pointing toward toes).
+# This makes the algorithm robust to operator-chosen strap orientation.
+AXIS_VECTORS = {
+    'X': np.array([1.0, 0.0, 0.0]),
+    'Y': np.array([0.0, 1.0, 0.0]),
+    'Z': np.array([0.0, 0.0, 1.0]),
+}
+
+
+def detect_most_vertical_axis(q: np.ndarray) -> str:
+    """Return the local axis name ('X' | 'Y' | 'Z') of a sensor whose world
+    projection is most aligned with gravity at the current pose.
+    Used for shank / thigh / pelvis (segments that stand vertically at neutral).
+    """
+    best_name = 'X'
+    best_score = -1.0
+    for name, v in AXIS_VECTORS.items():
+        gv = rotate_vector_by_quaternion(v, q)
+        gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
+        score = abs(float(gv_norm[2]))   # |z component| → vertical alignment in [0,1]
+        if score > best_score:
+            best_score = score
+            best_name = name
+    return best_name
+
+
+def detect_most_horizontal_axis(q: np.ndarray) -> str:
+    """Return the local axis name ('X' | 'Y' | 'Z') of a sensor whose world
+    projection is most parallel to the floor at the current pose.
+    Used for foot (longitudinal axis pointing toward toes is horizontal).
+    """
+    best_name = 'X'
+    best_score = -1.0
+    for name, v in AXIS_VECTORS.items():
+        gv = rotate_vector_by_quaternion(v, q)
+        gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
+        score = 1.0 - abs(float(gv_norm[2]))   # 1 - |z| → horizontal alignment in [0,1]
+        if score > best_score:
+            best_score = score
+            best_name = name
+    return best_name
+
+
 class ROM:
     def __init__(self, offset: float = 0.0, scale: float = 1.0):
         self.timestamp: float = 0.0
@@ -192,6 +236,22 @@ class ROM:
         self.scale: float = scale
         self.angles = np.empty((0, 2))
         self.angles_algo2 = np.empty((0, 2))
+        # Sensor-local longitudinal axes used for the ankle algorithm.
+        # Defaults preserve historic behaviour (X for both); set via
+        # ``set_ankle_axes`` after auto-detection at calibration time.
+        self.shank_axis: str = 'X'
+        self.foot_axis:  str = 'X'
+
+    def set_ankle_axes(self, shank_axis: str, foot_axis: str) -> None:
+        """Configure which sensor-local axes represent "along the segment" for the
+        ankle calculation.  Auto-detected at calibration via
+        ``detect_most_vertical_axis`` (shank) and ``detect_most_horizontal_axis``
+        (foot).  Pass 'X', 'Y', or 'Z'.
+        """
+        if shank_axis in AXIS_VECTORS:
+            self.shank_axis = shank_axis
+        if foot_axis in AXIS_VECTORS:
+            self.foot_axis = foot_axis
 
     # ── Knee methods (unchanged) ──────────────────────────────────────────────
     @staticmethod
@@ -228,29 +288,38 @@ class ROM:
         self.offset      = 0.0  # zeroing is handled by the relative-quat formula
 
     @staticmethod
-    def ankle_functional_calibration(q_shank: np.ndarray, q_foot: np.ndarray) -> float:
+    def ankle_functional_calibration(
+        q_shank: np.ndarray,
+        q_foot: np.ndarray,
+        foot_axis: str = 'X',
+        shank_axis: str = 'X',
+    ) -> float:
         """Return the ankle angle at neutral pose (used as calibration offset).
 
-        With the built-in −90° correction in ankle_angle_between_quaternions,
-        this returns only the small sensor-specific residual from perfect
-        perpendicularity (typically ±5°).  Subtracting this small offset from
-        every subsequent measurement centres the signal on 0° at neutral.
+        Subtracting this offset from every subsequent measurement centres the
+        signal on 0° at neutral.  The two ``*_axis`` arguments must match the
+        ones used at runtime (typically auto-detected at calibration time).
         """
-        return ankle_angle_between_quaternions(q_shank, q_foot)
+        return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis)
 
     @staticmethod
-    def calculate_ankle_angle(q_shank: np.ndarray, q_foot: np.ndarray, offset: float) -> float:
+    def calculate_ankle_angle(
+        q_shank: np.ndarray,
+        q_foot: np.ndarray,
+        offset: float,
+        foot_axis: str = 'X',
+        shank_axis: str = 'X',
+    ) -> float:
         """Return the calibrated signed ankle angle in degrees (static helper)."""
-        return ankle_angle_between_quaternions(q_shank, q_foot) - offset
+        return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis) - offset
 
     def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:
-        """Compute, store and return the calibrated ankle angle.
-
-        Uses ankle_angle_between_quaternions (which returns ~0° at neutral
-        standing thanks to the built-in −90° correction) minus the small
-        residual offset stored at calibration time.
+        """Compute, store and return the calibrated ankle angle, using the
+        per-instance ``shank_axis`` / ``foot_axis`` configured via ``set_ankle_axes``.
         """
-        angle = ankle_angle_between_quaternions(q_shank, q_foot) - self.offset
+        angle = ankle_angle_between_quaternions(
+            q_shank, q_foot, self.foot_axis, self.shank_axis,
+        ) - self.offset
         angle *= self.scale
         self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
         return angle

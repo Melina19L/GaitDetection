@@ -661,10 +661,15 @@ class SetupMainWindow:
         #     self.process = subprocess.Popen(["./DeployDir/MovellaGUI"])
 
         def start_clicked():
-            # Stop timer (don't want it running during experiment)
+            # Stop the floating IMU Angle Monitor preview (it was a calibration
+            # aid, not a test view). The Page-10 embedded plots take over from here.
             if self.plot_dialog is not None:
                 self.plot_dialog.timer.stop()
-            self.angle_calibrator.stop()
+            # IMPORTANT: do NOT stop self.angle_calibrator here — the calibrator
+            # keeps pulling LSL samples and updating its angle buffers throughout
+            # the test, which is what feeds the Page-10 real-time plots and the
+            # numeric readouts. LSL allows the experiment thread's inlets and the
+            # calibrator's inlets to coexist on the same outlets.
 
             # Deselect all left menu buttons
             self.ui.left_menu.deselect_all()
@@ -5902,6 +5907,35 @@ class SetupMainWindow:
             # Change label
             self.ui.load_pages.title_label.setText("Running...")
 
+            # ── Sensor warm-up gate ────────────────────────────────────────
+            # Before the recording actually starts, wait for every connected
+            # Movella DOT to push fresh samples (BLE warm-up can take 3-5 s).
+            # Once all are streaming, drop any backlog and reset the live plots
+            # so the test (and the saved .pkl/.xlsx) begin from a clean baseline.
+            try:
+                from gui.widgets.sensor_readiness_dialog import SensorReadinessDialog
+                cal = getattr(self, "angle_calibrator", None)
+                if cal is not None and cal.has_any_sensor():
+                    dlg = SensorReadinessDialog(cal, self.themes, parent=self)
+                    if dlg.exec() != QDialog.DialogCode.Accepted:
+                        # User cancelled → revert UI to the Pre-Test page and abort.
+                        MainFunctions.set_page(self, self.ui.load_pages.page_11)
+                        self.ui.left_menu.top_frame.setVisible(True)
+                        self.ui.load_pages.title_label.setText(self.title_label)
+                        return
+                    # Drain stale samples / reset angle buffers / refresh diag.
+                    cal.flush_buffers()
+                    # Reset the live Page-10 plots so the curves repaint from t=0.
+                    for _attr in ("page10_knee_plot", "page10_ankle_plot", "page10_hip_plot"):
+                        _w = getattr(self, _attr, None)
+                        if _w is not None:
+                            try:
+                                _w.reset_plot()
+                            except Exception:
+                                pass
+            except Exception as _e:
+                print(f"[Warm-up gate] skipped: {_e}")
+
             # Start the experiment
             self.start_experiment.emit(task_dict)
 
@@ -7561,6 +7595,14 @@ class SetupMainWindow:
         offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
         # Reference quaternions for the stable relative-quaternion ankle algorithm
         l_qs, l_qf, r_qs, r_qf = main_window.angle_calibrator.get_ankle_reference()
+        # Per-side ankle longitudinal axes auto-detected at calibration so the
+        # stimulator-side ROM (whose data feeds the saved .pkl/.xlsx) uses the
+        # same axes as the live calibrator-side computation that drives the plots.
+        # Defaults to 'X' if the calibrator hasn't auto-detected anything yet.
+        ankle_axes_left_shank  = getattr(main_window.angle_calibrator, "left_ankle_shank_axis",  'X')
+        ankle_axes_left_foot   = getattr(main_window.angle_calibrator, "left_ankle_foot_axis",   'X')
+        ankle_axes_right_shank = getattr(main_window.angle_calibrator, "right_ankle_shank_axis", 'X')
+        ankle_axes_right_foot  = getattr(main_window.angle_calibrator, "right_ankle_foot_axis",  'X')
 
         # Get the scale factors securely (fallback to 1.0 if not opened yet)
         try:
@@ -7665,6 +7707,11 @@ class SetupMainWindow:
             "ankle_left_qfoot_ref":   l_qf,
             "ankle_right_qshank_ref": r_qs,
             "ankle_right_qfoot_ref":  r_qf,
+            # Auto-detected longitudinal axes for the per-side ankle algorithm.
+            "ankle_left_shank_axis":  ankle_axes_left_shank,
+            "ankle_left_foot_axis":   ankle_axes_left_foot,
+            "ankle_right_shank_axis": ankle_axes_right_shank,
+            "ankle_right_foot_axis":  ankle_axes_right_foot,
             "scale_left": scale_left,
             "scale_right": scale_right,
             "closed_loop": main_window.closed_loop_toggle.isChecked() and main_window.closed_loop_toggle.isEnabled(),

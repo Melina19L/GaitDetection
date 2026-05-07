@@ -1122,6 +1122,18 @@ class StimulationIMUs(StimulationBasic):
         self.left_hip_rom   = ROM(kwargs.get("offset_left_hip",    0.0), kwargs.get("scale_left",  1.0))
         self.right_hip_rom  = ROM(kwargs.get("offset_right_hip",   0.0), kwargs.get("scale_right", 1.0))
 
+        # Wire the auto-detected per-side ankle axes into the ROM so the saved
+        # `imu_*_ankle_angles` (in `.pkl` / `.xlsx`) match the live calibrator
+        # plots instead of falling back to the hardcoded X-axis assumption.
+        self.left_ankle_rom.set_ankle_axes(
+            kwargs.get("ankle_left_shank_axis",  'X'),
+            kwargs.get("ankle_left_foot_axis",   'X'),
+        )
+        self.right_ankle_rom.set_ankle_axes(
+            kwargs.get("ankle_right_shank_axis", 'X'),
+            kwargs.get("ankle_right_foot_axis",  'X'),
+        )
+
         # Set ankle reference quaternions for the stable relative-quaternion algorithm.
         # When present, the ROM ignores the numeric offset and directly computes
         # the change in relative shank-foot orientation since the calibration pose.
