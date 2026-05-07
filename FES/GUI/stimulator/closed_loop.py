@@ -248,6 +248,11 @@ def signed_ankle_angle(
     q_delta = quat_mul(q_rel_now, quat_conjugate(q_rel_ref))
     q_delta = normalize(q_delta)
 
+    # Canonicalise: q and -q represent the same rotation but produce
+    # opposite-sign twist angles. Force w ≥ 0 so the output is continuous.
+    if q_delta[0] < 0:
+        q_delta = -q_delta
+
     axis_vec = AXIS_VECTORS.get(foot_axis, AXIS_VECTORS['Y'])
     rad = twist_angle_around_axis(q_delta, axis_vec)
     return float(np.degrees(rad))
