@@ -242,48 +242,82 @@ def signed_ankle_angle(
     q_shank_ref: np.ndarray,
     q_foot_ref: np.ndarray,
     foot_axis: str = 'Y',
+    shank_long_axis: str = 'X',
+    foot_fwd_axis: str = 'X',
+    shank_ml_axis: str = 'Y',
 ) -> float:
     """Return signed ankle dorsi-/plantar-flexion in degrees.
 
-    Uses the relative-quaternion approach (decoupled from knee flexion):
-      1. Compute relative orientations shank-in-foot at calibration and at
-         current time.
-      2. q_delta = q_rel_now * q_rel_ref⁻¹ — rotation from neutral to current,
-         expressed in the foot's local frame.
-      3. Project q_delta onto the ankle axis (default: foot-local Y) to extract
-         the twist component → that's pure dorsi/plantarflexion.
+    Uses a **gravity-constrained sagittal-plane projection** that is
+    geometrically decoupled from knee flexion:
 
-    Compared to the older unsigned ``angle_between_quaternions`` algorithm:
-      - Returns a SIGNED value (no offset bookkeeping needed; 0° at neutral pose).
-      - Independent of shank tilt due to knee flexion (the shank's orientation
-        cancels out via the relative-quaternion formulation).
-      - Filters out ankle inversion/eversion contamination by projecting onto
-        the chosen ankle axis only.
+      1. Compute the shank's medio-lateral (ML) axis in the global frame.
+      2. Project it onto the horizontal plane (zero-out vertical component).
+         Knee flexion rotates the shank *around* the ML axis, so the ML axis
+         itself does NOT change direction — this is the key insight.
+      3. Define the sagittal plane as perpendicular to this horizontal ML.
+      4. Project the shank's longitudinal axis and the foot's forward axis
+         onto this sagittal plane.
+      5. The angle between these two projections IS the ankle flex/extension.
 
-    ``foot_axis`` selects which sensor-local axis is the ankle's medio-lateral
-    axis. Auto-detected at calibration via ``detect_most_horizontal_axis``.
+    The calibration-pose quaternions are used only to compute a static
+    offset so that neutral standing reads 0°.
+
+    Why the old twist-decomposition failed:
+      Both knee flexion and ankle dorsiflexion are rotations around the
+      same medio-lateral axis.  The relative quaternion q_delta picks up
+      both indistinguishably.  The sagittal projection avoids this because
+      it measures the *geometric angle between two body segments*, not the
+      relative rotation.
     """
-    qs = normalize(np.asarray(q_shank,     dtype=float))
-    qf = normalize(np.asarray(q_foot,      dtype=float))
+    qs     = normalize(np.asarray(q_shank,     dtype=float))
+    qf     = normalize(np.asarray(q_foot,      dtype=float))
     qs_ref = normalize(np.asarray(q_shank_ref, dtype=float))
     qf_ref = normalize(np.asarray(q_foot_ref,  dtype=float))
 
-    # Relative orientation of shank in foot frame: q_rel = q_foot⁻¹ * q_shank
-    q_rel_now = quat_mul(quat_conjugate(qf),     qs)
-    q_rel_ref = quat_mul(quat_conjugate(qf_ref), qs_ref)
+    def _sagittal_angle(qs_cur, qf_cur):
+        # Shank ML axis in global frame — stays horizontal during knee flexion
+        shank_ml = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(shank_ml_axis, AXIS_VECTORS['Y']), qs_cur,
+        )
+        # Keep only the horizontal component (remove gravity contamination)
+        shank_ml[2] = 0.0
+        n = float(np.linalg.norm(shank_ml))
+        if n < 1e-6:
+            return 0.0
+        ml_dir = shank_ml / n
 
-    # Change in relative orientation since calibration (in foot frame)
-    q_delta = quat_mul(q_rel_now, quat_conjugate(q_rel_ref))
-    q_delta = normalize(q_delta)
+        # Shank longitudinal axis (along the tibia) and foot forward axis
+        shank_long = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(shank_long_axis, AXIS_VECTORS['X']), qs_cur,
+        )
+        foot_fwd = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(foot_fwd_axis, AXIS_VECTORS['X']), qf_cur,
+        )
 
-    # Canonicalise: q and -q represent the same rotation but produce
-    # opposite-sign twist angles. Force w ≥ 0 so the output is continuous.
-    if q_delta[0] < 0:
-        q_delta = -q_delta
+        # Project both onto the sagittal plane (⊥ to ml_dir)
+        shank_proj = shank_long - np.dot(shank_long, ml_dir) * ml_dir
+        foot_proj  = foot_fwd  - np.dot(foot_fwd,  ml_dir) * ml_dir
 
-    axis_vec = AXIS_VECTORS.get(foot_axis, AXIS_VECTORS['Y'])
-    rad = twist_angle_around_axis(q_delta, axis_vec)
-    return float(np.degrees(rad))
+        ns = float(np.linalg.norm(shank_proj))
+        nf = float(np.linalg.norm(foot_proj))
+        if ns < 1e-6 or nf < 1e-6:
+            return 0.0
+        shank_proj /= ns
+        foot_proj  /= nf
+
+        dot   = float(np.clip(np.dot(shank_proj, foot_proj), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(dot)))
+
+        # Sign convention: positive = dorsiflexion
+        cross = np.cross(foot_proj, shank_proj)
+        if float(np.dot(cross, ml_dir)) < 0:
+            angle = -angle
+        return angle
+
+    # Calibration offset (angle at neutral standing pose)
+    offset = _sagittal_angle(qs_ref, qf_ref)
+    return _sagittal_angle(qs, qf) - offset
 
 
 # ── Sensor-axis detection ────────────────────────────────────────────────────
@@ -508,13 +542,33 @@ class ROM:
     ) -> float:
         """Return the calibrated ankle angle in degrees.
 
-        If ``q_shank_ref`` AND ``q_foot_ref`` are provided, uses the new
-        relative-quaternion algorithm (signed, decoupled from knee flexion).
+        If ``q_shank_ref`` AND ``q_foot_ref`` are provided, uses the
+        sagittal-plane projection algorithm (decoupled from knee flexion).
         Otherwise falls back to the legacy unsigned ``angle_between_quaternions``
         with offset subtraction.
+        
+        ``foot_axis`` is the foot's FORWARD axis (toward toes).
+        ``shank_axis`` is the shank's LONGITUDINAL axis (along the tibia).
+        The shank's ML axis is determined by elimination (the axis that is
+        neither longitudinal nor vertical).
         """
         if q_shank_ref is not None and q_foot_ref is not None:
-            return signed_ankle_angle(q_shank, q_foot, q_shank_ref, q_foot_ref, foot_axis)
+            # Determine the shank's ML axis by elimination
+            shank_vert = detect_most_vertical_axis(q_shank_ref)
+            all_axes = {'X', 'Y', 'Z'}
+            remaining = all_axes - {shank_vert, shank_axis}
+            # shank_axis here is shank_long (the vertical axis for shank)
+            # Actually for the shank, the "longitudinal" axis is the VERTICAL one
+            # and the ML axis is the remaining one
+            shank_ml = remaining.pop() if len(remaining) == 1 else 'Y'
+            
+            return signed_ankle_angle(
+                q_shank, q_foot, q_shank_ref, q_foot_ref,
+                foot_axis=foot_axis,
+                shank_long_axis=shank_axis,
+                foot_fwd_axis=foot_axis,
+                shank_ml_axis=shank_ml,
+            )
         return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis) - offset
 
     def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:

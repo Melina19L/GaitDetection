@@ -1000,18 +1000,18 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_fwd_l, ft_ml_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
-                # Store reference quaternions for signed_ankle_angle
+                # Store reference quaternions for sagittal-plane projection
                 self.left_ankle_qshank_ref = q_sh_l
                 self.left_ankle_qfoot_ref  = q_ft_l
-                # Store the MEDIO-LATERAL axis for twist decomposition in
-                # signed_ankle_angle — extracts pure dorsi/plantarflexion,
-                # filtered from knee flexion contamination.
-                self.left_ankle_shank_axis = sh_ax_l     # shank vertical axis
-                self.left_ankle_foot_axis  = ft_ml_l     # foot ML axis for twist decomposition
+                # Store the axes for the sagittal-plane algorithm:
+                #  shank_axis = longitudinal (vertical) axis of the shank
+                #  foot_axis  = FORWARD axis of the foot (toward toes)
+                self.left_ankle_shank_axis = sh_ax_l     # shank longitudinal axis
+                self.left_ankle_foot_axis  = ft_fwd_l    # foot FORWARD axis
                 print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}°  shank_axis={sh_ax_l}  foot_fwd={ft_fwd_l}  foot_ml={ft_ml_l}")
                 self.message_signal.emit(
                     f"Left ankle calibrated.  offset={ankle_off:+.1f}°  "
-                    f"axes: shank={sh_ax_l}, foot_fwd={ft_fwd_l}, foot_ml(twist)={ft_ml_l}"
+                    f"axes: shank_long={sh_ax_l}, foot_fwd={ft_fwd_l}, foot_ml={ft_ml_l}"
                 )
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
@@ -1046,16 +1046,18 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_fwd_r, ft_ml_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
-                # Store reference quaternions for signed_ankle_angle
+                # Store reference quaternions for sagittal-plane projection
                 self.right_ankle_qshank_ref = q_sh_r
                 self.right_ankle_qfoot_ref  = q_ft_r
-                # Store the MEDIO-LATERAL axis for twist decomposition
-                self.right_ankle_shank_axis = sh_ax_r    # shank vertical axis
-                self.right_ankle_foot_axis  = ft_ml_r    # foot ML axis for twist decomposition
-                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°  shank_axis={sh_ax_r}  foot_fwd={ft_fwd_r}  foot_ml(twist)={ft_ml_r}")
+                # Store the axes for the sagittal-plane algorithm:
+                #  shank_axis = longitudinal (vertical) axis of the shank
+                #  foot_axis  = FORWARD axis of the foot (toward toes)
+                self.right_ankle_shank_axis = sh_ax_r    # shank longitudinal axis
+                self.right_ankle_foot_axis  = ft_fwd_r   # foot FORWARD axis
+                print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°  shank_axis={sh_ax_r}  foot_fwd={ft_fwd_r}  foot_ml={ft_ml_r}")
                 self.message_signal.emit(
                     f"Right ankle calibrated.  offset={ankle_off:+.1f}°  "
-                    f"axes: shank={sh_ax_r}, foot_fwd={ft_fwd_r}, foot_ml(twist)={ft_ml_r}"
+                    f"axes: shank_long={sh_ax_r}, foot_fwd={ft_fwd_r}, foot_ml={ft_ml_r}"
                 )
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
