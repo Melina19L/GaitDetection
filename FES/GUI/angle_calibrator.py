@@ -282,8 +282,24 @@ class AngleCalibrator(QObject):
         )
         QCoreApplication.processEvents()  # let the UI show the message immediately
 
+        # Stop the record_data timer so __get_averaged_quaternion has
+        # exclusive access to the LSL inlets during calibration.
+        # Without this, record_data's pull_chunk and calibration's
+        # pull_sample would race for the same packets.
+        self.timer.stop()
+
+        # Flush stale samples so calibration averages only fresh data
+        for _name, inlet, _key in self._connected_inlets():
+            try:
+                inlet.flush()
+            except Exception:
+                pass
+
         # Run the functional calibration (reads current pose as offset)
         self.__functional_calibration()
+
+        # Restart the record_data timer
+        self.timer.start()
 
         # IMPORTANT: Clear data buffers here!
         # The background timer started logging data the moment the IMUs were toggled ON,
@@ -440,7 +456,7 @@ class AngleCalibrator(QObject):
             if not self.left_checkbox.isChecked():
                 self.timer.stop()
 
-    def _match_snapshots(self, snap_prox: list, snap_dist: list, tolerance: float = 0.04) -> tuple:
+    def _match_snapshots(self, snap_prox: list, snap_dist: list, tolerance: float = 0.05) -> tuple:
         """Match two lists of (timestamp, sample) tuples by timestamp.
         Returns:
             matched_prox (list): matched proximal samples
