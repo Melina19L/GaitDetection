@@ -1311,6 +1311,11 @@ class AngleCalibrator(QObject):
                         foot_axis=distal_axis, shank_axis=proximal_axis,
                         q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
                     )
+                    # Clamp to physiological range to filter magnetometer spikes.
+                    # Normal ankle: -10° (plantarflexion) to +20° (dorsiflexion).
+                    # We use a wider window to avoid cutting real dynamic peaks.
+                    ANKLE_MIN, ANKLE_MAX = -30.0, 40.0
+                    angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))
@@ -1339,8 +1344,8 @@ class AngleCalibrator(QObject):
         WINDOW = 2.0   # diagnostic timer interval (seconds)
         MIN_HZ_GOOD    = 60
         MIN_HZ_WARN    = 30
-        MAX_GAP_GOOD   = 0.002   # 2 ms
-        MAX_GAP_WARN   = 0.010   # 10 ms
+        MAX_GAP_GOOD   = 0.020   # 20 ms — BLE at 60 Hz has natural ~16 ms jitter
+        MAX_GAP_WARN   = 0.050   # 50 ms
         DROPOUT_THRESH = 0.500   # 500 ms
 
         now = time.time()
