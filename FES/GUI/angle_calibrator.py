@@ -500,12 +500,10 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.left_angle_timestamps = np.append(self.left_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle LEFT — uses signed_ankle_angle (relative-quaternion
-                # approach) when reference quaternions are available from
-                # calibration.  The medio-lateral foot axis (auto-detected at
-                # calibration) is used as the twist decomposition axis so the
-                # output is pure dorsiflexion/plantarflexion, free from heading
-                # contamination (implicit heading reset via q_ref subtraction).
+                # Ankle LEFT — uses the legacy unsigned algorithm with auto-
+                # detected longitudinal axes (shank-vertical + foot-forward).
+                # The calibration offset was computed with the SAME axes, so
+                # offset subtraction centres the output on 0° at neutral.
                 if self.left_shank_inlet and self.left_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         l_shank_s, [], l_foot_s, [],
@@ -513,8 +511,6 @@ class AngleCalibrator(QObject):
                         is_ankle=True,
                         proximal_axis=self.left_ankle_shank_axis,
                         distal_axis=self.left_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
-                        q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
                     )
                     self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -557,7 +553,7 @@ class AngleCalibrator(QObject):
                     if len(angles):
                         self.right_angle_timestamps = np.append(self.right_angle_timestamps, np.full(len(angles), now))
 
-                # Ankle RIGHT — signed_ankle_angle with auto-detected axes
+                # Ankle RIGHT — legacy unsigned algorithm with correct axes
                 if self.right_shank_inlet and self.right_foot_inlet:
                     ankle_angles = self.__compute_angles_from_data(
                         r_shank_s, [], r_foot_s, [],
@@ -565,8 +561,6 @@ class AngleCalibrator(QObject):
                         is_ankle=True,
                         proximal_axis=self.right_ankle_shank_axis,
                         distal_axis=self.right_ankle_foot_axis,
-                        q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
-                        q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
                     )
                     self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                     if len(ankle_angles):
@@ -912,16 +906,18 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_fwd_l, ft_ml_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
-                # Store reference quaternions for the signed_ankle_angle algorithm
+                # Store reference quaternions (kept for diagnostics / future use)
                 self.left_ankle_qshank_ref = q_sh_l
                 self.left_ankle_qfoot_ref  = q_ft_l
-                # Store auto-detected axes for runtime computation
-                self.left_ankle_shank_axis = sh_ax_l
-                self.left_ankle_foot_axis  = ft_ml_l  # medio-lateral axis for twist decomposition
+                # Store auto-detected LONGITUDINAL axes for the legacy unsigned
+                # algorithm (shank-vertical + foot-forward → same axes used for
+                # both calibration offset and runtime angle computation).
+                self.left_ankle_shank_axis = sh_ax_l     # shank vertical axis
+                self.left_ankle_foot_axis  = ft_fwd_l    # foot FORWARD axis (toward toes)
                 print(f"[CalibAnkle LEFT] offset={ankle_off:.2f}°  shank_axis={sh_ax_l}  foot_fwd={ft_fwd_l}  foot_ml={ft_ml_l}")
                 self.message_signal.emit(
                     f"Left ankle calibrated.  offset={ankle_off:+.1f}°  "
-                    f"axes: shank={sh_ax_l}, foot_fwd={ft_fwd_l}, foot_ml(twist)={ft_ml_l}"
+                    f"axes: shank={sh_ax_l}, foot_fwd={ft_fwd_l}, foot_ml={ft_ml_l}"
                 )
                 diag_sections.append(("LEFT LEG", q_sh_l, q_ft_l))
             elif self.left_foot_inlet:
@@ -956,16 +952,16 @@ class AngleCalibrator(QObject):
             ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_fwd_r, ft_ml_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
-                # Store reference quaternions for the signed_ankle_angle algorithm
+                # Store reference quaternions (kept for diagnostics / future use)
                 self.right_ankle_qshank_ref = q_sh_r
                 self.right_ankle_qfoot_ref  = q_ft_r
-                # Store auto-detected axes for runtime computation
-                self.right_ankle_shank_axis = sh_ax_r
-                self.right_ankle_foot_axis  = ft_ml_r  # medio-lateral axis for twist decomposition
+                # Store auto-detected LONGITUDINAL axes (same as calibration)
+                self.right_ankle_shank_axis = sh_ax_r    # shank vertical axis
+                self.right_ankle_foot_axis  = ft_fwd_r   # foot FORWARD axis (toward toes)
                 print(f"[CalibAnkle RIGHT] offset={ankle_off:.2f}°  shank_axis={sh_ax_r}  foot_fwd={ft_fwd_r}  foot_ml={ft_ml_r}")
                 self.message_signal.emit(
                     f"Right ankle calibrated.  offset={ankle_off:+.1f}°  "
-                    f"axes: shank={sh_ax_r}, foot_fwd={ft_fwd_r}, foot_ml(twist)={ft_ml_r}"
+                    f"axes: shank={sh_ax_r}, foot_fwd={ft_fwd_r}, foot_ml={ft_ml_r}"
                 )
                 diag_sections.append(("RIGHT LEG", q_sh_r, q_ft_r))
             elif self.right_foot_inlet:
@@ -1221,10 +1217,11 @@ class AngleCalibrator(QObject):
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
                 if is_ankle:
-                    # Use the per-side axes detected at calibration. When the
-                    # reference quaternions are also available (always, after
-                    # Calibrate Offsets), the new signed relative-quaternion
-                    # algorithm runs — decoupled from knee flexion contamination.
+                    # Use the per-side longitudinal axes detected at calibration.
+                    # Projects shank-vertical and foot-forward axes into the
+                    # world frame, computes the unsigned angle between them, and
+                    # subtracts the calibration offset (consistent axes throughout).
+                    # Falls through to signed_ankle_angle only if q_refs are provided.
                     angle = ROM.calculate_ankle_angle(
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
