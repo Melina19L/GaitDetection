@@ -318,60 +318,65 @@ def detect_most_vertical_axis(q: np.ndarray) -> str:
 
 def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> str:
     """Return the local axis name ('X' | 'Y' | 'Z') of the foot sensor that
-    points along the foot (toward the toes) — i.e. the "forward" axis.
+    points "forward" (toward the toes).
 
-    Detection strategy
-    ------------------
-    The Xsens DOT sensors have a **fixed** relationship between their physical
-    axes and the quaternion output:
-
-    * **Leg/shank mounting** (X along the segment → gravity axis = X):
-      the forward axis is the most horizontal of the remaining axes (Y or Z).
-
-    * **Foot mounting** (Z pointing down → gravity axis = Z):
-      the forward axis is **always X** (toward the toes), and Y is
-      medio-lateral.  This is the Xsens DOT convention confirmed by the
-      Movella native GUI.
-
-    The old "most-horizontal" heuristic fails for the foot because even a
-    small foot tilt gives the ML axis (Y) a *higher* horizontal score than X,
-    causing it to be mis-identified as forward.  Using the deterministic rule
-    avoids this problem entirely.
-
-    Parameters
-    ----------
-    q : quaternion [w,x,y,z] of the foot (or distal) sensor.
-    q_shank : ignored (kept for API compatibility).
+    This dynamically finds the axis that is most parallel to the shank's
+    forward direction (the sagittal plane). This is completely robust to how
+    the sensor is mounted on the foot (whether Y is forward or X is forward).
     """
-    gravity_axis = detect_most_vertical_axis(q)
-
-    if gravity_axis == 'Z':
-        # Foot mounting: Z = gravity → X = forward (Xsens DOT convention)
-        return 'X'
-    elif gravity_axis == 'X':
-        # Leg mounting: X = gravity → pick the most horizontal of Y, Z
-        best_name = 'Y'
-        best_horiz = -1.0
-        for name in ('Y', 'Z'):
-            gv = rotate_vector_by_quaternion(AXIS_VECTORS[name], q)
-            gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
-            horiz = 1.0 - abs(float(gv_norm[2]))
-            if horiz > best_horiz:
-                best_horiz = horiz
-                best_name = name
-        return best_name
-    else:
-        # gravity_axis == 'Y' (unusual mounting) → pick most horizontal of X, Z
+    if q_shank is None:
+        # Fallback if no shank reference: pick highest horizontal score
         best_name = 'X'
         best_horiz = -1.0
-        for name in ('X', 'Z'):
-            gv = rotate_vector_by_quaternion(AXIS_VECTORS[name], q)
-            gv_norm = gv / (np.linalg.norm(gv) + 1e-9)
-            horiz = 1.0 - abs(float(gv_norm[2]))
+        for name, v in AXIS_VECTORS.items():
+            gv = rotate_vector_by_quaternion(v, q)
+            horiz = 1.0 - abs(float(gv[2]))
             if horiz > best_horiz:
                 best_horiz = horiz
                 best_name = name
         return best_name
+
+    # Find shank's vertical axis to determine its forward plane
+    shank_grav = detect_most_vertical_axis(q_shank)
+    
+    # The shank's forward direction is its most horizontal axis
+    shank_fwd = 'Y'
+    best_shank_horiz = -1.0
+    for name, v in AXIS_VECTORS.items():
+        if name == shank_grav:
+            continue
+        gv = rotate_vector_by_quaternion(v, q_shank)
+        horiz = 1.0 - abs(float(gv[2]))
+        if horiz > best_shank_horiz:
+            best_shank_horiz = horiz
+            shank_fwd = name
+            
+    shank_fwd_vec = rotate_vector_by_quaternion(AXIS_VECTORS[shank_fwd], q_shank)
+    # Project shank forward vector perfectly onto horizontal plane
+    shank_fwd_horiz = np.array([shank_fwd_vec[0], shank_fwd_vec[1], 0.0])
+    n = np.linalg.norm(shank_fwd_horiz)
+    if n > 1e-6:
+        shank_fwd_horiz = shank_fwd_horiz / n
+
+    # The foot forward axis is the one most aligned with the shank's horizontal forward
+    foot_grav = detect_most_vertical_axis(q)
+    best_foot_fwd = 'X'
+    best_align = -1.0
+    for name, v in AXIS_VECTORS.items():
+        if name == foot_grav:
+            continue
+        gv = rotate_vector_by_quaternion(v, q)
+        gv_horiz = np.array([gv[0], gv[1], 0.0])
+        gn = np.linalg.norm(gv_horiz)
+        if gn > 1e-6:
+            gv_horiz = gv_horiz / gn
+            
+        align = abs(float(np.dot(gv_horiz, shank_fwd_horiz)))
+        if align > best_align:
+            best_align = align
+            best_foot_fwd = name
+            
+    return best_foot_fwd
 
 
 def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = None) -> str:
