@@ -203,7 +203,10 @@ class AngleCalibrator(QObject):
     def _finalise_functional_calibration(self):
         """Run PCA on the buffered gyro and store per-sensor alignment quaternions."""
         self._funcal_active = False
-        results = []
+        identity_q = np.array([1.0, 0.0, 0.0, 0.0])
+        good = []   # sensors with a meaningful alignment captured
+        rejected = []   # sensors whose PCA failed validation
+        skipped = []   # sensors with too few samples (probably not connected)
         for key, attr in (
             ("left_shank",  "left_shank_align_quat"),
             ("left_foot",   "left_foot_align_quat"),
@@ -213,22 +216,43 @@ class AngleCalibrator(QObject):
             buf = self._funcal_gyro_buffer.get(key) or []
             if len(buf) < 50:
                 setattr(self, attr, None)
+                if buf:
+                    skipped.append(f"{key} (n={len(buf)})")
+                self._funcal_gyro_buffer[key] = []
                 continue
             arr = np.asarray(buf, dtype=float)
             q_align = compute_axis_alignment_quaternion(arr, target_axis='Y')
-            setattr(self, attr, q_align)
-            results.append(f"{key}: n={len(arr)}, q=[{q_align[0]:+.3f},{q_align[1]:+.3f},{q_align[2]:+.3f},{q_align[3]:+.3f}]")
-            # release memory
+            # Identity quaternion (within tolerance) means PCA refused to
+            # produce an alignment because motion was insufficient or noisy.
+            is_identity = (abs(q_align[0] - 1.0) < 1e-3 and
+                           abs(q_align[1]) + abs(q_align[2]) + abs(q_align[3]) < 1e-3)
+            if is_identity:
+                setattr(self, attr, None)  # explicit None → no alignment applied at runtime
+                rejected.append(f"{key} (n={len(arr)})")
+            else:
+                setattr(self, attr, q_align)
+                good.append(f"{key}: q=[{q_align[0]:+.2f},{q_align[1]:+.2f},{q_align[2]:+.2f},{q_align[3]:+.2f}]")
             self._funcal_gyro_buffer[key] = []
-        if results:
-            self.message_signal.emit(
-                "<b>Functional Calibration complete.</b> Alignment quaternions: " +
-                "; ".join(results)
+
+        # User-visible report — distinguishes the three outcomes clearly so the
+        # operator knows whether to retry (rejected) or accept (good).
+        lines = []
+        if good:
+            lines.append("<b style='color:#27ae60;'>✓ Aligned:</b> " + "; ".join(good))
+        if rejected:
+            lines.append(
+                "<b style='color:#e67e22;'>⚠ REJECTED (insufficient motion):</b> "
+                + ", ".join(rejected) +
+                "<br><i>Press Functional Calibration again and walk for the full 5 seconds.</i>"
             )
+        if skipped:
+            lines.append("<span style='color:#888;'>Skipped (not connected): " + ", ".join(skipped) + "</span>")
+        if lines:
+            self.message_signal.emit("<b>Functional Calibration complete.</b><br>" + "<br>".join(lines))
         else:
             self.error_signal.emit(
-                "Functional Calibration: not enough gyro samples buffered. "
-                "Move more during the calibration window."
+                "Functional Calibration: no gyro samples buffered. "
+                "Are sensors connected and streaming?"
             )
 
     def _connected_inlets(self) -> list:

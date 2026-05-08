@@ -262,6 +262,31 @@ def compute_axis_alignment_quaternion(
     # Covariance matrix and eigendecomposition
     cov = np.cov(g.T)
     eigvals, eigvecs = np.linalg.eigh(cov)
+
+    # ── Validity checks ────────────────────────────────────────────────
+    # If the operator stood still during the calibration window, the gyro
+    # samples are dominated by noise: the largest eigenvalue is tiny and
+    # the principal direction is random. Detect this and refuse to set an
+    # alignment (return identity → behaves like no Functional Calibration).
+    largest = float(eigvals[-1])
+    second  = float(eigvals[-2]) if len(eigvals) >= 2 else 0.0
+    # 1. Absolute variance threshold (rad²/s²): walking knee gyro has
+    #    >0.5 rad²/s² variance along the principal axis; standing still
+    #    gives <0.01.
+    if largest < 0.05:
+        print(f"[PCA align] INSUFFICIENT MOTION (largest eigenvalue {largest:.4f} < 0.05). "
+              "Operator did not move enough during functional calibration. Returning identity.")
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    # 2. Ratio of largest to second-largest: if close to 1, the rotation
+    #    is poorly defined (multi-axis motion or pure noise) and the
+    #    principal direction is unreliable.
+    ratio = largest / (second + 1e-9)
+    if ratio < 2.0:
+        print(f"[PCA align] AMBIGUOUS AXIS (eigenvalue ratio {ratio:.2f} < 2.0). "
+              "Motion was multi-axis or noisy. Returning identity.")
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    print(f"[PCA align] OK — largest eigenvalue {largest:.3f}, ratio {ratio:.2f}")
+
     # Largest eigenvalue → principal component
     principal = eigvecs[:, -1]
     principal = principal / (np.linalg.norm(principal) + 1e-9)
