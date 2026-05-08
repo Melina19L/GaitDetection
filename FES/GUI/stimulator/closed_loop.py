@@ -241,83 +241,54 @@ def signed_ankle_angle(
     q_foot: np.ndarray,
     q_shank_ref: np.ndarray,
     q_foot_ref: np.ndarray,
-    foot_axis: str = 'Y',
-    shank_long_axis: str = 'X',
-    foot_fwd_axis: str = 'X',
     shank_ml_axis: str = 'Y',
+    **_unused_kwargs,
 ) -> float:
     """Return signed ankle dorsi-/plantar-flexion in degrees.
 
-    Uses a **gravity-constrained sagittal-plane projection** that is
-    geometrically decoupled from knee flexion:
+    Standard approach (ReBAIT, Hoegberg 2025; ISB Wu 2002):
+      1. ``q_rel = q_shank⁻¹ · q_foot`` — orientation of foot expressed in
+         the shank's local frame. By construction independent of how the
+         knee or hip moves: pure ankle relative orientation.
+      2. ``q_delta = q_rel_now · q_rel_ref⁻¹`` — change in relative
+         orientation since the calibration pose, so neutral standing → 0°.
+      3. Decompose ``q_delta`` into Euler angles. The component around the
+         shank's medio-lateral axis ``shank_ml_axis`` is sagittal-plane
+         dorsi/plantarflexion. The other two components (frontal +
+         transverse) are ignored.
 
-      1. Compute the shank's medio-lateral (ML) axis in the global frame.
-      2. Project it onto the horizontal plane (zero-out vertical component).
-         Knee flexion rotates the shank *around* the ML axis, so the ML axis
-         itself does NOT change direction — this is the key insight.
-      3. Define the sagittal plane as perpendicular to this horizontal ML.
-      4. Project the shank's longitudinal axis and the foot's forward axis
-         onto this sagittal plane.
-      5. The angle between these two projections IS the ankle flex/extension.
-
-    The calibration-pose quaternions are used only to compute a static
-    offset so that neutral standing reads 0°.
-
-    Why the old twist-decomposition failed:
-      Both knee flexion and ankle dorsiflexion are rotations around the
-      same medio-lateral axis.  The relative quaternion q_delta picks up
-      both indistinguishably.  The sagittal projection avoids this because
-      it measures the *geometric angle between two body segments*, not the
-      relative rotation.
+    ``shank_ml_axis`` defaults to ``'Y'`` for the user's mounting (Movella
+    DOT button-up vertical along tibia: shank-X = longitudinal, shank-Y =
+    medio-lateral, shank-Z = anterior-posterior, per the on-screen Sensor
+    Axis Diagnostic). Uses scipy ``Rotation.as_euler`` for robust handling
+    of quaternion double-cover and gimbal-lock edge cases.
     """
     qs     = normalize(np.asarray(q_shank,     dtype=float))
     qf     = normalize(np.asarray(q_foot,      dtype=float))
     qs_ref = normalize(np.asarray(q_shank_ref, dtype=float))
     qf_ref = normalize(np.asarray(q_foot_ref,  dtype=float))
 
-    def _sagittal_angle(qs_cur, qf_cur):
-        # Shank ML axis in global frame — stays horizontal during knee flexion
-        shank_ml = rotate_vector_by_quaternion(
-            AXIS_VECTORS.get(shank_ml_axis, AXIS_VECTORS['Y']), qs_cur,
-        )
-        # Keep only the horizontal component (remove gravity contamination)
-        shank_ml[2] = 0.0
-        n = float(np.linalg.norm(shank_ml))
-        if n < 1e-6:
-            return 0.0
-        ml_dir = shank_ml / n
+    # Foot expressed in shank frame, now and at calibration
+    q_rel_now = quat_mul(quat_conjugate(qs),     qf)
+    q_rel_ref = quat_mul(quat_conjugate(qs_ref), qf_ref)
 
-        # Shank longitudinal axis (along the tibia) and foot forward axis
-        shank_long = rotate_vector_by_quaternion(
-            AXIS_VECTORS.get(shank_long_axis, AXIS_VECTORS['X']), qs_cur,
-        )
-        foot_fwd = rotate_vector_by_quaternion(
-            AXIS_VECTORS.get(foot_fwd_axis, AXIS_VECTORS['X']), qf_cur,
-        )
+    # Change since calibration (in shank frame)
+    q_delta = quat_mul(q_rel_now, quat_conjugate(q_rel_ref))
+    q_delta = normalize(q_delta)
+    # Canonicalise: q and -q are the same rotation; force w ≥ 0 so the
+    # extracted Euler angle stays continuous instead of wrapping.
+    if q_delta[0] < 0:
+        q_delta = -q_delta
 
-        # Project both onto the sagittal plane (⊥ to ml_dir)
-        shank_proj = shank_long - np.dot(shank_long, ml_dir) * ml_dir
-        foot_proj  = foot_fwd  - np.dot(foot_fwd,  ml_dir) * ml_dir
+    # scipy uses [x, y, z, w]; ours is [w, x, y, z]
+    r = R.from_quat([q_delta[1], q_delta[2], q_delta[3], q_delta[0]])
 
-        ns = float(np.linalg.norm(shank_proj))
-        nf = float(np.linalg.norm(foot_proj))
-        if ns < 1e-6 or nf < 1e-6:
-            return 0.0
-        shank_proj /= ns
-        foot_proj  /= nf
-
-        dot   = float(np.clip(np.dot(shank_proj, foot_proj), -1.0, 1.0))
-        angle = float(np.degrees(np.arccos(dot)))
-
-        # Sign convention: positive = dorsiflexion
-        cross = np.cross(foot_proj, shank_proj)
-        if float(np.dot(cross, ml_dir)) < 0:
-            angle = -angle
-        return angle
-
-    # Calibration offset (angle at neutral standing pose)
-    offset = _sagittal_angle(qs_ref, qf_ref)
-    return _sagittal_angle(qs, qf) - offset
+    # Pick the Euler order so the FIRST component is rotation around the
+    # shank's medio-lateral axis = sagittal-plane dorsi/plantarflexion.
+    order_map = {'X': 'XYZ', 'Y': 'YXZ', 'Z': 'ZXY'}
+    order = order_map.get(shank_ml_axis, 'YXZ')
+    flex, _abd, _rot = r.as_euler(order, degrees=True)
+    return float(flex)
 
 
 # ── Sensor-axis detection ────────────────────────────────────────────────────
