@@ -6737,9 +6737,41 @@ class SetupMainWindow:
         self.imu_btn.clicked.connect(open_imu_gui)
         self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
         self.start_graph_btn.clicked.connect(open_plot_dialog)
-        self.functional_calib_btn.clicked.connect(
-            lambda: self.angle_calibrator.start_functional_calibration(5.0)
-        )
+
+        # Functional Calibration: visual countdown on the button itself, plus
+        # disable it during the calibration window, so the operator clearly
+        # sees when it starts and ends without watching the log box.
+        self._funcal_countdown_timer = QTimer(self)
+        self._funcal_countdown_timer.setInterval(250)
+        self._funcal_remaining_ms = 0
+        self._funcal_button_default_text = "Functional Calibration"
+
+        def _funcal_tick():
+            self._funcal_remaining_ms -= 250
+            if self._funcal_remaining_ms <= 0:
+                self._funcal_countdown_timer.stop()
+                self.functional_calib_btn.setText("✓ Done")
+                # Restore label after 2 s so the operator sees the completion confirm
+                QTimer.singleShot(2000, lambda: (
+                    self.functional_calib_btn.setText(self._funcal_button_default_text),
+                    self.functional_calib_btn.setEnabled(True),
+                ))
+            else:
+                self.functional_calib_btn.setText(
+                    f"Walking… {self._funcal_remaining_ms / 1000:.1f}s"
+                )
+
+        self._funcal_countdown_timer.timeout.connect(_funcal_tick)
+
+        def _start_funcal():
+            duration_s = 5.0
+            self.angle_calibrator.start_functional_calibration(duration_s)
+            self.functional_calib_btn.setEnabled(False)
+            self._funcal_remaining_ms = int(duration_s * 1000)
+            self.functional_calib_btn.setText(f"Walking… {duration_s:.1f}s")
+            self._funcal_countdown_timer.start()
+
+        self.functional_calib_btn.clicked.connect(_start_funcal)
         self.left_leg_toggle.checkStateChanged.connect(left_leg_state_changed)
         self.right_leg_toggle.checkStateChanged.connect(right_leg_state_changed)
         self.left_knee_toggle.checkStateChanged.connect(left_knee_state_changed)
