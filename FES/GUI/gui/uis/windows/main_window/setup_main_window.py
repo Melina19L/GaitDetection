@@ -6159,6 +6159,21 @@ class SetupMainWindow:
         self.start_graph_btn.setMinimumHeight(LINE_HEIGHT)
         self.start_graph_btn.setToolTip("Open the real-time angle plot window.")
 
+        # Functional Calibration button — runs PCA on gyro during ~5 s of dynamic
+        # motion to align each sensor's local Y onto the anatomical medio-lateral
+        # axis. Eliminates the residual ankle ↔ knee cross-talk caused by sensor
+        # mounting misalignment (~10° → ~1-3°). Press AFTER Calibrate Offsets,
+        # then walk normally for 5 s.
+        self.functional_calib_btn = SetupMainWindow.create_std_push_btn(
+            self.themes, text="Functional Calibration",
+        )
+        self.functional_calib_btn.setMinimumHeight(LINE_HEIGHT)
+        self.functional_calib_btn.setToolTip(
+            "Press, then walk normally for 5 s. PCA on gyro identifies the "
+            "anatomical knee/ankle axes and aligns the sensor frames "
+            "(reduces ankle ↔ knee cross-talk)."
+        )
+
         self.finish_btn_7 = SetupMainWindow.create_std_push_btn(self.themes, text="Finish")
 
         # ── TOGGLES (all 6 independent) ──
@@ -6722,6 +6737,9 @@ class SetupMainWindow:
         self.imu_btn.clicked.connect(open_imu_gui)
         self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
         self.start_graph_btn.clicked.connect(open_plot_dialog)
+        self.functional_calib_btn.clicked.connect(
+            lambda: self.angle_calibrator.start_functional_calibration(5.0)
+        )
         self.left_leg_toggle.checkStateChanged.connect(left_leg_state_changed)
         self.right_leg_toggle.checkStateChanged.connect(right_leg_state_changed)
         self.left_knee_toggle.checkStateChanged.connect(left_knee_state_changed)
@@ -6883,6 +6901,7 @@ class SetupMainWindow:
         bbar.addStretch(1)
         bbar.addWidget(self.imu_btn)
         bbar.addWidget(self.calibrate_offset_btn)
+        bbar.addWidget(self.functional_calib_btn)
         bbar.addWidget(self.start_graph_btn)
         bbar.addStretch(1)
 

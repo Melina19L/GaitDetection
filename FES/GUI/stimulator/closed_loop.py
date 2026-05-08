@@ -236,12 +236,64 @@ def twist_angle_around_axis(q: np.ndarray, axis: np.ndarray) -> float:
     return angle
 
 
+def compute_axis_alignment_quaternion(
+    gyro_samples: np.ndarray,
+    target_axis: str = 'Y',
+) -> np.ndarray:
+    """Return a quaternion [w,x,y,z] that rotates the dominant gyro rotation axis
+    onto ``target_axis`` (default 'Y' = anatomical medio-lateral).
+
+    Implementation per Hoegberg 2025 (ReBAIT § 2.1.2) / Picerno 2008:
+      1. PCA on the per-sample gyro vectors (Nx3) → first principal component
+         is the axis of maximum angular-velocity variance, i.e. the joint's
+         true rotation axis in the sensor's local frame.
+      2. Build the quaternion that rotates this axis onto the target axis.
+
+    Used at functional calibration: the user walks/squats for a few seconds
+    while ``gyro_samples`` are buffered; this function returns the alignment
+    quaternion that brings the IMU local frame into anatomical alignment.
+    Apply it on every runtime quaternion via ``q_aligned = q_imu * q_align``.
+    """
+    g = np.asarray(gyro_samples, dtype=float)
+    if g.ndim != 2 or g.shape[0] < 50 or g.shape[1] != 3:
+        return np.array([1.0, 0.0, 0.0, 0.0])  # identity → no alignment
+    # Centre the samples (PCA assumption)
+    g = g - g.mean(axis=0, keepdims=True)
+    # Covariance matrix and eigendecomposition
+    cov = np.cov(g.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # Largest eigenvalue → principal component
+    principal = eigvecs[:, -1]
+    principal = principal / (np.linalg.norm(principal) + 1e-9)
+
+    target = AXIS_VECTORS.get(target_axis, AXIS_VECTORS['Y'])
+    # PCA eigenvectors are unique up to sign; flip so the principal axis
+    # points in the same hemisphere as the target (shortest-arc rotation).
+    if float(np.dot(principal, target)) < 0:
+        principal = -principal
+    # Quaternion rotating principal → target via shortest arc
+    cross = np.cross(principal, target)
+    dot   = float(np.dot(principal, target))
+    if dot < -0.999:
+        # 180° flip: pick any perpendicular axis
+        ortho = np.array([1.0, 0.0, 0.0]) if abs(principal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        axis  = np.cross(principal, ortho)
+        axis  = axis / (np.linalg.norm(axis) + 1e-9)
+        return np.array([0.0, axis[0], axis[1], axis[2]])
+    s = float(np.sqrt((1.0 + dot) * 2.0))
+    if s < 1e-9:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    return normalize(np.array([s * 0.5, cross[0] / s, cross[1] / s, cross[2] / s]))
+
+
 def signed_ankle_angle(
     q_shank: np.ndarray,
     q_foot: np.ndarray,
     q_shank_ref: np.ndarray,
     q_foot_ref: np.ndarray,
     shank_ml_axis: str = 'Y',
+    q_shank_align: np.ndarray = None,
+    q_foot_align:  np.ndarray = None,
     **_unused_kwargs,
 ) -> float:
     """Return signed ankle dorsi-/plantar-flexion in degrees.
@@ -267,6 +319,20 @@ def signed_ankle_angle(
     qf     = normalize(np.asarray(q_foot,      dtype=float))
     qs_ref = normalize(np.asarray(q_shank_ref, dtype=float))
     qf_ref = normalize(np.asarray(q_foot_ref,  dtype=float))
+
+    # Apply per-segment anatomical-alignment quaternions (from Functional
+    # Calibration). This rotates each sensor's local frame so that local-Y
+    # actually corresponds to the anatomical medio-lateral axis. Without this
+    # step the Euler decomposition picks up bleed from knee flexion (~10°
+    # cross-talk per 50° knee flex) because sensor-Y ≠ anatomical-ML.
+    if q_shank_align is not None:
+        qs_align = normalize(np.asarray(q_shank_align, dtype=float))
+        qs     = quat_mul(qs,     qs_align)
+        qs_ref = quat_mul(qs_ref, qs_align)
+    if q_foot_align is not None:
+        qf_align = normalize(np.asarray(q_foot_align, dtype=float))
+        qf     = quat_mul(qf,     qf_align)
+        qf_ref = quat_mul(qf_ref, qf_align)
 
     # Foot expressed in shank frame, now and at calibration
     q_rel_now = quat_mul(quat_conjugate(qs),     qf)
@@ -510,6 +576,8 @@ class ROM:
         shank_axis: str = 'X',
         q_shank_ref: np.ndarray = None,
         q_foot_ref:  np.ndarray = None,
+        q_shank_align: np.ndarray = None,
+        q_foot_align:  np.ndarray = None,
     ) -> float:
         """Return the calibrated ankle angle in degrees.
 
@@ -539,6 +607,8 @@ class ROM:
                 shank_long_axis=shank_axis,
                 foot_fwd_axis=foot_axis,
                 shank_ml_axis=shank_ml,
+                q_shank_align=q_shank_align,
+                q_foot_align=q_foot_align,
             )
         return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis) - offset
 

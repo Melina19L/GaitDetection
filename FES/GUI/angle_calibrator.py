@@ -7,6 +7,7 @@ from stimulator.closed_loop import (
     ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
+    compute_axis_alignment_quaternion,
 )
 import time
 from typing import Optional
@@ -88,6 +89,25 @@ class AngleCalibrator(QObject):
         self.left_ankle_foot_axis   = 'X'
         self.right_ankle_shank_axis = 'X'
         self.right_ankle_foot_axis  = 'X'
+
+        # Sensor-to-segment alignment quaternions captured at Functional
+        # Calibration (PCA on gyro during ~5 s of dynamic motion). When set,
+        # they rotate the IMU local frame so that local-Y truly corresponds
+        # to the anatomical medio-lateral axis — eliminates the residual
+        # ankle ↔ knee cross-talk seen with static-only calibration.
+        # Default = None → signed_ankle_angle behaves as before.
+        self.left_shank_align_quat:  Optional[np.ndarray] = None
+        self.left_foot_align_quat:   Optional[np.ndarray] = None
+        self.right_shank_align_quat: Optional[np.ndarray] = None
+        self.right_foot_align_quat:  Optional[np.ndarray] = None
+
+        # Functional Calibration state — buffers gyro samples while active.
+        self._funcal_active: bool = False
+        self._funcal_gyro_buffer: dict[str, list] = {
+            "left_shank":  [], "left_foot":  [],
+            "right_shank": [], "right_foot": [],
+        }
+        self._funcal_timer: Optional[QTimer] = None
         
         # Raw data logging for debugging time-sync issues
         self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
@@ -141,6 +161,75 @@ class AngleCalibrator(QObject):
         left_hip = self.left_thigh_inlet is not None and self.pelvis_inlet is not None
         right_hip = self.right_thigh_inlet is not None and self.pelvis_inlet is not None
         return left_knee or right_knee or left_ankle or right_ankle or left_hip or right_hip
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Functional Calibration (PCA-based sensor-to-segment alignment)
+    # ──────────────────────────────────────────────────────────────────────
+    @Slot()
+    def start_functional_calibration(self, duration_s: float = 5.0):
+        """Begin a ~``duration_s``-second buffering period during which the operator
+        walks (or does a few squats). Per-sensor gyro vectors are accumulated;
+        when the timer fires, PCA on each sensor's gyro identifies the joint's
+        true rotation axis in the local frame, and an alignment quaternion is
+        stored that brings local-Y onto that axis (anatomical medio-lateral).
+
+        Reduces residual ankle ↔ knee cross-talk caused by sensor mounting
+        misalignment from ~10° (static-only calibration) to ~1-3°.
+
+        Reference: Hoegberg, Donahue, Major (2025) *Sensors* 25, 2931 § 2.1.2.
+        """
+        if not self.has_any_sensor():
+            self.error_signal.emit("Functional Calibration: no sensors connected.")
+            return
+        if self._funcal_active:
+            self.message_signal.emit("Functional Calibration already running.")
+            return
+        for k in self._funcal_gyro_buffer:
+            self._funcal_gyro_buffer[k] = []
+        self._funcal_active = True
+        self.message_signal.emit(
+            f"<b>Functional Calibration started.</b> Walk normally for "
+            f"{duration_s:.0f} seconds (or do 3-5 squats). Stand still until done."
+        )
+        if self._funcal_timer is None:
+            self._funcal_timer = QTimer(self)
+            self._funcal_timer.setSingleShot(True)
+            self._funcal_timer.timeout.connect(self._finalise_functional_calibration)
+        else:
+            self._funcal_timer.stop()
+        self._funcal_timer.start(int(duration_s * 1000))
+
+    @Slot()
+    def _finalise_functional_calibration(self):
+        """Run PCA on the buffered gyro and store per-sensor alignment quaternions."""
+        self._funcal_active = False
+        results = []
+        for key, attr in (
+            ("left_shank",  "left_shank_align_quat"),
+            ("left_foot",   "left_foot_align_quat"),
+            ("right_shank", "right_shank_align_quat"),
+            ("right_foot",  "right_foot_align_quat"),
+        ):
+            buf = self._funcal_gyro_buffer.get(key) or []
+            if len(buf) < 50:
+                setattr(self, attr, None)
+                continue
+            arr = np.asarray(buf, dtype=float)
+            q_align = compute_axis_alignment_quaternion(arr, target_axis='Y')
+            setattr(self, attr, q_align)
+            results.append(f"{key}: n={len(arr)}, q=[{q_align[0]:+.3f},{q_align[1]:+.3f},{q_align[2]:+.3f},{q_align[3]:+.3f}]")
+            # release memory
+            self._funcal_gyro_buffer[key] = []
+        if results:
+            self.message_signal.emit(
+                "<b>Functional Calibration complete.</b> Alignment quaternions: " +
+                "; ".join(results)
+            )
+        else:
+            self.error_signal.emit(
+                "Functional Calibration: not enough gyro samples buffered. "
+                "Move more during the calibration window."
+            )
 
     def _connected_inlets(self) -> list:
         """Return the list of ``(display_name, inlet, diag_key)`` for inlets the
@@ -527,6 +616,14 @@ class AngleCalibrator(QObject):
                     # Save raw samples with arrival timestamp for debugging
                     for ts, s in paired:
                         self._raw_log[key].append([ts] + list(s))
+                # Buffer gyro vectors for Functional Calibration (PCA later)
+                if self._funcal_active and key in self._funcal_gyro_buffer:
+                    # Movella DOT LSL sample layout: [accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]
+                    for s in samples:
+                        try:
+                            self._funcal_gyro_buffer[key].append([float(s[3]), float(s[4]), float(s[5])])
+                        except Exception:
+                            pass
 
         # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
         # Pelvis samples feed BOTH left and right hip computations, so they are
@@ -583,6 +680,8 @@ class AngleCalibrator(QObject):
                     distal_axis=self.left_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
+                    q_proximal_align=self.left_shank_align_quat,
+                    q_distal_align=self.left_foot_align_quat,
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
@@ -636,6 +735,8 @@ class AngleCalibrator(QObject):
                     distal_axis=self.right_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
+                    q_proximal_align=self.right_shank_align_quat,
+                    q_distal_align=self.right_foot_align_quat,
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
@@ -1274,6 +1375,8 @@ class AngleCalibrator(QObject):
         distal_axis:   str = 'X',
         q_proximal_ref: np.ndarray = None,
         q_distal_ref:   np.ndarray = None,
+        q_proximal_align: np.ndarray = None,
+        q_distal_align:   np.ndarray = None,
     ) -> np.ndarray:
         """Compute joint angles from pre-matched sample lists.
         
@@ -1310,6 +1413,7 @@ class AngleCalibrator(QObject):
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
                         q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
+                        q_shank_align=q_proximal_align, q_foot_align=q_distal_align,
                     )
                     # Clamp to physiological range to filter magnetometer spikes.
                     # Normal ankle: -10° (plantarflexion) to +20° (dorsiflexion).
