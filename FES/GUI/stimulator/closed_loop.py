@@ -68,12 +68,21 @@ def quaternion_average(qs: np.ndarray) -> np.ndarray:
     not allowed to cancel each other out in the average.
     """
     Q = np.asarray(qs, dtype=float).copy()
-    if Q.ndim != 2 or Q.shape[0] == 0:
+    if Q.ndim != 2 or Q.shape[0] == 0 or Q.shape[1] != 4:
         return np.array([1.0, 0.0, 0.0, 0.0])
-    flips = np.sign(Q @ Q[0])
-    flips[flips == 0] = 1.0
+    # Drop any zero-norm or NaN-bearing rows (BLE warm-up leaks junk packets
+    # before the sensor fusion has converged).
+    norms = np.linalg.norm(Q, axis=1)
+    keep = np.isfinite(norms) & (norms > 1e-6) & np.all(np.isfinite(Q), axis=1)
+    if not np.any(keep):
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    Q = Q[keep] / norms[keep, None]
+    # Use einsum to avoid spurious BLAS subnormal warnings that np.matmul
+    # raises on some platforms even though the inputs are clean unit quats.
+    dots = np.einsum('ij,j->i', Q, Q[0])
+    flips = np.where(dots >= 0.0, 1.0, -1.0)
     Q = Q * flips[:, None]
-    eigvals, eigvecs = np.linalg.eigh(Q.T @ Q)
+    eigvals, eigvecs = np.linalg.eigh(np.einsum('ij,ik->jk', Q, Q))
     avg = eigvecs[:, -1]
     avg = avg / (np.linalg.norm(avg) + 1e-12)
     if avg[0] < 0:
@@ -190,6 +199,26 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
     eigvals, eigvecs = np.linalg.eigh(cov)
     e_PCA = eigvecs[:, -1]
     eig_ratio = float(eigvals[-1] / (eigvals[-2] + 1e-12))
+
+    # Safety projection: in the paper's framework the medio-lateral axis is
+    # strictly horizontal (perpendicular to gravity = +Y). If the user's
+    # calibration motion was multi-axial enough that PCA returns an axis
+    # with a non-trivial Y component, q_PCA (a single rotation around +Y)
+    # cannot bring it exactly to +Z — the result drifts. Project to the X-Z
+    # plane first so the rotation is well-defined.
+    y_component = float(e_PCA[1])
+    e_PCA = np.array([e_PCA[0], 0.0, e_PCA[2]])
+    nrm = float(np.linalg.norm(e_PCA))
+    if nrm < 1e-9:
+        # PCA picked a near-vertical axis → calibration is unusable
+        return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+    e_PCA = e_PCA / nrm
+    # Track how much was lost to projection: |y_component| > 0.5 means the
+    # PCA was dominantly vertical, suggesting the user did mostly trunk
+    # rotation / yaw — not what we want. Drop the eig_ratio so the caller
+    # (which thresholds on it) rejects this calibration.
+    if abs(y_component) > 0.5:
+        eig_ratio = min(eig_ratio, 1.0)
 
     e_1 = np.array([0.0, 0.0, 1.0])
     cos_t = float(np.clip(e_PCA @ e_1, -1.0, 1.0))

@@ -492,23 +492,28 @@ class AngleCalibrator(QObject):
             if n < 50:
                 return False
             q_PCA, ratio = paper_compute_q_PCA(g_d[:n], q_d[:n], cal['q_g'])
-            q_0 = paper_finalize_q0(cal['q_g'], q_PCA, cal['q_static_avg'])
-            cal['q_PCA'] = q_PCA
-            cal['q_0']   = q_0
             cal['pca_ratio'] = float(ratio)
-            # The PCA always returns SOMETHING, so the calibration is always
-            # stored — the eig-ratio is just a quality indicator.
-            # ≥ 2.0 → clean hinge-like motion, the medio-lateral axis is well
-            #         identified (typical for shank/thigh/foot during walking).
-            # < 2.0 → multi-axis motion or weak signal (typical for the pelvis,
-            #         which rotates more multi-axially during gait). The cal
-            #         is still used; results just have slightly more cross-talk.
-            if ratio >= 2.0:
-                tag = "clean ✓"
-            elif ratio >= 1.3:
-                tag = "acceptable (still used)"
-            else:
-                tag = "very weak — repeat with stronger hip flexion / trunk bows"
+
+            # Hard threshold: only commit q_PCA + q_0 (= activate paper path
+            # at runtime) when the principal axis is at least 1.5× stronger
+            # than the second axis. Below that the PCA pointed somewhere
+            # random and using it forces q_joint into the Eq.11 wrap-around
+            # zone (±180°).
+            PCA_MIN_RATIO = 1.5
+            if ratio < PCA_MIN_RATIO:
+                # Drop any previously stored q_PCA/q_0 so the dispatcher in
+                # __compute_angles_from_data falls back to the legacy path.
+                cal.pop('q_PCA', None)
+                cal.pop('q_0',   None)
+                self.message_signal.emit(
+                    f"[paper] {seg_name}: ratio {ratio:.2f} < {PCA_MIN_RATIO} — "
+                    f"REJECTED, falling back to legacy. Redo Functional Calibration "
+                    f"with stronger {seg_name}-specific motion."
+                )
+                return False
+            cal['q_PCA'] = q_PCA
+            cal['q_0']   = paper_finalize_q0(cal['q_g'], q_PCA, cal['q_static_avg'])
+            tag = "clean ✓" if ratio >= 2.0 else "acceptable ✓"
             self.message_signal.emit(
                 f"[paper] {seg_name}: PCA eig-ratio {ratio:.2f} ({tag}, n={n})"
             )
@@ -1273,14 +1278,14 @@ class AngleCalibrator(QObject):
             if q_avg is None or a_avg is None:
                 continue
             static_data[name] = {'q': q_avg, 'accel': a_avg}
-            # Seed paper cal: q_g now, q_PCA (identity placeholder until
-            # Functional Calibration runs), q_0 from the current pair.
+            # Seed paper cal with q_g + static data ONLY. q_PCA / q_0 are
+            # intentionally *not* stored here — they get filled by Functional
+            # Calibration if (and only if) the PCA produces a confident axis.
+            # The runtime dispatcher checks for both keys before activating
+            # the paper path, so an incomplete cal falls back to legacy.
             q_g = paper_compute_q_g(a_avg, q_avg)
-            q_PCA_id = np.array([1.0, 0.0, 0.0, 0.0])
             self._paper_cal[name] = {
                 'q_g': q_g,
-                'q_PCA': q_PCA_id,
-                'q_0': paper_finalize_q0(q_g, q_PCA_id, q_avg),
                 'q_static_avg': q_avg,
                 'accel_static_avg': a_avg,
             }
