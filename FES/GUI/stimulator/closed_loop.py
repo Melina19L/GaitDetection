@@ -35,6 +35,253 @@ def quat_mul(q1, q2):
     ])
 def normalize(q): return q / np.linalg.norm(q)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── Paper: Hoegberg, Donahue, Major (Sensors 2025, 25, 2931, ReBAIT) ────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Sagittal-plane joint kinematics from a per-segment two-step calibration.
+#
+# Convention (paper Section 2.1.2):
+#   X = anterior-posterior, Y = superior-inferior (vertical, gravity along +Y),
+#   Z = medio-lateral (joint hinge / sagittal-plane normal).
+#
+# Per-segment calibration:
+#   q_g    : rotates the IMU's reported global frame so that the average
+#            gravity direction (from quiet-stance accelerometer) → +Y.
+#            (Eq. 2-4 of paper)
+#   q_PCA  : rotates further around +Y so that the principal axis of angular
+#            velocity (from dynamic walking, PCA on ω in gravity-aligned frame)
+#            → +Z. (Eq. 5-7) Includes the sign-flip rule (Eq. 9).
+#   q_0    : conjugate of the FULL transformed neutral orientation, so that
+#            paper_transform_orientation(q_imu_static, cal) = identity. (Eq. 10)
+#
+# Joint quaternions (Table 1):  q_a = q'_SH · q_FT,  q_k = q'_SH · q_TH,
+#                                 q_h = q'_PV · q_TH
+# Sagittal-plane angle (Eq. 11): θ = 2·arccos(w / √(w²+z²)) · sgn(z)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def quaternion_average(qs: np.ndarray) -> np.ndarray:
+    """Robust quaternion average via dominant eigenvector of M = Σ q·qᵀ.
+
+    Each row of ``qs`` is canonicalised (sign-flipped to share the hemisphere
+    of the first sample) so q and -q (which represent the same rotation) are
+    not allowed to cancel each other out in the average.
+    """
+    Q = np.asarray(qs, dtype=float).copy()
+    if Q.ndim != 2 or Q.shape[0] == 0:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    flips = np.sign(Q @ Q[0])
+    flips[flips == 0] = 1.0
+    Q = Q * flips[:, None]
+    eigvals, eigvecs = np.linalg.eigh(Q.T @ Q)
+    avg = eigvecs[:, -1]
+    avg = avg / (np.linalg.norm(avg) + 1e-12)
+    if avg[0] < 0:
+        avg = -avg
+    return avg
+
+
+def _quat_from_axis_angle(axis: np.ndarray, angle_rad: float) -> np.ndarray:
+    axis = np.asarray(axis, dtype=float)
+    n = np.linalg.norm(axis)
+    if n < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    axis = axis / n
+    return np.array([np.cos(angle_rad / 2.0),
+                     np.sin(angle_rad / 2.0) * axis[0],
+                     np.sin(angle_rad / 2.0) * axis[1],
+                     np.sin(angle_rad / 2.0) * axis[2]])
+
+
+def _rotate_vec_batch(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """Apply quaternion ``q`` (shape (...,4) or (4,)) to vector(s) ``v`` (..., 3)."""
+    q = np.asarray(q, dtype=float)
+    v = np.asarray(v, dtype=float)
+    qv = np.zeros(v.shape[:-1] + (4,), dtype=float)
+    qv[..., 1:] = v
+    if q.ndim == 1:
+        # broadcast q over v
+        qv_rot = quat_mul(q, qv) if v.ndim == 1 else None
+        if v.ndim == 1:
+            return quat_mul(quat_mul(q, qv), quat_conjugate(q))[1:]
+        # batched v with single q
+        out = np.empty_like(v)
+        for i in range(v.shape[0]):
+            out[i] = quat_mul(quat_mul(q, qv[i]), quat_conjugate(q))[1:]
+        return out
+    # batched q with batched v (same leading shape)
+    out = np.empty_like(v)
+    for i in range(v.shape[0]):
+        out[i] = quat_mul(quat_mul(q[i], qv[i]), quat_conjugate(q[i]))[1:]
+    return out
+
+
+def paper_compute_q_g(accel_local_avg: np.ndarray,
+                      q_imu_static_avg: np.ndarray) -> np.ndarray:
+    """Step 1 (Eq. 2-4): rotation that aligns gravity (in IMU's global frame
+    I_G) with the anatomical superior-inferior axis +Y.
+
+    Parameters
+    ----------
+    accel_local_avg : (3,) average linear acceleration vector during the
+        quiet-stance period, **expressed in the IMU's local frame** (this is
+        what Movella DOT / Xsens stream as accelerometer cols).
+    q_imu_static_avg : (4,) average orientation quaternion during the same
+        quiet-stance period (in I_G, [w,x,y,z]).
+
+    Returns
+    -------
+    q_g : (4,) quaternion that rotates a vector from I_G into the
+        gravity-aligned anatomical frame (where gravity ⇒ +Y).
+    """
+    # Bring accel into IG (multiply by sensor orientation)
+    g_IG = _rotate_vec_batch(q_imu_static_avg, accel_local_avg)
+    norm = np.linalg.norm(g_IG)
+    if norm < 1e-9:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    g_IG_unit = g_IG / norm
+    g_anat = np.array([0.0, 1.0, 0.0])
+    cos_t = float(np.clip(g_IG_unit @ g_anat, -1.0, 1.0))
+    cross = np.cross(g_IG_unit, g_anat)
+    cn = np.linalg.norm(cross)
+    if cn < 1e-9:
+        # Already aligned (or 180° flipped: fall back to X-axis rotation)
+        if cos_t > 0:
+            return np.array([1.0, 0.0, 0.0, 0.0])
+        return _quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), np.pi)
+    return _quat_from_axis_angle(cross / cn, float(np.arccos(cos_t)))
+
+
+def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
+                         q_imu_dynamic: np.ndarray,
+                         q_g: np.ndarray) -> tuple[np.ndarray, float]:
+    """Step 2 (Eq. 5-7) + Step 4 (Eq. 9): rotation around +Y that aligns the
+    principal angular-velocity axis with +Z (medio-lateral).
+
+    Parameters
+    ----------
+    gyro_dynamic_local : (N,3) angular velocity samples during walking/toe-touches,
+        in IMU local frame.
+    q_imu_dynamic : (N,4) corresponding orientation quaternions in I_G.
+    q_g : (4,) gravity-alignment quaternion from ``paper_compute_q_g``.
+
+    Returns
+    -------
+    q_PCA : (4,) quaternion (rotation around +Y).
+    eig_ratio : float — ratio of largest to second-largest eigenvalue of the
+        ω covariance, useful as a diagnostic (>2 = clean hinge motion).
+    """
+    g = np.asarray(gyro_dynamic_local, dtype=float)
+    qd = np.asarray(q_imu_dynamic, dtype=float)
+    if g.ndim != 2 or g.shape[1] != 3 or g.shape[0] < 50 or g.shape[0] != qd.shape[0]:
+        return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+
+    # ω in I_G : rotate per-sample by q_imu
+    ω_IG = np.empty_like(g)
+    for i in range(len(g)):
+        ω_IG[i] = _rotate_vec_batch(qd[i], g[i])
+    # ω in gravity-aligned frame
+    ω_g = np.empty_like(ω_IG)
+    for i in range(len(ω_IG)):
+        ω_g[i] = _rotate_vec_batch(q_g, ω_IG[i])
+
+    # PCA via covariance eigendecomp
+    cov = np.cov(ω_g.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    e_PCA = eigvecs[:, -1]
+    eig_ratio = float(eigvals[-1] / (eigvals[-2] + 1e-12))
+
+    e_1 = np.array([0.0, 0.0, 1.0])
+    cos_t = float(np.clip(e_PCA @ e_1, -1.0, 1.0))
+    cross = np.cross(e_PCA, e_1)
+    n = np.linalg.norm(cross)
+    if n < 1e-9:
+        # e_PCA already aligned with ±Z
+        nh, theta = np.array([0.0, 1.0, 0.0]), 0.0 if cos_t > 0 else np.pi
+    else:
+        nh = cross / n
+        theta = float(np.arccos(cos_t))
+        # Eq. 7: choose the sign so the rotation axis has positive Y component
+        # (rotation around +Y, not -Y). Flip nh and negate theta if needed.
+        if nh[1] < 0:
+            nh = -nh
+            theta = -theta
+    q_PCA = _quat_from_axis_angle(nh, theta)
+
+    # Eq. 9 sign disambiguation: if max(ω_W_z) > |min(ω_W_z)|, rotate q_PCA
+    # by 180° around +Y so the medio-lateral sign convention matches anatomy
+    # (right knee flexion → positive ω_z in the lab frame).
+    ω_W = np.empty_like(ω_g)
+    for i in range(len(ω_g)):
+        ω_W[i] = _rotate_vec_batch(q_PCA, ω_g[i])
+    if ω_W[:, 2].max() > abs(ω_W[:, 2].min()):
+        q_PCA = quat_mul(_quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), np.pi),
+                         q_PCA)
+
+    return q_PCA, eig_ratio
+
+
+def paper_finalize_q0(q_g: np.ndarray, q_PCA: np.ndarray,
+                      q_imu_static_avg: np.ndarray) -> np.ndarray:
+    """q_0 = (q_PCA · q_g · q_imu_static_avg)⁻¹ so that, at the neutral pose,
+    the transformed segment orientation (Eq. 10) is the identity quaternion."""
+    q_neutral_full = quat_mul(quat_mul(q_PCA, q_g), q_imu_static_avg)
+    return quat_conjugate(q_neutral_full)
+
+
+def paper_transform_orientation(q_imu: np.ndarray,
+                                 cal: dict) -> np.ndarray:
+    """Equation 10 of the paper: q_i = q_PCA · q_g · q_IMU · q_0.
+
+    ``cal`` is a dict with keys ``q_g``, ``q_PCA``, ``q_0``. Returns the
+    segment's current orientation in the segment-fixed (ISB-anatomical) frame,
+    relative to the neutral pose — identity at neutral, captures all subsequent
+    rotation.
+    """
+    return quat_mul(quat_mul(quat_mul(cal['q_PCA'], cal['q_g']), q_imu),
+                    cal['q_0'])
+
+
+def paper_sagittal_angle_deg(q_joint: np.ndarray) -> float:
+    """Equation 11 of the paper: extract the sagittal-plane component of the
+    joint quaternion. Uses w and z (rotation around +Z = medio-lateral).
+    Returns degrees, signed.
+    """
+    q = np.asarray(q_joint, dtype=float)
+    if q[0] < 0:  # canonicalise w ≥ 0 for continuity
+        q = -q
+    denom = np.sqrt(q[0] * q[0] + q[3] * q[3]) + 1e-12
+    sgn = 1.0 if q[3] >= 0 else -1.0
+    return float(np.degrees(2.0 * np.arccos(np.clip(q[0] / denom, -1.0, 1.0)) * sgn))
+
+
+def paper_joint_angle_deg(q_imu_proximal: np.ndarray,
+                           q_imu_distal: np.ndarray,
+                           cal_proximal: dict,
+                           cal_distal: dict,
+                           swap: bool = False) -> float:
+    """Compute a sagittal-plane joint angle following the paper's pipeline.
+
+    Steps:
+      1. Transform each segment's IMU quaternion into the ISB-anatomical
+         segment frame (Eq. 10).
+      2. Compute the relative joint quaternion (Table 1):
+           q_joint = q'_proximal · q_distal       (default)
+           q_joint = q'_distal   · q_proximal     (when ``swap=True``)
+         The default order matches the paper's knee/ankle convention
+         (q_k = q'_SH · q_TH, q_a = q'_SH · q_FT). The hip uses pelvis as
+         proximal so the same default order works for it too.
+      3. Extract sagittal angle (Eq. 11).
+    """
+    q_p_seg = paper_transform_orientation(q_imu_proximal, cal_proximal)
+    q_d_seg = paper_transform_orientation(q_imu_distal,   cal_distal)
+    if swap:
+        q_joint = quat_mul(quat_conjugate(q_d_seg), q_p_seg)
+    else:
+        q_joint = quat_mul(quat_conjugate(q_p_seg), q_d_seg)
+    return paper_sagittal_angle_deg(q_joint)
+
+
 def angle_between_quaternions_algo2(q_thigh, q_shank): #, joint_axis=None):
     # if joint_axis is None:
     #     joint_axis = np.array([0.0, 1.0, 0.0])  # y = ML (right)

@@ -8,6 +8,12 @@ from stimulator.closed_loop import (
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
     identify_hinge_axis, extract_joint_angle_with_axis,
+    # ── Paper algorithm (Hoegberg, Donahue, Major — Sensors 2025, 25, 2931) ──
+    quaternion_average,
+    paper_compute_q_g,
+    paper_compute_q_PCA,
+    paper_finalize_q0,
+    paper_joint_angle_deg,
 )
 import time
 from typing import Optional
@@ -109,7 +115,20 @@ class AngleCalibrator(QObject):
         self.left_hip_qthigh_ref = None
         self.right_hip_qpelvis_ref = None
         self.right_hip_qthigh_ref = None
-        
+
+        # ── Paper-style per-segment calibration (Hoegberg 2025 ReBAIT) ─────────
+        # Each entry, when complete, has keys
+        #   'q_g'            : gravity-alignment quaternion (Eq. 2-4)
+        #   'q_PCA'          : medio-lateral alignment quaternion (Eq. 5-7+9)
+        #   'q_0'            : conjugate of full neutral orientation (Eq. 10)
+        #   'q_static_avg'   : average q_IMU during quiet stance
+        #   'accel_static_avg': average linear accel during quiet stance
+        # Calibrate Offsets fills q_static_avg, accel_static_avg, q_g.
+        # Functional Calibration fills q_PCA and finalises q_0.
+        # When BOTH segments of a joint have complete cal, the paper algorithm
+        # is used at runtime instead of the legacy offset-subtraction path.
+        self._paper_cal: dict[str, dict] = {}
+
         # Raw data logging for debugging time-sync issues
         self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
 
@@ -440,9 +459,43 @@ class AngleCalibrator(QObject):
             norms = np.linalg.norm(arr, axis=1, keepdims=True)
             norms[norms < 1e-9] = 1.0
             return arr / norms
-        
+
+        def _extract_gyros(samples):
+            """Extract angular velocity vectors (cols 3:6) from LSL samples."""
+            if not samples:
+                return None
+            return np.array([s[3:6] for s in samples], dtype=np.float64)
+
+        def _finalise_paper_segment(seg_name: str, samples: list) -> bool:
+            """Compute q_PCA + q_0 for a single segment (paper Step 2 / Eq.5-7+9).
+
+            Requires that q_g and q_static_avg were already stored for this
+            segment by Calibrate Offsets. Returns True on success.
+            """
+            cal = self._paper_cal.get(seg_name)
+            if cal is None or 'q_g' not in cal or 'q_static_avg' not in cal:
+                # Static cal hasn't run yet — paper algo can't be activated.
+                return False
+            q_d = _extract_quats(samples)
+            g_d = _extract_gyros(samples)
+            if q_d is None or g_d is None:
+                return False
+            n = min(len(q_d), len(g_d))
+            if n < 50:
+                return False
+            q_PCA, ratio = paper_compute_q_PCA(g_d[:n], q_d[:n], cal['q_g'])
+            q_0 = paper_finalize_q0(cal['q_g'], q_PCA, cal['q_static_avg'])
+            cal['q_PCA'] = q_PCA
+            cal['q_0']   = q_0
+            cal['pca_ratio'] = float(ratio)
+            self.message_signal.emit(
+                f"[paper] {seg_name}: PCA eig-ratio {ratio:.2f} "
+                f"({'OK' if ratio >= 2.0 else 'WEAK — walk longer or do toe-touches'})"
+            )
+            return True
+
         def _identify_axis(prox_samples, dist_samples, joint_name):
-            """Run SVD hinge axis identification for a joint pair.
+            """Run SVD hinge axis identification for a joint pair (legacy path).
             Returns hinge_axis or None.
             """
             q_prox = _extract_quats(prox_samples)
@@ -463,52 +516,68 @@ class AngleCalibrator(QObject):
             return axis
         
         results = []
-        
-        # ── LEFT LEG ──
+
+        # ── PAPER ALGORITHM: per-segment q_PCA + q_0 (Hoegberg 2025) ──────────
+        # Compute medio-lateral alignment (Eq. 5-7+9) for every segment that
+        # already has q_g from Calibrate Offsets. The buffers above are
+        # JOINT-keyed (e.g. 'left_pelvis' = pelvis samples gathered while the
+        # left side was active) — pelvis samples are the same on both sides
+        # since the inlet is shared, so we just pick one.
+        paper_segments = []
         if self.left_checkbox.isChecked():
-            # Hip LEFT (pelvis → thigh)
+            paper_segments += [
+                ('left_thigh', buffers['left_thigh']),
+                ('left_shank', buffers['left_shank']),
+                ('left_foot',  buffers['left_foot']),
+            ]
+        if self.right_checkbox.isChecked():
+            paper_segments += [
+                ('right_thigh', buffers['right_thigh']),
+                ('right_shank', buffers['right_shank']),
+                ('right_foot',  buffers['right_foot']),
+            ]
+        # Pelvis: pick whichever side was sampled (or merge both)
+        pelvis_samples = (buffers.get('left_pelvis') or []) + (buffers.get('right_pelvis') or [])
+        if self.pelvis_inlet is not None and pelvis_samples:
+            paper_segments.append(('pelvis', pelvis_samples))
+
+        for seg_name, segs in paper_segments:
+            if not segs:
+                continue
+            ok = _finalise_paper_segment(seg_name, segs)
+            if ok:
+                results.append(f'{seg_name} ✓')
+            else:
+                results.append(f'{seg_name} ✗ (need static cal first)')
+
+        # ── LEGACY: SVD hinge axis (kept as fallback for joints without paper cal) ──
+        if self.left_checkbox.isChecked():
             ax = _identify_axis(
-                buffers['left_pelvis'], buffers['left_thigh'], 'Left Hip')
+                buffers['left_pelvis'], buffers['left_thigh'], 'Left Hip (SVD)')
             if ax is not None:
                 self.left_hip_hinge_axis = ax
-                results.append('Left Hip ✓')
-            
-            # Knee LEFT (thigh → shank)
             ax = _identify_axis(
-                buffers['left_thigh'], buffers['left_shank'], 'Left Knee')
+                buffers['left_thigh'], buffers['left_shank'], 'Left Knee (SVD)')
             if ax is not None:
                 self.left_knee_hinge_axis = ax
-                results.append('Left Knee ✓')
-            
-            # Ankle LEFT (shank → foot)
             ax = _identify_axis(
-                buffers['left_shank'], buffers['left_foot'], 'Left Ankle')
+                buffers['left_shank'], buffers['left_foot'], 'Left Ankle (SVD)')
             if ax is not None:
                 self.left_ankle_hinge_axis = ax
-                results.append('Left Ankle ✓')
-        
-        # ── RIGHT LEG ──
+
         if self.right_checkbox.isChecked():
-            # Hip RIGHT (pelvis → thigh)
             ax = _identify_axis(
-                buffers['right_pelvis'], buffers['right_thigh'], 'Right Hip')
+                buffers['right_pelvis'], buffers['right_thigh'], 'Right Hip (SVD)')
             if ax is not None:
                 self.right_hip_hinge_axis = ax
-                results.append('Right Hip ✓')
-            
-            # Knee RIGHT (thigh → shank)
             ax = _identify_axis(
-                buffers['right_thigh'], buffers['right_shank'], 'Right Knee')
+                buffers['right_thigh'], buffers['right_shank'], 'Right Knee (SVD)')
             if ax is not None:
                 self.right_knee_hinge_axis = ax
-                results.append('Right Knee ✓')
-            
-            # Ankle RIGHT (shank → foot)
             ax = _identify_axis(
-                buffers['right_shank'], buffers['right_foot'], 'Right Ankle')
+                buffers['right_shank'], buffers['right_foot'], 'Right Ankle (SVD)')
             if ax is not None:
                 self.right_ankle_hinge_axis = ax
-                results.append('Right Ankle ✓')
         
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
@@ -759,6 +828,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'left_hip_qpelvis_ref', None),
                     q_distal_ref=getattr(self, 'left_hip_qthigh_ref', None),
                     hinge_axis=getattr(self, 'left_hip_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('pelvis'),
+                    cal_distal=self._paper_cal.get('left_thigh'),
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
@@ -775,6 +846,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'left_knee_qthigh_ref', None),
                     q_distal_ref=getattr(self, 'left_knee_qshank_ref', None),
                     hinge_axis=getattr(self, 'left_knee_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('left_thigh'),
+                    cal_distal=self._paper_cal.get('left_shank'),
                 )
                 self.left_angle_data = np.append(self.left_angle_data, angles)
                 self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
@@ -794,6 +867,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
                     hinge_axis=getattr(self, 'left_ankle_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('left_shank'),
+                    cal_distal=self._paper_cal.get('left_foot'),
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
@@ -819,6 +894,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'right_hip_qpelvis_ref', None),
                     q_distal_ref=getattr(self, 'right_hip_qthigh_ref', None),
                     hinge_axis=getattr(self, 'right_hip_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('pelvis'),
+                    cal_distal=self._paper_cal.get('right_thigh'),
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
@@ -835,6 +912,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'right_knee_qthigh_ref', None),
                     q_distal_ref=getattr(self, 'right_knee_qshank_ref', None),
                     hinge_axis=getattr(self, 'right_knee_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('right_thigh'),
+                    cal_distal=self._paper_cal.get('right_shank'),
                 )
                 self.right_angle_data = np.append(self.right_angle_data, angles)
                 self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
@@ -854,6 +933,8 @@ class AngleCalibrator(QObject):
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
                     hinge_axis=getattr(self, 'right_ankle_hinge_axis', None),
+                    cal_proximal=self._paper_cal.get('right_shank'),
+                    cal_distal=self._paper_cal.get('right_foot'),
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
@@ -1136,32 +1217,69 @@ class AngleCalibrator(QObject):
         # single jittery quaternion. Eliminates the ±10° "standing pose" drift.
         AVG_DURATION_S = 1.0
 
-        def _one_side_knee(shank_inlet, thigh_inlet, target_spinbox):
-            if not (shank_inlet and thigh_inlet):
-                return None
-            q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
-            q_thigh = self.__get_averaged_quaternion(thigh_inlet, duration_s=AVG_DURATION_S)
+        # ── Paper-style per-segment static collection (Hoegberg 2025) ────────
+        # We collect 1 s of accelerometer + quaternion samples ONCE per unique
+        # segment (vs. the previous code which sampled e.g. left_shank twice —
+        # once for the knee, once for the ankle). The cached q_avg is then
+        # reused below by the legacy knee / ankle / hip offset helpers, and
+        # the (q_avg, accel_avg) pair feeds paper_compute_q_g for each segment.
+        # ----------------------------------------------------------------------
+        seg_inlets = []
+        if self.left_checkbox.isChecked():
+            seg_inlets += [
+                ('left_thigh', self.left_thigh_inlet),
+                ('left_shank', self.left_shank_inlet),
+                ('left_foot',  self.left_foot_inlet),
+            ]
+        if self.right_checkbox.isChecked():
+            seg_inlets += [
+                ('right_thigh', self.right_thigh_inlet),
+                ('right_shank', self.right_shank_inlet),
+                ('right_foot',  self.right_foot_inlet),
+            ]
+        # Pelvis is shared between hips
+        if self.pelvis_inlet is not None and (
+            self.left_checkbox.isChecked() or self.right_checkbox.isChecked()
+        ):
+            seg_inlets.append(('pelvis', self.pelvis_inlet))
+
+        static_data: dict[str, dict] = {}  # 'left_thigh' → {'q': ..., 'accel': ...}
+        for name, inlet in seg_inlets:
+            if inlet is None:
+                continue
+            q_avg, a_avg, _, _ = self.__get_averaged_static_data(
+                inlet, duration_s=AVG_DURATION_S,
+            )
+            if q_avg is None or a_avg is None:
+                continue
+            static_data[name] = {'q': q_avg, 'accel': a_avg}
+            # Seed paper cal: q_g now, q_PCA (identity placeholder until
+            # Functional Calibration runs), q_0 from the current pair.
+            q_g = paper_compute_q_g(a_avg, q_avg)
+            q_PCA_id = np.array([1.0, 0.0, 0.0, 0.0])
+            self._paper_cal[name] = {
+                'q_g': q_g,
+                'q_PCA': q_PCA_id,
+                'q_0': paper_finalize_q0(q_g, q_PCA_id, q_avg),
+                'q_static_avg': q_avg,
+                'accel_static_avg': a_avg,
+            }
+
+        def _one_side_knee(shank_seg, thigh_seg, target_spinbox):
+            q_shank = static_data.get(shank_seg, {}).get('q')
+            q_thigh = static_data.get(thigh_seg, {}).get('q')
             if q_shank is None or q_thigh is None:
                 return None
             return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
 
-        def _one_side_ankle(shank_inlet, foot_inlet):
+        def _one_side_ankle(shank_seg, foot_seg):
             """Calibrate the ankle joint using auto-detected sensor axes.
 
-            1. Average the calibration-pose quaternions over 1 s.
-            2. Auto-detect the shank's vertical axis, foot's forward axis,
-               and foot's medio-lateral axis from the standing pose.
-            3. Compute the calibration offset using the detected axes.
-            4. Return (offset, q_shank, q_foot, shank_axis, foot_forward_axis,
-               foot_ml_axis) so the caller can store all per-side parameters.
-
-            The foot_ml_axis is used as the twist decomposition axis in
-            signed_ankle_angle for dorsi/plantarflexion extraction.
+            Uses the cached static_data from the paper-collection step above
+            (no second 1-second wait per inlet). Behaviour otherwise unchanged.
             """
-            if not (shank_inlet and foot_inlet):
-                return None, None, None, 'X', 'X', 'X'
-            q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
-            q_foot  = self.__get_averaged_quaternion(foot_inlet,  duration_s=AVG_DURATION_S)
+            q_shank = static_data.get(shank_seg, {}).get('q')
+            q_foot  = static_data.get(foot_seg,  {}).get('q')
             if q_shank is None or q_foot is None:
                 return None, None, None, 'X', 'X', 'X'
 
@@ -1184,12 +1302,10 @@ class AngleCalibrator(QObject):
             )
             return offset, q_shank, q_foot, shank_vert_axis, foot_fwd_axis, foot_ml_axis
 
-        def _one_side_hip(thigh_inlet, offset_val):
+        def _one_side_hip(thigh_seg, offset_val):
             """Calibrate hip using the shared pelvis sensor as the proximal reference."""
-            if not (self.pelvis_inlet and thigh_inlet):
-                return None
-            q_pelvis = self.__get_averaged_quaternion(self.pelvis_inlet, duration_s=AVG_DURATION_S)
-            q_thigh  = self.__get_averaged_quaternion(thigh_inlet,       duration_s=AVG_DURATION_S)
+            q_pelvis = static_data.get('pelvis',   {}).get('q')
+            q_thigh  = static_data.get(thigh_seg,  {}).get('q')
             if q_pelvis is None or q_thigh is None:
                 return None
             return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
@@ -1198,16 +1314,16 @@ class AngleCalibrator(QObject):
         diag_sections = []
         if self.left_checkbox.isChecked():
             # Knee calibration
-            off = _one_side_knee(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
+            off = _one_side_knee('left_shank', 'left_thigh', self.extension_target_left)
             if off is not None:
                 self.left_angle_offset = off
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
-            
+
             # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
-                hip_off = _one_side_hip(self.left_thigh_inlet, hip_tgt)
+                hip_off = _one_side_hip('left_thigh', hip_tgt)
                 if hip_off is not None:
                     self.left_hip_offset = hip_off
                 elif self.pelvis_inlet and self.left_thigh_inlet:
@@ -1215,7 +1331,7 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip LEFT] skipped: {e}")
 
-            ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_fwd_l, ft_ml_l = _one_side_ankle(self.left_shank_inlet, self.left_foot_inlet)
+            ankle_off, q_sh_l, q_ft_l, sh_ax_l, ft_fwd_l, ft_ml_l = _one_side_ankle('left_shank', 'left_foot')
             if ankle_off is not None:
                 self.left_ankle_offset = ankle_off
                 # Store reference quaternions for sagittal-plane projection
@@ -1244,16 +1360,16 @@ class AngleCalibrator(QObject):
 
         if self.right_checkbox.isChecked():
             # Knee calibration
-            off = _one_side_knee(self.right_shank_inlet, self.right_thigh_inlet, self.extension_target_right)
+            off = _one_side_knee('right_shank', 'right_thigh', self.extension_target_right)
             if off is not None:
                 self.right_angle_offset = off
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
-                
+
             # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
-                hip_off_r = _one_side_hip(self.right_thigh_inlet, hip_tgt_r)
+                hip_off_r = _one_side_hip('right_thigh', hip_tgt_r)
                 if hip_off_r is not None:
                     self.right_hip_offset = hip_off_r
                 elif self.pelvis_inlet and self.right_thigh_inlet:
@@ -1261,7 +1377,7 @@ class AngleCalibrator(QObject):
             except Exception as e:
                 print(f"[CalibHip RIGHT] skipped: {e}")
 
-            ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_fwd_r, ft_ml_r = _one_side_ankle(self.right_shank_inlet, self.right_foot_inlet)
+            ankle_off, q_sh_r, q_ft_r, sh_ax_r, ft_fwd_r, ft_ml_r = _one_side_ankle('right_shank', 'right_foot')
             if ankle_off is not None:
                 self.right_ankle_offset = ankle_off
                 # Store reference quaternions for sagittal-plane projection
@@ -1325,6 +1441,51 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(poll_interval)  # small delay to prevent CPU spinning
         return None
+
+    def __get_averaged_static_data(self, inlet: StreamInlet, duration_s: float = 1.0,
+                                    poll_interval: float = 0.02):
+        """Collect ~``duration_s`` of samples during quiet stance and return
+        ``(q_avg, accel_avg, q_buffer, accel_buffer)``.
+
+        Used for paper-style per-segment calibration (Hoegberg 2025): the
+        gravity-alignment quaternion ``q_g`` needs the average accelerometer
+        vector AND the average orientation quaternion at the same neutral pose.
+
+        Returns ``(None, None, None, None)`` if no samples arrive in time.
+
+        Notes
+        -----
+        - Quaternion averaging uses the eigendecomposition method
+          (`quaternion_average`), which is robust to the q/-q double cover.
+        - Accel averaging is element-wise (linear acceleration is a vector).
+        - The returned per-sample buffers are kept around in case the caller
+          wants the unfiltered samples (currently unused).
+        """
+        if inlet is None:
+            return None, None, None, None
+        t_start = time.time()
+        q_buf, a_buf = [], []
+        while time.time() - t_start < duration_s:
+            if inlet.samples_available() > 0:
+                sample, _ = inlet.pull_sample(timeout=0.0)
+                if sample:
+                    q_buf.append(np.asarray(sample[6:10], dtype=np.float64))
+                    a_buf.append(np.asarray(sample[0:3],  dtype=np.float64))
+            QCoreApplication.processEvents()
+            time.sleep(poll_interval)
+        if not q_buf:
+            return None, None, None, None
+        q_arr = np.asarray(q_buf, dtype=np.float64)
+        # Drop zero-norm quaternions (BLE warm-up sometimes leaks junk)
+        norms = np.linalg.norm(q_arr, axis=1)
+        keep = norms > 1e-6
+        if not np.any(keep):
+            return None, None, None, None
+        q_arr = q_arr[keep] / norms[keep, None]
+        a_arr = np.asarray(a_buf, dtype=np.float64)[keep]
+        q_avg = quaternion_average(q_arr)
+        a_avg = a_arr.mean(axis=0)
+        return q_avg, a_avg, q_arr, a_arr
 
     def __get_averaged_quaternion(self, inlet: StreamInlet, duration_s: float = 1.0,
                                   poll_interval: float = 0.02):
@@ -1493,18 +1654,29 @@ class AngleCalibrator(QObject):
         q_proximal_ref: np.ndarray = None,
         q_distal_ref:   np.ndarray = None,
         hinge_axis: np.ndarray = None,
+        cal_proximal: dict = None,
+        cal_distal:   dict = None,
     ) -> np.ndarray:
         """Compute joint angles from pre-matched sample lists.
-        
-        The lists `samples_proximal` and `samples_distal` have already been 
-        aligned by timestamp in `_record_data`, so they are guaranteed to be 
+
+        The lists `samples_proximal` and `samples_distal` have already been
+        aligned by timestamp in `_record_data`, so they are guaranteed to be
         the exact same length and correspond to the same instant in time.
+
+        Algorithm dispatch (highest priority first):
+          1. **Paper algorithm** (Hoegberg 2025) — used when both segments
+             have a complete cal dict (q_g + q_PCA + q_0). This is the path
+             we want once Calibrate Offsets + Functional Calibration have
+             both completed successfully.
+          2. **Legacy SVD swing-twist** — backward compat for joints whose
+             paper cal isn't ready but a hinge_axis was found.
+          3. **Static-only ankle / knee / hip** — fallback when neither.
         """
         if not samples_proximal or not samples_distal:
             return np.array([])
 
         n_pairs = min(len(samples_proximal), len(samples_distal))
-        
+
         if ts_proximal and ts_distal:
             ts_prox_arr = np.array(ts_proximal[:n_pairs], dtype=np.float64)
             ts_dist_arr = np.array(ts_distal[:n_pairs],   dtype=np.float64)
@@ -1514,16 +1686,26 @@ class AngleCalibrator(QObject):
                 diag_proximal["sync_gap_sum"] += float(gaps.mean())
                 diag_proximal["sync_gap_n"]   += 1
 
+        # Decide once per call whether the paper algorithm is available — we
+        # need both cal dicts AND each must have all three quaternions.
+        paper_ready = (
+            cal_proximal is not None and cal_distal is not None
+            and all(k in cal_proximal for k in ('q_g', 'q_PCA', 'q_0'))
+            and all(k in cal_distal   for k in ('q_g', 'q_PCA', 'q_0'))
+        )
+
         angles = []
         for i in range(n_pairs):
             q_prox = np.array(samples_proximal[i][6:10], dtype=np.float64)
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
-                if hinge_axis is not None and q_proximal_ref is not None and q_distal_ref is not None:
-                    # ── Calibrated path (all joints) ──
-                    # Uses swing-twist decomposition around the SVD-identified
-                    # hinge axis. This extracts only the sagittal-plane rotation,
-                    # completely decoupling each joint from out-of-plane motion.
+                if paper_ready:
+                    # ── Paper algorithm: ISB-aligned segment frames + Eq. 11 ──
+                    angle = paper_joint_angle_deg(
+                        q_prox, q_dist, cal_proximal, cal_distal,
+                    )
+                elif hinge_axis is not None and q_proximal_ref is not None and q_distal_ref is not None:
+                    # ── Legacy SVD swing-twist fallback ──
                     angle = extract_joint_angle_with_axis(
                         q_prox, q_dist,
                         q_proximal_ref, q_distal_ref,
@@ -1533,7 +1715,6 @@ class AngleCalibrator(QObject):
                         ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                         angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 elif is_ankle:
-                    # ── Ankle fallback (no dynamic calibration) ──
                     angle = ROM.calculate_ankle_angle(
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
@@ -1542,7 +1723,6 @@ class AngleCalibrator(QObject):
                     ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 else:
-                    # ── Legacy path (knee/hip without dynamic calibration) ──
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))
             except Exception:
