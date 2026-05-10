@@ -166,19 +166,6 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
                          q_g: np.ndarray) -> tuple[np.ndarray, float]:
     """Step 2 (Eq. 5-7) + Step 4 (Eq. 9): rotation around +Y that aligns the
     principal angular-velocity axis with +Z (medio-lateral).
-
-    Parameters
-    ----------
-    gyro_dynamic_local : (N,3) angular velocity samples during walking/toe-touches,
-        in IMU local frame.
-    q_imu_dynamic : (N,4) corresponding orientation quaternions in I_G.
-    q_g : (4,) gravity-alignment quaternion from ``paper_compute_q_g``.
-
-    Returns
-    -------
-    q_PCA : (4,) quaternion (rotation around +Y).
-    eig_ratio : float — ratio of largest to second-largest eigenvalue of the
-        ω covariance, useful as a diagnostic (>2 = clean hinge motion).
     """
     g = np.asarray(gyro_dynamic_local, dtype=float)
     qd = np.asarray(q_imu_dynamic, dtype=float)
@@ -195,28 +182,23 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
         ω_g[i] = _rotate_vec_batch(q_g, ω_IG[i])
 
     # PCA via covariance eigendecomp
-    cov = np.cov(ω_g.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
+    try:
+        cov = np.cov(ω_g.T)
+        if np.isnan(cov).any() or np.isinf(cov).any():
+            return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+        eigvals, eigvecs = np.linalg.eigh(cov)
+    except Exception:
+        return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+        
     e_PCA = eigvecs[:, -1]
     eig_ratio = float(eigvals[-1] / (eigvals[-2] + 1e-12))
 
-    # Safety projection: in the paper's framework the medio-lateral axis is
-    # strictly horizontal (perpendicular to gravity = +Y). If the user's
-    # calibration motion was multi-axial enough that PCA returns an axis
-    # with a non-trivial Y component, q_PCA (a single rotation around +Y)
-    # cannot bring it exactly to +Z — the result drifts. Project to the X-Z
-    # plane first so the rotation is well-defined.
     y_component = float(e_PCA[1])
     e_PCA = np.array([e_PCA[0], 0.0, e_PCA[2]])
     nrm = float(np.linalg.norm(e_PCA))
     if nrm < 1e-9:
-        # PCA picked a near-vertical axis → calibration is unusable
         return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
     e_PCA = e_PCA / nrm
-    # Track how much was lost to projection: |y_component| > 0.5 means the
-    # PCA was dominantly vertical, suggesting the user did mostly trunk
-    # rotation / yaw — not what we want. Drop the eig_ratio so the caller
-    # (which thresholds on it) rejects this calibration.
     if abs(y_component) > 0.5:
         eig_ratio = min(eig_ratio, 1.0)
 
@@ -225,21 +207,15 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
     cross = np.cross(e_PCA, e_1)
     n = np.linalg.norm(cross)
     if n < 1e-9:
-        # e_PCA already aligned with ±Z
         nh, theta = np.array([0.0, 1.0, 0.0]), 0.0 if cos_t > 0 else np.pi
     else:
         nh = cross / n
         theta = float(np.arccos(cos_t))
-        # Eq. 7: choose the sign so the rotation axis has positive Y component
-        # (rotation around +Y, not -Y). Flip nh and negate theta if needed.
         if nh[1] < 0:
             nh = -nh
             theta = -theta
     q_PCA = _quat_from_axis_angle(nh, theta)
 
-    # Eq. 9 sign disambiguation: if max(ω_W_z) > |min(ω_W_z)|, rotate q_PCA
-    # by 180° around +Y so the medio-lateral sign convention matches anatomy
-    # (right knee flexion → positive ω_z in the lab frame).
     ω_W = np.empty_like(ω_g)
     for i in range(len(ω_g)):
         ω_W[i] = _rotate_vec_batch(q_PCA, ω_g[i])
@@ -252,32 +228,19 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
 
 def paper_finalize_q0(q_g: np.ndarray, q_PCA: np.ndarray,
                       q_imu_static_avg: np.ndarray) -> np.ndarray:
-    """q_0 = (q_PCA · q_g · q_imu_static_avg)⁻¹ so that, at the neutral pose,
-    the transformed segment orientation (Eq. 10) is the identity quaternion."""
     q_neutral_full = quat_mul(quat_mul(q_PCA, q_g), q_imu_static_avg)
     return quat_conjugate(q_neutral_full)
 
 
 def paper_transform_orientation(q_imu: np.ndarray,
                                  cal: dict) -> np.ndarray:
-    """Equation 10 of the paper: q_i = q_PCA · q_g · q_IMU · q_0.
-
-    ``cal`` is a dict with keys ``q_g``, ``q_PCA``, ``q_0``. Returns the
-    segment's current orientation in the segment-fixed (ISB-anatomical) frame,
-    relative to the neutral pose — identity at neutral, captures all subsequent
-    rotation.
-    """
     return quat_mul(quat_mul(quat_mul(cal['q_PCA'], cal['q_g']), q_imu),
                     cal['q_0'])
 
 
 def paper_sagittal_angle_deg(q_joint: np.ndarray) -> float:
-    """Equation 11 of the paper: extract the sagittal-plane component of the
-    joint quaternion. Uses w and z (rotation around +Z = medio-lateral).
-    Returns degrees, signed.
-    """
     q = np.asarray(q_joint, dtype=float)
-    if q[0] < 0:  # canonicalise w ≥ 0 for continuity
+    if q[0] < 0:
         q = -q
     denom = np.sqrt(q[0] * q[0] + q[3] * q[3]) + 1e-12
     sgn = 1.0 if q[3] >= 0 else -1.0
@@ -289,25 +252,15 @@ def paper_joint_angle_deg(q_imu_proximal: np.ndarray,
                            cal_proximal: dict,
                            cal_distal: dict,
                            swap: bool = False) -> float:
-    """Compute a sagittal-plane joint angle following the paper's pipeline.
-
-    Steps:
-      1. Transform each segment's IMU quaternion into the ISB-anatomical
-         segment frame (Eq. 10).
-      2. Compute the relative joint quaternion (Table 1):
-           q_joint = q'_proximal · q_distal       (default)
-           q_joint = q'_distal   · q_proximal     (when ``swap=True``)
-         The default order matches the paper's knee/ankle convention
-         (q_k = q'_SH · q_TH, q_a = q'_SH · q_FT). The hip uses pelvis as
-         proximal so the same default order works for it too.
-      3. Extract sagittal angle (Eq. 11).
-    """
     q_p_seg = paper_transform_orientation(q_imu_proximal, cal_proximal)
     q_d_seg = paper_transform_orientation(q_imu_distal,   cal_distal)
+    
+    # Table 1 of Hoegberg 2025: q_joint = q_proximal^-1 * q_distal
     if swap:
         q_joint = quat_mul(quat_conjugate(q_d_seg), q_p_seg)
     else:
         q_joint = quat_mul(quat_conjugate(q_p_seg), q_d_seg)
+        
     return paper_sagittal_angle_deg(q_joint)
 
 

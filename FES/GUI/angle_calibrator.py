@@ -491,7 +491,13 @@ class AngleCalibrator(QObject):
             n = min(len(q_d), len(g_d))
             if n < 50:
                 return False
-            q_PCA, ratio = paper_compute_q_PCA(g_d[:n], q_d[:n], cal['q_g'])
+                
+            try:
+                q_PCA, ratio = paper_compute_q_PCA(g_d[:n], q_d[:n], cal['q_g'])
+            except Exception as e:
+                self.error_signal.emit(f"PCA Math Error on {seg_name}: {e}")
+                return False
+                
             cal['pca_ratio'] = float(ratio)
 
             # Hard threshold: only commit q_PCA + q_0 (= activate paper path
