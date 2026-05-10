@@ -861,6 +861,7 @@ class AngleCalibrator(QObject):
                     hinge_axis=getattr(self, 'left_hip_hinge_axis', None),
                     cal_proximal=self._paper_cal.get('pelvis'),
                     cal_distal=self._paper_cal.get('left_thigh'),
+                    joint_type='hip',
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
@@ -900,6 +901,7 @@ class AngleCalibrator(QObject):
                     hinge_axis=getattr(self, 'left_ankle_hinge_axis', None),
                     cal_proximal=self._paper_cal.get('left_shank'),
                     cal_distal=self._paper_cal.get('left_foot'),
+                    joint_type='ankle',
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
@@ -927,6 +929,7 @@ class AngleCalibrator(QObject):
                     hinge_axis=getattr(self, 'right_hip_hinge_axis', None),
                     cal_proximal=self._paper_cal.get('pelvis'),
                     cal_distal=self._paper_cal.get('right_thigh'),
+                    joint_type='hip',
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
@@ -966,6 +969,7 @@ class AngleCalibrator(QObject):
                     hinge_axis=getattr(self, 'right_ankle_hinge_axis', None),
                     cal_proximal=self._paper_cal.get('right_shank'),
                     cal_distal=self._paper_cal.get('right_foot'),
+                    joint_type='ankle',
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
@@ -1687,6 +1691,7 @@ class AngleCalibrator(QObject):
         hinge_axis: np.ndarray = None,
         cal_proximal: dict = None,
         cal_distal:   dict = None,
+        joint_type: str = 'knee',
     ) -> np.ndarray:
         """Compute joint angles from pre-matched sample lists.
 
@@ -1732,12 +1737,6 @@ class AngleCalibrator(QObject):
             try:
                 if paper_ready:
                     # ── ReBAIT Exact 1:1 Math ──
-                    joint_type = 'knee'
-                    if 'hip' in name.lower() or 'pelvis' in name.lower():
-                        joint_type = 'hip'
-                    elif 'ankle' in name.lower() or 'foot' in name.lower():
-                        joint_type = 'ankle'
-                        
                     angle = rebait_joint_angle_deg(
                         q_prox, q_dist, cal_proximal, cal_distal, joint_type
                     )
