@@ -521,6 +521,38 @@ def extract_functional_angle(qs: np.ndarray, qf: np.ndarray, qs_ref: np.ndarray,
     return float(np.degrees(angle_rad))
 
 
+def extract_joint_angle_with_axis(
+    q_prox: np.ndarray,
+    q_dist: np.ndarray,
+    q_prox_ref: np.ndarray,
+    q_dist_ref: np.ndarray,
+    hinge_axis: np.ndarray,
+) -> float:
+    """Extract any joint angle (hip, knee, ankle) using swing-twist decomposition.
+
+    Generalised version of ``extract_functional_angle`` that works for any
+    joint whose hinge axis has been identified via ``identify_hinge_axis``
+    during a dynamic calibration phase.
+
+    The algorithm:
+      1. q_rel_ref = conj(q_prox_ref) * q_dist_ref   (relative orientation at neutral)
+      2. q_rel     = conj(q_prox)     * q_dist         (relative orientation now)
+      3. q_delta   = conj(q_rel_ref)  * q_rel           (change since neutral)
+      4. Swing-twist decomposition of q_delta around hinge_axis → sagittal angle
+
+    This isolates the 1-DOF rotation around the joint axis and discards
+    all other rotation components (ad/abduction, internal/external rotation),
+    exactly matching the paper's concept of sagittal-plane-only extraction.
+    """
+    q_rel_ref = quat_mul(quat_conjugate(q_prox_ref), q_dist_ref)
+    q_rel     = quat_mul(quat_conjugate(q_prox), q_dist)
+    q_delta   = quat_mul(quat_conjugate(q_rel_ref), q_rel)
+    if q_delta[0] < 0:
+        q_delta = -q_delta
+    angle_rad = twist_angle_around_axis(q_delta, hinge_axis)
+    return float(np.degrees(angle_rad))
+
+
 class ROM:
     def __init__(self, offset: float = 0.0, scale: float = 1.0):
         self.timestamp: float = 0.0
@@ -565,6 +597,33 @@ class ROM:
 
     def set_offset(self, offset: float) -> None:
         self.offset = offset
+
+    def set_joint_reference(self, q_prox_ref: np.ndarray, q_dist_ref: np.ndarray,
+                            hinge_axis: np.ndarray = None) -> None:
+        """Store calibration-pose quaternions and hinge axis for any joint.
+
+        After calling this, ``get_joint_angle`` will use swing-twist
+        decomposition around the identified hinge axis for sagittal-plane-only
+        angle extraction (identical approach for hip, knee, and ankle).
+        """
+        self.q_prox_ref = normalize(np.asarray(q_prox_ref, dtype=float))
+        self.q_dist_ref = normalize(np.asarray(q_dist_ref, dtype=float))
+        self.hinge_axis = hinge_axis
+
+    @staticmethod
+    def calculate_joint_angle_calibrated(
+        q_prox: np.ndarray,
+        q_dist: np.ndarray,
+        q_prox_ref: np.ndarray,
+        q_dist_ref: np.ndarray,
+        hinge_axis: np.ndarray,
+    ) -> float:
+        """Return joint angle using swing-twist decomposition around the hinge axis.
+
+        Works for any joint (hip, knee, ankle). Falls through to legacy
+        ``calculate_joint_angle`` if called without hinge_axis.
+        """
+        return extract_joint_angle_with_axis(q_prox, q_dist, q_prox_ref, q_dist_ref, hinge_axis)
 
     # ── Ankle methods (relative-quaternion approach) ──────────────────────────
     def set_ankle_reference(self, q_shank_ref: np.ndarray, q_foot_ref: np.ndarray, hinge_axis: np.ndarray = None) -> None:

@@ -1167,28 +1167,54 @@ class StimulationIMUs(StimulationBasic):
                        ankle_left:  float, ankle_right:  float,
                        ankle_left_qshank_ref  = None, ankle_left_qfoot_ref   = None,
                        ankle_right_qshank_ref = None, ankle_right_qfoot_ref  = None,
-                       ankle_left_hinge_axis  = None, ankle_right_hinge_axis = None) -> None:
+                       ankle_left_hinge_axis  = None, ankle_right_hinge_axis = None,
+                       knee_left_qthigh_ref  = None, knee_left_qshank_ref   = None,
+                       knee_right_qthigh_ref = None, knee_right_qshank_ref  = None,
+                       knee_left_hinge_axis  = None, knee_right_hinge_axis  = None,
+                       hip_left_qpelvis_ref  = None, hip_left_qthigh_ref    = None,
+                       hip_right_qpelvis_ref = None, hip_right_qthigh_ref   = None,
+                       hip_left_hinge_axis   = None, hip_right_hinge_axis   = None) -> None:
         """Hot-update the ROM calibration offsets while the test is running.
 
         Called whenever 'Calibrate Offsets' is pressed (even mid-test) so that
         the ROM objects immediately reflect the new neutral-pose offset without
         needing to restart the test.
 
-        When reference quaternions are provided, the ankle ROMs switch to the
-        stable relative-quaternion algorithm (set_ankle_reference), which is
-        more robust than numeric offset subtraction.
+        When reference quaternions are provided, the ROMs switch to the
+        stable calibrated path using swing-twist decomposition around the
+        identified hinge axis.
         """
-        self.left_knee_rom.set_offset(knee_left)
-        self.right_knee_rom.set_offset(knee_right)
+        # Knee
+        if knee_left_qthigh_ref is not None and knee_left_qshank_ref is not None:
+            self.left_knee_rom.set_joint_reference(knee_left_qthigh_ref, knee_left_qshank_ref, knee_left_hinge_axis)
+        else:
+            self.left_knee_rom.set_offset(knee_left)
+            
+        if knee_right_qthigh_ref is not None and knee_right_qshank_ref is not None:
+            self.right_knee_rom.set_joint_reference(knee_right_qthigh_ref, knee_right_qshank_ref, knee_right_hinge_axis)
+        else:
+            self.right_knee_rom.set_offset(knee_right)
+
         # Ankle: prefer reference-quaternion path
         if ankle_left_qshank_ref is not None and ankle_left_qfoot_ref is not None:
             self.left_ankle_rom.set_ankle_reference(ankle_left_qshank_ref, ankle_left_qfoot_ref, ankle_left_hinge_axis)
         else:
             self.left_ankle_rom.set_offset(ankle_left)
+            
         if ankle_right_qshank_ref is not None and ankle_right_qfoot_ref is not None:
             self.right_ankle_rom.set_ankle_reference(ankle_right_qshank_ref, ankle_right_qfoot_ref, ankle_right_hinge_axis)
         else:
             self.right_ankle_rom.set_offset(ankle_right)
+            
+        # Hip
+        if hasattr(self, 'left_hip_rom'):
+            if hip_left_qpelvis_ref is not None and hip_left_qthigh_ref is not None:
+                self.left_hip_rom.set_joint_reference(hip_left_qpelvis_ref, hip_left_qthigh_ref, hip_left_hinge_axis)
+            # Legacy hip offset not natively supported in Stimulator currently, but we update if needed
+            
+        if hasattr(self, 'right_hip_rom'):
+            if hip_right_qpelvis_ref is not None and hip_right_qthigh_ref is not None:
+                self.right_hip_rom.set_joint_reference(hip_right_qpelvis_ref, hip_right_qthigh_ref, hip_right_hinge_axis)
 
     def _iter_pairs(self):
         """

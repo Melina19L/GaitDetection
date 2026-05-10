@@ -6855,10 +6855,18 @@ class SetupMainWindow:
                 kl, kr = self.angle_calibrator.get_offset()
                 al, ar = self.angle_calibrator.get_ankle_offset()
                 l_qs, l_qf, r_qs, r_qf, l_ax, r_ax = self.angle_calibrator.get_ankle_reference()
+                l_kt, l_ks, r_kt, r_ks, l_kax, r_kax = self.angle_calibrator.get_knee_reference()
+                l_hp, l_ht, r_hp, r_ht, l_hax, r_hax = self.angle_calibrator.get_hip_reference()
                 stim.update_offsets(kl, kr, al, ar,
                                     ankle_left_qshank_ref=l_qs,  ankle_left_qfoot_ref=l_qf,
                                     ankle_right_qshank_ref=r_qs, ankle_right_qfoot_ref=r_qf,
-                                    ankle_left_hinge_axis=l_ax, ankle_right_hinge_axis=r_ax)
+                                    ankle_left_hinge_axis=l_ax, ankle_right_hinge_axis=r_ax,
+                                    knee_left_qthigh_ref=l_kt, knee_left_qshank_ref=l_ks,
+                                    knee_right_qthigh_ref=r_kt, knee_right_qshank_ref=r_ks,
+                                    knee_left_hinge_axis=l_kax, knee_right_hinge_axis=r_kax,
+                                    hip_left_qpelvis_ref=l_hp, hip_left_qthigh_ref=l_ht,
+                                    hip_right_qpelvis_ref=r_hp, hip_right_qthigh_ref=r_ht,
+                                    hip_left_hinge_axis=l_hax, hip_right_hinge_axis=r_hax)
                 self.imu_status_box.append(
                     '<span style="color:#2ecc71">✔ Offsets updated live in running test.</span>'
                 )

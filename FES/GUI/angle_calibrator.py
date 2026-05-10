@@ -7,7 +7,7 @@ from stimulator.closed_loop import (
     ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
-    identify_hinge_axis,
+    identify_hinge_axis, extract_joint_angle_with_axis,
 )
 import time
 from typing import Optional
@@ -93,6 +93,22 @@ class AngleCalibrator(QObject):
 
         self.left_ankle_hinge_axis = None
         self.right_ankle_hinge_axis = None
+
+        # Knee hinge axes + reference quaternions (from dynamic calibration)
+        self.left_knee_hinge_axis = None
+        self.right_knee_hinge_axis = None
+        self.left_knee_qthigh_ref = None
+        self.left_knee_qshank_ref = None
+        self.right_knee_qthigh_ref = None
+        self.right_knee_qshank_ref = None
+
+        # Hip hinge axes + reference quaternions (from dynamic calibration)
+        self.left_hip_hinge_axis = None
+        self.right_hip_hinge_axis = None
+        self.left_hip_qpelvis_ref = None
+        self.left_hip_qthigh_ref = None
+        self.right_hip_qpelvis_ref = None
+        self.right_hip_qthigh_ref = None
         
         # Raw data logging for debugging time-sync issues
         self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
@@ -348,9 +364,18 @@ class AngleCalibrator(QObject):
         self.calibration_done_signal.emit(banner)
 
     def ankle_functional_calibration(self):
-        """Functional calibration for the ankle joint. Requires user to do dorsi/plantarflexion for 5 seconds."""
+        """Dynamic functional calibration for ALL joints (hip, knee, ankle).
+
+        The user should walk normally for 5 seconds. The system records
+        quaternion data from all connected sensors and uses SVD to identify
+        the principal rotation (hinge) axis of each joint. This axis is then
+        used at runtime via swing-twist decomposition to extract only the
+        sagittal-plane angle, decoupling each joint from out-of-plane motion.
+
+        Based on the PCA/SVD approach from Donahue et al. (2025) / Seel et al. (2014).
+        """
         if not self.has_any_sensor():
-            self.error_signal.emit("Ankle Calibration failed: no sensors connected.")
+            self.error_signal.emit("Functional Calibration failed: no sensors connected.")
             return
 
         if self.calibration_step != CalibrationStep.READY:
@@ -362,8 +387,9 @@ class AngleCalibrator(QObject):
         
         self.diagnostic_signal.emit(
             '<p style="color:#3498db; font-weight:bold;">'
-            '&#128095; Ankle Functional Calibration&hellip;<br/>'
-            'Please repeatedly flex and extend your ankle (dorsiflexion/plantarflexion) for 5 seconds.</p>'
+            '&#128694; Full Functional Calibration&hellip;<br/>'
+            'Please <b>walk normally</b> for 5 seconds.<br/>'
+            'This identifies the rotation axes for hip, knee, and ankle.</p>'
         )
         QCoreApplication.processEvents()
         
@@ -376,69 +402,138 @@ class AngleCalibrator(QObject):
                 pass
                 
         import time
-        from stimulator.closed_loop import detect_most_vertical_axis, detect_most_horizontal_axis
         
         duration = 5.0
         start_t = time.time()
         
-        left_shank_qs = []
-        left_foot_qs = []
-        right_shank_qs = []
-        right_foot_qs = []
+        # Accumulate data from ALL sensors
+        buffers = {
+            'left_pelvis': [], 'left_thigh': [], 'left_shank': [], 'left_foot': [],
+            'right_pelvis': [], 'right_thigh': [], 'right_shank': [], 'right_foot': [],
+        }
+        
+        inlet_map = {}
+        if self.left_checkbox.isChecked():
+            if self.pelvis_inlet:    inlet_map['left_pelvis'] = self.pelvis_inlet
+            if self.left_thigh_inlet: inlet_map['left_thigh'] = self.left_thigh_inlet
+            if self.left_shank_inlet: inlet_map['left_shank'] = self.left_shank_inlet
+            if self.left_foot_inlet:  inlet_map['left_foot'] = self.left_foot_inlet
+        if self.right_checkbox.isChecked():
+            if self.pelvis_inlet:     inlet_map['right_pelvis'] = self.pelvis_inlet
+            if self.right_thigh_inlet: inlet_map['right_thigh'] = self.right_thigh_inlet
+            if self.right_shank_inlet: inlet_map['right_shank'] = self.right_shank_inlet
+            if self.right_foot_inlet:  inlet_map['right_foot'] = self.right_foot_inlet
         
         while time.time() - start_t < duration:
-            if self.left_checkbox.isChecked() and self.left_shank_inlet and self.left_foot_inlet:
-                qs_chunk, _ = self.left_shank_inlet.pull_chunk(timeout=0.0)
-                qf_chunk, _ = self.left_foot_inlet.pull_chunk(timeout=0.0)
-                if qs_chunk: left_shank_qs.extend(qs_chunk)
-                if qf_chunk: left_foot_qs.extend(qf_chunk)
-                
-            if self.right_checkbox.isChecked() and self.right_shank_inlet and self.right_foot_inlet:
-                qs_chunk, _ = self.right_shank_inlet.pull_chunk(timeout=0.0)
-                qf_chunk, _ = self.right_foot_inlet.pull_chunk(timeout=0.0)
-                if qs_chunk: right_shank_qs.extend(qs_chunk)
-                if qf_chunk: right_foot_qs.extend(qf_chunk)
-                
+            for key, inlet in inlet_map.items():
+                chunk, _ = inlet.pull_chunk(timeout=0.0)
+                if chunk:
+                    buffers[key].extend(chunk)
             QCoreApplication.processEvents()
             time.sleep(0.02)
+        
+        def _extract_quats(samples):
+            """Extract and normalize quaternions [w,x,y,z] from LSL samples."""
+            if not samples:
+                return None
+            arr = np.array([s[6:10] for s in samples], dtype=np.float64)
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms[norms < 1e-9] = 1.0
+            return arr / norms
+        
+        def _identify_axis(prox_samples, dist_samples, joint_name):
+            """Run SVD hinge axis identification for a joint pair.
+            Returns (hinge_axis, q_prox_ref, q_dist_ref) or (None, None, None).
+            """
+            q_prox = _extract_quats(prox_samples)
+            q_dist = _extract_quats(dist_samples)
+            if q_prox is None or q_dist is None:
+                return None, None, None
+            n_min = min(len(q_prox), len(q_dist))
+            if n_min < 50:
+                self.error_signal.emit(f"Not enough data for {joint_name} ({n_min} samples).")
+                return None, None, None
+            q_prox = q_prox[:n_min]
+            q_dist = q_dist[:n_min]
+            axis = identify_hinge_axis(q_prox, q_dist)
+            # Use the FIRST sample as reference (≈ start of walking = near neutral)
+            q_prox_ref = q_prox[0]
+            q_dist_ref = q_dist[0]
+            self.message_signal.emit(
+                f"{joint_name}: axis=[{axis[0]:+.3f}, {axis[1]:+.3f}, {axis[2]:+.3f}] "
+                f"({n_min} samples)"
+            )
+            return axis, q_prox_ref, q_dist_ref
+        
+        results = []
+        
+        # ── LEFT LEG ──
+        if self.left_checkbox.isChecked():
+            # Hip LEFT (pelvis → thigh)
+            ax, qp, qd = _identify_axis(
+                buffers['left_pelvis'], buffers['left_thigh'], 'Left Hip')
+            if ax is not None:
+                self.left_hip_hinge_axis = ax
+                self.left_hip_qpelvis_ref = qp
+                self.left_hip_qthigh_ref = qd
+                results.append('Left Hip ✓')
             
-        if self.left_checkbox.isChecked() and left_shank_qs and left_foot_qs:
-            n_min = min(len(left_shank_qs), len(left_foot_qs))
-            if n_min > 50:
-                qs_arr = np.array([s[6:10] for s in left_shank_qs[:n_min]], dtype=np.float64)
-                qf_arr = np.array([s[6:10] for s in left_foot_qs[:n_min]], dtype=np.float64)
-                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
-                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
-                
-                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
-                self.left_ankle_hinge_axis = hinge_axis
-                self.message_signal.emit(f"Left Ankle Functional Calib DONE.")
-            else:
-                self.error_signal.emit("Not enough data collected for Left Ankle.")
-                
-        if self.right_checkbox.isChecked() and right_shank_qs and right_foot_qs:
-            n_min = min(len(right_shank_qs), len(right_foot_qs))
-            if n_min > 50:
-                qs_arr = np.array([s[6:10] for s in right_shank_qs[:n_min]], dtype=np.float64)
-                qf_arr = np.array([s[6:10] for s in right_foot_qs[:n_min]], dtype=np.float64)
-                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
-                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
-                
-                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
-                if hinge_axis[1] < 0: # Ensure consistent Y direction for right leg
-                    hinge_axis *= -1
-                self.right_ankle_hinge_axis = hinge_axis
-                self.message_signal.emit(f"Right Ankle Functional Calib DONE.")
-            else:
-                self.error_signal.emit("Not enough data collected for Right Ankle.")
+            # Knee LEFT (thigh → shank)
+            ax, qp, qd = _identify_axis(
+                buffers['left_thigh'], buffers['left_shank'], 'Left Knee')
+            if ax is not None:
+                self.left_knee_hinge_axis = ax
+                self.left_knee_qthigh_ref = qp
+                self.left_knee_qshank_ref = qd
+                results.append('Left Knee ✓')
+            
+            # Ankle LEFT (shank → foot)
+            ax, qp, qd = _identify_axis(
+                buffers['left_shank'], buffers['left_foot'], 'Left Ankle')
+            if ax is not None:
+                self.left_ankle_hinge_axis = ax
+                # Also update ankle reference quats for the ankle-specific path
+                self.left_ankle_qshank_ref = qp
+                self.left_ankle_qfoot_ref = qd
+                results.append('Left Ankle ✓')
+        
+        # ── RIGHT LEG ──
+        if self.right_checkbox.isChecked():
+            # Hip RIGHT (pelvis → thigh)
+            ax, qp, qd = _identify_axis(
+                buffers['right_pelvis'], buffers['right_thigh'], 'Right Hip')
+            if ax is not None:
+                self.right_hip_hinge_axis = ax
+                self.right_hip_qpelvis_ref = qp
+                self.right_hip_qthigh_ref = qd
+                results.append('Right Hip ✓')
+            
+            # Knee RIGHT (thigh → shank)
+            ax, qp, qd = _identify_axis(
+                buffers['right_thigh'], buffers['right_shank'], 'Right Knee')
+            if ax is not None:
+                self.right_knee_hinge_axis = ax
+                self.right_knee_qthigh_ref = qp
+                self.right_knee_qshank_ref = qd
+                results.append('Right Knee ✓')
+            
+            # Ankle RIGHT (shank → foot)
+            ax, qp, qd = _identify_axis(
+                buffers['right_shank'], buffers['right_foot'], 'Right Ankle')
+            if ax is not None:
+                self.right_ankle_hinge_axis = ax
+                self.right_ankle_qshank_ref = qp
+                self.right_ankle_qfoot_ref = qd
+                results.append('Right Ankle ✓')
         
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
         
+        summary = ', '.join(results) if results else 'No joints calibrated'
         self.diagnostic_signal.emit(
-            '<p style="color:#2ecc71; font-weight:bold;">'
-            '&#10004; Ankle Functional Calibration Complete.</p>'
+            f'<p style="color:#2ecc71; font-weight:bold;">'
+            f'&#10004; Functional Calibration Complete: {summary}</p>'
         )
 
 
@@ -474,6 +569,30 @@ class AngleCalibrator(QObject):
         left_axis = getattr(self, 'left_ankle_hinge_axis', None)
         right_axis = getattr(self, 'right_ankle_hinge_axis', None)
         return left_qs, left_qf, right_qs, right_qf, left_axis, right_axis
+
+    def get_knee_reference(self):
+        """Return the calibration quaternions (q_thigh_ref, q_shank_ref) and
+        hinge axes for each knee.
+        """
+        left_qt  = getattr(self, 'left_knee_qthigh_ref',  None)
+        left_qs  = getattr(self, 'left_knee_qshank_ref',   None)
+        right_qt = getattr(self, 'right_knee_qthigh_ref', None)
+        right_qs = getattr(self, 'right_knee_qshank_ref',  None)
+        left_axis = getattr(self, 'left_knee_hinge_axis', None)
+        right_axis = getattr(self, 'right_knee_hinge_axis', None)
+        return left_qt, left_qs, right_qt, right_qs, left_axis, right_axis
+
+    def get_hip_reference(self):
+        """Return the calibration quaternions (q_pelvis_ref, q_thigh_ref) and
+        hinge axes for each hip.
+        """
+        left_qp  = getattr(self, 'left_hip_qpelvis_ref',  None)
+        left_qt  = getattr(self, 'left_hip_qthigh_ref',   None)
+        right_qp = getattr(self, 'right_hip_qpelvis_ref', None)
+        right_qt = getattr(self, 'right_hip_qthigh_ref',  None)
+        left_axis = getattr(self, 'left_hip_hinge_axis', None)
+        right_axis = getattr(self, 'right_hip_hinge_axis', None)
+        return left_qp, left_qt, right_qp, right_qt, left_axis, right_axis
 
     def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the knee angle data for both legs.
@@ -653,6 +772,9 @@ class AngleCalibrator(QObject):
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
                     self.left_hip_offset, self._diag["pelvis"],
+                    q_proximal_ref=getattr(self, 'left_hip_qpelvis_ref', None),
+                    q_distal_ref=getattr(self, 'left_hip_qthigh_ref', None),
+                    hinge_axis=getattr(self, 'left_hip_hinge_axis', None),
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
@@ -666,6 +788,9 @@ class AngleCalibrator(QObject):
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
                     self.left_angle_offset, self._diag["left_thigh"],
+                    q_proximal_ref=getattr(self, 'left_knee_qthigh_ref', None),
+                    q_distal_ref=getattr(self, 'left_knee_qshank_ref', None),
+                    hinge_axis=getattr(self, 'left_knee_hinge_axis', None),
                 )
                 self.left_angle_data = np.append(self.left_angle_data, angles)
                 self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
@@ -707,6 +832,9 @@ class AngleCalibrator(QObject):
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
                     self.right_hip_offset, self._diag["pelvis"],
+                    q_proximal_ref=getattr(self, 'right_hip_qpelvis_ref', None),
+                    q_distal_ref=getattr(self, 'right_hip_qthigh_ref', None),
+                    hinge_axis=getattr(self, 'right_hip_hinge_axis', None),
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
@@ -720,6 +848,9 @@ class AngleCalibrator(QObject):
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
                     self.right_angle_offset, self._diag["right_thigh"],
+                    q_proximal_ref=getattr(self, 'right_knee_qthigh_ref', None),
+                    q_distal_ref=getattr(self, 'right_knee_qshank_ref', None),
+                    hinge_axis=getattr(self, 'right_knee_hinge_axis', None),
                 )
                 self.right_angle_data = np.append(self.right_angle_data, angles)
                 self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
@@ -1404,24 +1535,30 @@ class AngleCalibrator(QObject):
             q_prox = np.array(samples_proximal[i][6:10], dtype=np.float64)
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
-                if is_ankle:
-                    # Use signed_ankle_angle (twist decomposition around the
-                    # foot's ML axis) when reference quaternions are
-                    # available. This isolates pure dorsi/plantarflexion,
-                    # filtering out knee flexion and yaw contamination.
-                    # Falls back to legacy unsigned algorithm if refs are None.
+                if hinge_axis is not None and q_proximal_ref is not None and q_distal_ref is not None:
+                    # ── Calibrated path (all joints) ──
+                    # Uses swing-twist decomposition around the SVD-identified
+                    # hinge axis. This extracts only the sagittal-plane rotation,
+                    # completely decoupling each joint from out-of-plane motion.
+                    angle = extract_joint_angle_with_axis(
+                        q_prox, q_dist,
+                        q_proximal_ref, q_distal_ref,
+                        hinge_axis,
+                    )
+                    if is_ankle:
+                        ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
+                        angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
+                elif is_ankle:
+                    # ── Ankle fallback (no dynamic calibration) ──
                     angle = ROM.calculate_ankle_angle(
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
                         q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
-                        hinge_axis=hinge_axis,
                     )
-                    # Clamp to physiological range to filter magnetometer spikes.
-                    # Normal gait: ~-20° (plantarflexion) to ~+30° (dorsiflexion).
-                    # Use a generous window to avoid cutting real dynamic peaks.
                     ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 else:
+                    # ── Legacy path (knee/hip without dynamic calibration) ──
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))
             except Exception:
