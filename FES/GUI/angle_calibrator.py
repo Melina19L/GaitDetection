@@ -406,23 +406,31 @@ class AngleCalibrator(QObject):
         
         self.diagnostic_signal.emit(
             '<p style="color:#3498db; font-weight:bold;">'
-            '&#128694; Full Functional Calibration&hellip;<br/>'
-            'Please <b>walk normally</b> for 5 seconds.<br/>'
-            'This identifies the rotation axes for hip, knee, and ankle.</p>'
+            '&#128694; Full Functional Calibration (10 s)&hellip;<br/>'
+            '<b>Do all of these in any order:</b><br/>'
+            '&nbsp;&nbsp;• 4-5 <b>toe-touches</b> (rise on toes / heel raises) — excites the ankle axis<br/>'
+            '&nbsp;&nbsp;• 4-5 <b>steps in place</b> (lift each knee high) — excites knee + hip<br/>'
+            '&nbsp;&nbsp;• 2-3 slow <b>trunk bows</b> (lean forward and back at the waist) — excites pelvis<br/>'
+            'PCA needs strong, clean motion in each anatomical axis.</p>'
         )
         QCoreApplication.processEvents()
-        
+
         self.timer.stop()
-        
+
         for _name, inlet, _key in self._connected_inlets():
             try:
                 inlet.flush()
             except Exception:
                 pass
-                
+
         import time
-        
-        duration = 5.0
+
+        # 10 s gives the user enough time to do the 3-movement protocol the
+        # paper recommends ("5-10 toe-touches and steady-state walking" —
+        # Hoegberg 2025 §2.3.3) plus the trunk bows we add to excite the
+        # pelvis sagittal axis (which pure walking doesn't excite enough,
+        # so its PCA eig-ratio stays below 2.0).
+        duration = 10.0
         start_t = time.time()
         
         # Accumulate data from ALL sensors
@@ -488,9 +496,21 @@ class AngleCalibrator(QObject):
             cal['q_PCA'] = q_PCA
             cal['q_0']   = q_0
             cal['pca_ratio'] = float(ratio)
+            # The PCA always returns SOMETHING, so the calibration is always
+            # stored — the eig-ratio is just a quality indicator.
+            # ≥ 2.0 → clean hinge-like motion, the medio-lateral axis is well
+            #         identified (typical for shank/thigh/foot during walking).
+            # < 2.0 → multi-axis motion or weak signal (typical for the pelvis,
+            #         which rotates more multi-axially during gait). The cal
+            #         is still used; results just have slightly more cross-talk.
+            if ratio >= 2.0:
+                tag = "clean ✓"
+            elif ratio >= 1.3:
+                tag = "acceptable (still used)"
+            else:
+                tag = "very weak — repeat with stronger hip flexion / trunk bows"
             self.message_signal.emit(
-                f"[paper] {seg_name}: PCA eig-ratio {ratio:.2f} "
-                f"({'OK' if ratio >= 2.0 else 'WEAK — walk longer or do toe-touches'})"
+                f"[paper] {seg_name}: PCA eig-ratio {ratio:.2f} ({tag}, n={n})"
             )
             return True
 
@@ -1704,6 +1724,13 @@ class AngleCalibrator(QObject):
                     angle = paper_joint_angle_deg(
                         q_prox, q_dist, cal_proximal, cal_distal,
                     )
+                    if is_ankle:
+                        # Anatomic ankle ROM is ~-30° dorsi / +50° plantar.
+                        # Clamp to ±50° so a transient sensor-fusion glitch
+                        # (rare BLE packet loss → stale q) can't spike the
+                        # plot to absurd values during the live test.
+                        ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
+                        angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 elif hinge_axis is not None and q_proximal_ref is not None and q_distal_ref is not None:
                     # ── Legacy SVD swing-twist fallback ──
                     angle = extract_joint_angle_with_axis(
