@@ -1417,9 +1417,9 @@ class AngleCalibrator(QObject):
                         hinge_axis=hinge_axis,
                     )
                     # Clamp to physiological range to filter magnetometer spikes.
-                    # Normal ankle: -10° (plantarflexion) to +20° (dorsiflexion).
-                    # We use a wider window to avoid cutting real dynamic peaks.
-                    ANKLE_MIN, ANKLE_MAX = -30.0, 40.0
+                    # Normal gait: ~-20° (plantarflexion) to ~+30° (dorsiflexion).
+                    # Use a generous window to avoid cutting real dynamic peaks.
+                    ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
