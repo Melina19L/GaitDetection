@@ -7,6 +7,7 @@ from stimulator.closed_loop import (
     ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
+    identify_hinge_axis,
 )
 import time
 from typing import Optional
@@ -19,6 +20,7 @@ class CalibrationStep(Enum):
     READY = 0
     NEUTRAL_POSE = 1
     COLLECT_DATA = 2
+    ANKLE_CALIBRATION = 3
 
 
 class SIDE(Enum):
@@ -88,6 +90,9 @@ class AngleCalibrator(QObject):
         self.left_ankle_foot_axis   = 'X'
         self.right_ankle_shank_axis = 'X'
         self.right_ankle_foot_axis  = 'X'
+
+        self.left_ankle_hinge_axis = None
+        self.right_ankle_hinge_axis = None
         
         # Raw data logging for debugging time-sync issues
         self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
@@ -342,6 +347,100 @@ class AngleCalibrator(QObject):
         )
         self.calibration_done_signal.emit(banner)
 
+    def ankle_functional_calibration(self):
+        """Functional calibration for the ankle joint. Requires user to do dorsi/plantarflexion for 5 seconds."""
+        if not self.has_any_sensor():
+            self.error_signal.emit("Ankle Calibration failed: no sensors connected.")
+            return
+
+        if self.calibration_step != CalibrationStep.READY:
+            self.message_signal.emit("System is busy, please wait...")
+            return
+
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
+        
+        self.diagnostic_signal.emit(
+            '<p style="color:#3498db; font-weight:bold;">'
+            '&#128095; Ankle Functional Calibration&hellip;<br/>'
+            'Please repeatedly flex and extend your ankle (dorsiflexion/plantarflexion) for 5 seconds.</p>'
+        )
+        QCoreApplication.processEvents()
+        
+        self.timer.stop()
+        
+        for _name, inlet, _key in self._connected_inlets():
+            try:
+                inlet.flush()
+            except Exception:
+                pass
+                
+        import time
+        from stimulator.closed_loop import detect_most_vertical_axis, detect_most_horizontal_axis
+        
+        duration = 5.0
+        start_t = time.time()
+        
+        left_shank_qs = []
+        left_foot_qs = []
+        right_shank_qs = []
+        right_foot_qs = []
+        
+        while time.time() - start_t < duration:
+            if self.left_checkbox.isChecked() and self.left_shank_inlet and self.left_foot_inlet:
+                qs_chunk, _ = self.left_shank_inlet.pull_chunk(timeout=0.0)
+                qf_chunk, _ = self.left_foot_inlet.pull_chunk(timeout=0.0)
+                if qs_chunk: left_shank_qs.extend(qs_chunk)
+                if qf_chunk: left_foot_qs.extend(qf_chunk)
+                
+            if self.right_checkbox.isChecked() and self.right_shank_inlet and self.right_foot_inlet:
+                qs_chunk, _ = self.right_shank_inlet.pull_chunk(timeout=0.0)
+                qf_chunk, _ = self.right_foot_inlet.pull_chunk(timeout=0.0)
+                if qs_chunk: right_shank_qs.extend(qs_chunk)
+                if qf_chunk: right_foot_qs.extend(qf_chunk)
+                
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+            
+        if self.left_checkbox.isChecked() and left_shank_qs and left_foot_qs:
+            n_min = min(len(left_shank_qs), len(left_foot_qs))
+            if n_min > 50:
+                qs_arr = np.array([s[6:10] for s in left_shank_qs[:n_min]], dtype=np.float64)
+                qf_arr = np.array([s[6:10] for s in left_foot_qs[:n_min]], dtype=np.float64)
+                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
+                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
+                
+                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
+                self.left_ankle_hinge_axis = hinge_axis
+                self.message_signal.emit(f"Left Ankle Functional Calib DONE.")
+            else:
+                self.error_signal.emit("Not enough data collected for Left Ankle.")
+                
+        if self.right_checkbox.isChecked() and right_shank_qs and right_foot_qs:
+            n_min = min(len(right_shank_qs), len(right_foot_qs))
+            if n_min > 50:
+                qs_arr = np.array([s[6:10] for s in right_shank_qs[:n_min]], dtype=np.float64)
+                qf_arr = np.array([s[6:10] for s in right_foot_qs[:n_min]], dtype=np.float64)
+                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
+                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
+                
+                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
+                if hinge_axis[1] < 0: # Ensure consistent Y direction for right leg
+                    hinge_axis *= -1
+                self.right_ankle_hinge_axis = hinge_axis
+                self.message_signal.emit(f"Right Ankle Functional Calib DONE.")
+            else:
+                self.error_signal.emit("Not enough data collected for Right Ankle.")
+        
+        self.timer.start()
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        
+        self.diagnostic_signal.emit(
+            '<p style="color:#2ecc71; font-weight:bold;">'
+            '&#10004; Ankle Functional Calibration Complete.</p>'
+        )
+
 
     def get_offset(self) -> tuple[float, float]:
         """Return the knee angle offsets for both legs.
@@ -360,19 +459,21 @@ class AngleCalibrator(QObject):
         return self.left_ankle_offset, self.right_ankle_offset
 
     def get_ankle_reference(self):
-        """Return the calibration quaternions (q_shank_ref, q_foot_ref) for each leg.
+        """Return the calibration quaternions (q_shank_ref, q_foot_ref) and
+        hinge axes for each leg.
 
         Used to pass the reference quaternions to ROM.set_ankle_reference() so that
         the stable relative-quaternion ankle angle algorithm can be used at runtime.
 
-        :return: (left_qs, left_qf, right_qs, right_qf) or (None, None, None, None)
-                 when no ankle calibration has been performed yet.
+        :return: (left_qs, left_qf, right_qs, right_qf, left_axis, right_axis)
         """
         left_qs  = getattr(self, 'left_ankle_qshank_ref',  None)
         left_qf  = getattr(self, 'left_ankle_qfoot_ref',   None)
         right_qs = getattr(self, 'right_ankle_qshank_ref', None)
         right_qf = getattr(self, 'right_ankle_qfoot_ref',  None)
-        return left_qs, left_qf, right_qs, right_qf
+        left_axis = getattr(self, 'left_ankle_hinge_axis', None)
+        right_axis = getattr(self, 'right_ankle_hinge_axis', None)
+        return left_qs, left_qf, right_qs, right_qf, left_axis, right_axis
 
     def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the knee angle data for both legs.
@@ -583,6 +684,7 @@ class AngleCalibrator(QObject):
                     distal_axis=self.left_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
+                    hinge_axis=getattr(self, 'left_ankle_hinge_axis', None),
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
@@ -636,6 +738,7 @@ class AngleCalibrator(QObject):
                     distal_axis=self.right_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
+                    hinge_axis=getattr(self, 'right_ankle_hinge_axis', None),
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
@@ -1274,6 +1377,7 @@ class AngleCalibrator(QObject):
         distal_axis:   str = 'X',
         q_proximal_ref: np.ndarray = None,
         q_distal_ref:   np.ndarray = None,
+        hinge_axis: np.ndarray = None,
     ) -> np.ndarray:
         """Compute joint angles from pre-matched sample lists.
         
@@ -1310,6 +1414,7 @@ class AngleCalibrator(QObject):
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
                         q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
+                        hinge_axis=hinge_axis,
                     )
                     # Clamp to physiological range to filter magnetometer spikes.
                     # Normal ankle: -10° (plantarflexion) to +20° (dorsiflexion).
