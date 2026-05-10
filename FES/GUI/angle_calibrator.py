@@ -443,87 +443,71 @@ class AngleCalibrator(QObject):
         
         def _identify_axis(prox_samples, dist_samples, joint_name):
             """Run SVD hinge axis identification for a joint pair.
-            Returns (hinge_axis, q_prox_ref, q_dist_ref) or (None, None, None).
+            Returns hinge_axis or None.
             """
             q_prox = _extract_quats(prox_samples)
             q_dist = _extract_quats(dist_samples)
             if q_prox is None or q_dist is None:
-                return None, None, None
+                return None
             n_min = min(len(q_prox), len(q_dist))
             if n_min < 50:
                 self.error_signal.emit(f"Not enough data for {joint_name} ({n_min} samples).")
-                return None, None, None
+                return None
             q_prox = q_prox[:n_min]
             q_dist = q_dist[:n_min]
             axis = identify_hinge_axis(q_prox, q_dist)
-            # Use the FIRST sample as reference (≈ start of walking = near neutral)
-            q_prox_ref = q_prox[0]
-            q_dist_ref = q_dist[0]
             self.message_signal.emit(
                 f"{joint_name}: axis=[{axis[0]:+.3f}, {axis[1]:+.3f}, {axis[2]:+.3f}] "
                 f"({n_min} samples)"
             )
-            return axis, q_prox_ref, q_dist_ref
+            return axis
         
         results = []
         
         # ── LEFT LEG ──
         if self.left_checkbox.isChecked():
             # Hip LEFT (pelvis → thigh)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['left_pelvis'], buffers['left_thigh'], 'Left Hip')
             if ax is not None:
                 self.left_hip_hinge_axis = ax
-                self.left_hip_qpelvis_ref = qp
-                self.left_hip_qthigh_ref = qd
                 results.append('Left Hip ✓')
             
             # Knee LEFT (thigh → shank)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['left_thigh'], buffers['left_shank'], 'Left Knee')
             if ax is not None:
                 self.left_knee_hinge_axis = ax
-                self.left_knee_qthigh_ref = qp
-                self.left_knee_qshank_ref = qd
                 results.append('Left Knee ✓')
             
             # Ankle LEFT (shank → foot)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['left_shank'], buffers['left_foot'], 'Left Ankle')
             if ax is not None:
                 self.left_ankle_hinge_axis = ax
-                # Also update ankle reference quats for the ankle-specific path
-                self.left_ankle_qshank_ref = qp
-                self.left_ankle_qfoot_ref = qd
                 results.append('Left Ankle ✓')
         
         # ── RIGHT LEG ──
         if self.right_checkbox.isChecked():
             # Hip RIGHT (pelvis → thigh)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['right_pelvis'], buffers['right_thigh'], 'Right Hip')
             if ax is not None:
                 self.right_hip_hinge_axis = ax
-                self.right_hip_qpelvis_ref = qp
-                self.right_hip_qthigh_ref = qd
                 results.append('Right Hip ✓')
             
             # Knee RIGHT (thigh → shank)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['right_thigh'], buffers['right_shank'], 'Right Knee')
             if ax is not None:
                 self.right_knee_hinge_axis = ax
-                self.right_knee_qthigh_ref = qp
-                self.right_knee_qshank_ref = qd
                 results.append('Right Knee ✓')
             
             # Ankle RIGHT (shank → foot)
-            ax, qp, qd = _identify_axis(
+            ax = _identify_axis(
                 buffers['right_shank'], buffers['right_foot'], 'Right Ankle')
             if ax is not None:
                 self.right_ankle_hinge_axis = ax
-                self.right_ankle_qshank_ref = qp
-                self.right_ankle_qfoot_ref = qd
                 results.append('Right Ankle ✓')
         
         self.timer.start()
