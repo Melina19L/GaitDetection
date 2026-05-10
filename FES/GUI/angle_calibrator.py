@@ -13,7 +13,7 @@ from stimulator.closed_loop import (
     paper_compute_q_g,
     paper_compute_q_PCA,
     paper_finalize_q0,
-    paper_joint_angle_deg,
+    rebait_joint_angle_deg,
 )
 import time
 from typing import Optional
@@ -1731,9 +1731,15 @@ class AngleCalibrator(QObject):
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
                 if paper_ready:
-                    # ── Paper algorithm: ISB-aligned segment frames + Eq. 11 ──
-                    angle = paper_joint_angle_deg(
-                        q_prox, q_dist, cal_proximal, cal_distal,
+                    # ── ReBAIT Exact 1:1 Math ──
+                    joint_type = 'knee'
+                    if 'hip' in name.lower() or 'pelvis' in name.lower():
+                        joint_type = 'hip'
+                    elif 'ankle' in name.lower() or 'foot' in name.lower():
+                        joint_type = 'ankle'
+                        
+                    angle = rebait_joint_angle_deg(
+                        q_prox, q_dist, cal_proximal, cal_distal, joint_type
                     )
                     if is_ankle:
                         # Anatomic ankle ROM is ~-30° dorsi / +50° plantar.

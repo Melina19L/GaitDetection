@@ -182,6 +182,24 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
         ω_g[i] = _rotate_vec_batch(q_g, ω_IG[i])
 
     # PCA via covariance eigendecomp
+def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
+                         q_imu_dynamic: np.ndarray,
+                         q_g: np.ndarray) -> tuple[np.ndarray, float]:
+    g = np.asarray(gyro_dynamic_local, dtype=float)
+    qd = np.asarray(q_imu_dynamic, dtype=float)
+    if g.ndim != 2 or g.shape[1] != 3 or g.shape[0] < 50 or g.shape[0] != qd.shape[0]:
+        return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+
+    # ω in I_G : rotate per-sample by q_imu
+    ω_IG = np.empty_like(g)
+    for i in range(len(g)):
+        ω_IG[i] = _rotate_vec_batch(qd[i], g[i])
+    # ω in gravity-aligned frame
+    ω_g = np.empty_like(ω_IG)
+    for i in range(len(ω_IG)):
+        ω_g[i] = _rotate_vec_batch(q_g, ω_IG[i])
+
+    # PCA via covariance eigendecomp (identical to PCA(n_components=1).fit)
     try:
         cov = np.cov(ω_g.T)
         if np.isnan(cov).any() or np.isinf(cov).any():
@@ -190,38 +208,32 @@ def paper_compute_q_PCA(gyro_dynamic_local: np.ndarray,
     except Exception:
         return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
         
-    e_PCA = eigvecs[:, -1]
+    z_pca = eigvecs[:, -1]
     eig_ratio = float(eigvals[-1] / (eigvals[-2] + 1e-12))
 
-    y_component = float(e_PCA[1])
-    e_PCA = np.array([e_PCA[0], 0.0, e_PCA[2]])
-    nrm = float(np.linalg.norm(e_PCA))
+    # EXACT 1:1 CLONE OF ReBAIT DataCollector.py:
+    # rot_ax = np.cross(z_pca,[0,0,1])
+    # theta = np.arccos(np.dot(z_pca,[0,0,1]))
+    # q_pca = quaternion.as_quat_array([np.cos(theta/2),0,np.sin(theta/2)*np.sign(rot_ax[1]),0])
+    rot_ax = np.cross(z_pca, np.array([0.0, 0.0, 1.0]))
+    theta = float(np.arccos(np.clip(np.dot(z_pca, np.array([0.0, 0.0, 1.0])), -1.0, 1.0)))
+    sgn_y = 1.0 if rot_ax[1] >= 0 else -1.0
+    q_PCA = np.array([np.cos(theta/2), 0.0, np.sin(theta/2) * sgn_y, 0.0])
+    nrm = float(np.linalg.norm(q_PCA))
     if nrm < 1e-9:
         return np.array([1.0, 0.0, 0.0, 0.0]), 0.0
-    e_PCA = e_PCA / nrm
-    if abs(y_component) > 0.5:
-        eig_ratio = min(eig_ratio, 1.0)
+    q_PCA = q_PCA / nrm
 
-    e_1 = np.array([0.0, 0.0, 1.0])
-    cos_t = float(np.clip(e_PCA @ e_1, -1.0, 1.0))
-    cross = np.cross(e_PCA, e_1)
-    n = np.linalg.norm(cross)
-    if n < 1e-9:
-        nh, theta = np.array([0.0, 1.0, 0.0]), 0.0 if cos_t > 0 else np.pi
-    else:
-        nh = cross / n
-        theta = float(np.arccos(cos_t))
-        if nh[1] < 0:
-            nh = -nh
-            theta = -theta
-    q_PCA = _quat_from_axis_angle(nh, theta)
-
+    # ReBAIT: w_world = quaternion.rotate_vectors(q_pca, w_world)
     ω_W = np.empty_like(ω_g)
     for i in range(len(ω_g)):
         ω_W[i] = _rotate_vec_batch(q_PCA, ω_g[i])
-    if ω_W[:, 2].max() > abs(ω_W[:, 2].min()):
-        q_PCA = quat_mul(_quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), np.pi),
-                         q_PCA)
+        
+    # ReBAIT: if max(w_world[:,2]) > -min(w_world[:,2]):
+    #             q_f = quaternion.as_quat_array([0,0,1,0]) * q_f
+    if ω_W[:, 2].max() > -ω_W[:, 2].min():
+        # Pre-multiplying by [0,0,1,0] rotates exactly around Y by 180 deg
+        q_PCA = quat_mul(np.array([0.0, 0.0, 1.0, 0.0]), q_PCA)
 
     return q_PCA, eig_ratio
 
@@ -247,19 +259,27 @@ def paper_sagittal_angle_deg(q_joint: np.ndarray) -> float:
     return float(np.degrees(2.0 * np.arccos(np.clip(q[0] / denom, -1.0, 1.0)) * sgn))
 
 
-def paper_joint_angle_deg(q_imu_proximal: np.ndarray,
+def rebait_joint_angle_deg(q_imu_proximal: np.ndarray,
                            q_imu_distal: np.ndarray,
                            cal_proximal: dict,
                            cal_distal: dict,
-                           swap: bool = False) -> float:
-    q_p_seg = paper_transform_orientation(q_imu_proximal, cal_proximal)
-    q_d_seg = paper_transform_orientation(q_imu_distal,   cal_distal)
+                           joint_type: str) -> float:
+    """EXACT 1:1 clone of the hardcoded DataCollector.py combinations."""
+    F_prox = paper_transform_orientation(q_imu_proximal, cal_proximal)
+    F_dist = paper_transform_orientation(q_imu_distal,   cal_distal)
     
-    # Table 1 of Hoegberg 2025: q_joint = q_proximal^-1 * q_distal
-    if swap:
-        q_joint = quat_mul(quat_conjugate(q_d_seg), q_p_seg)
+    if joint_type == 'hip':
+        # ReBAIT: q_pv_t.conj() * q_th_t = F_pv.conj() * F_th.conj()
+        q_joint = quat_mul(quat_conjugate(F_prox), quat_conjugate(F_dist))
+    elif joint_type == 'knee':
+        # ReBAIT: q_sh_t.conj() * q_th_t = F_sh * F_th.conj()
+        q_joint = quat_mul(F_dist, quat_conjugate(F_prox))
+    elif joint_type == 'ankle':
+        # ReBAIT: q_sh_t.conj() * q_ft_t = F_sh * F_ft
+        q_joint = quat_mul(F_prox, F_dist)
     else:
-        q_joint = quat_mul(quat_conjugate(q_p_seg), q_d_seg)
+        # Fallback mathematically sound default
+        q_joint = quat_mul(quat_conjugate(F_prox), F_dist)
         
     return paper_sagittal_angle_deg(q_joint)
 
