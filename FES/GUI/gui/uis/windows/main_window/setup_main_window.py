@@ -6392,7 +6392,7 @@ class SetupMainWindow:
         self.hip_extension_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-30, 30), value=10,
+            value_range=(-30, 30), value=0,
         )
         self.hip_flexion_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
@@ -6402,7 +6402,7 @@ class SetupMainWindow:
         self.hip_extension_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-30, 30), value=10,
+            value_range=(-30, 30), value=0,
         )
         self.hip_flexion_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
