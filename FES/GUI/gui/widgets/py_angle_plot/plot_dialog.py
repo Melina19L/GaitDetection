@@ -37,9 +37,12 @@ class PlotDialog(QDialog):
         bg = themes["app_color"]["bg_one"]
         self.setStyleSheet(f"background-color: {bg};")
 
-        # ── Reset button ──
-        # Setup page is preview-only: data persistence happens at end of test, not here.
+        # ── Reset + Save buttons ──
         self.reset_btn = QPushButton("Reset Graph")
+        # Manual snapshot of the current plot buffer — lets the user grab a
+        # single clean gait cycle for offline analysis without waiting for an
+        # entire test run to finish.
+        self.save_btn = QPushButton("Save Data")
 
         btn_style = f"""
             QPushButton {{
@@ -57,6 +60,12 @@ class PlotDialog(QDialog):
         """
         self.reset_btn.setStyleSheet(btn_style)
         self.reset_btn.setMaximumWidth(200)
+        self.save_btn.setStyleSheet(btn_style)
+        self.save_btn.setMaximumWidth(200)
+        self.save_btn.setToolTip(
+            "Save the current plot data (angles + timestamps + offsets) to a .pkl "
+            "file. Useful for analysing a single gait cycle offline."
+        )
 
         btn_container = QWidget()
         btn_layout = QHBoxLayout(btn_container)
@@ -64,6 +73,7 @@ class PlotDialog(QDialog):
         btn_layout.setSpacing(20)
         btn_layout.addStretch(1)
         btn_layout.addWidget(self.reset_btn)
+        btn_layout.addWidget(self.save_btn)
         btn_layout.addStretch(1)
         btn_container.setMaximumHeight(40)
         layout.addWidget(btn_container)
@@ -202,6 +212,7 @@ class PlotDialog(QDialog):
 
         # ── Button wiring ──
         self.reset_btn.clicked.connect(self._reset)
+        self.save_btn.clicked.connect(self._save)
 
     @staticmethod
     def _fmt_angle(val) -> str:
@@ -260,6 +271,41 @@ class PlotDialog(QDialog):
         # Reset session timestamp in calibrator to align with visually reset data
         self.calibrator._session_start = __import__('time').time()
         self.timer.start()
+
+    def _save(self):
+        """Dump the current plot buffer (knee/ankle/hip angles + timestamps +
+        offsets) to a .pkl file chosen via a save-file dialog.
+
+        Lets the user grab a clean single gait cycle for offline analysis
+        without having to run a full test. Same format as the post-test
+        auto-save (``calibrator.save_data``), so existing analysis scripts
+        work unchanged.
+        """
+        import os
+        from datetime import datetime
+        default_name = f"plot_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+        default_dir  = os.path.expanduser("~/Desktop")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save plot data", os.path.join(default_dir, default_name),
+            "Pickle files (*.pkl);;All files (*)",
+        )
+        if not path:
+            return  # user cancelled
+        if not path.lower().endswith(".pkl"):
+            path += ".pkl"
+        ok = self.calibrator.save_data(path)
+        if ok:
+            QMessageBox.information(
+                self, "Plot saved",
+                f"Plot data saved to:\n{path}\n\n"
+                "Buffer contains the last ~50 s of angle data (knee, ankle, hip "
+                "left+right) plus the calibration offsets and timestamps.",
+            )
+        else:
+            QMessageBox.warning(
+                self, "Save failed",
+                "Could not write the plot data file. Check the disk and try again.",
+            )
 
     # ────────────────────────────────────
     # Overrides
