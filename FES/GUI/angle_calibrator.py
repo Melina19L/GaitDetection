@@ -126,7 +126,17 @@ class AngleCalibrator(QObject):
         self._paper_cal: dict[str, dict] = {}
 
         # Raw data logging for debugging time-sync issues
-        self._raw_log = {
+        self._raw_log_offset = {
+            'left_thigh': [], 'left_shank': [], 'left_foot': [],
+            'right_thigh': [], 'right_shank': [], 'right_foot': [],
+            'pelvis': []
+        }
+        self._raw_log_dynamic = {
+            'left_thigh': [], 'left_shank': [], 'left_foot': [],
+            'right_thigh': [], 'right_shank': [], 'right_foot': [],
+            'pelvis': []
+        }
+        self._raw_log_acq = {
             'left_thigh': [], 'left_shank': [], 'left_foot': [],
             'right_thigh': [], 'right_shank': [], 'right_foot': [],
             'pelvis': []
@@ -306,16 +316,21 @@ class AngleCalibrator(QObject):
                     else:
                         safe_paper_cal[seg][k] = v
 
-            np.savez(raw_file, 
-                     left_thigh=np.array(self._raw_log.get('left_thigh', [])),
-                     left_shank=np.array(self._raw_log.get('left_shank', [])),
-                     left_foot=np.array(self._raw_log.get('left_foot', [])),
-                     right_thigh=np.array(self._raw_log.get('right_thigh', [])),
-                     right_shank=np.array(self._raw_log.get('right_shank', [])),
-                     right_foot=np.array(self._raw_log.get('right_foot', [])),
-                     pelvis=np.array(self._raw_log.get('pelvis', [])),
-                     paper_cal=np.array(safe_paper_cal, dtype=object))
-            print(f"Raw LSL data saved to {raw_file}")
+            def _build_safe_dict(raw_dict):
+                return {
+                    'left_thigh': np.array(raw_dict.get('left_thigh', [])),
+                    'left_shank': np.array(raw_dict.get('left_shank', [])),
+                    'left_foot': np.array(raw_dict.get('left_foot', [])),
+                    'right_thigh': np.array(raw_dict.get('right_thigh', [])),
+                    'right_shank': np.array(raw_dict.get('right_shank', [])),
+                    'right_foot': np.array(raw_dict.get('right_foot', [])),
+                    'pelvis': np.array(raw_dict.get('pelvis', [])),
+                }
+
+            np.savez("raw_imu_data_offset_calib.npz", **_build_safe_dict(self._raw_log_offset))
+            np.savez("raw_imu_data_dynamic_calib.npz", **_build_safe_dict(self._raw_log_dynamic))
+            np.savez("raw_imu_data_acquisition.npz", **_build_safe_dict(self._raw_log_acq), paper_cal=np.array(safe_paper_cal, dtype=object))
+            print("Raw LSL data saved to 3 files: offset, dynamic, and acquisition.")
         except Exception as e:
             print(f"Failed to save raw data: {e}")
 
@@ -468,11 +483,18 @@ class AngleCalibrator(QObject):
             if self.right_shank_inlet: inlet_map['right_shank'] = self.right_shank_inlet
             if self.right_foot_inlet:  inlet_map['right_foot'] = self.right_foot_inlet
         
+        for key in self._raw_log_dynamic:
+            self._raw_log_dynamic[key].clear()
+
         while time.time() - start_t < duration:
             for key, inlet in inlet_map.items():
                 chunk, _ = inlet.pull_chunk(timeout=0.0)
                 if chunk:
                     buffers[key].extend(chunk)
+                    # Normalize names like 'left_pelvis' to 'pelvis' for the raw_log
+                    log_key = 'pelvis' if 'pelvis' in key else key
+                    if log_key in self._raw_log_dynamic:
+                        self._raw_log_dynamic[log_key].extend(chunk)
             QCoreApplication.processEvents()
             time.sleep(0.02)
         
@@ -836,10 +858,10 @@ class AngleCalibrator(QObject):
                 self._acc[key].extend(paired)
                 self._diag[key]["count"]  += len(samples)
                 self._diag[key]["last_ts"] = now
-                if hasattr(self, '_raw_log') and key in self._raw_log:
+                if hasattr(self, '_raw_log_acq') and key in self._raw_log_acq:
                     # Save raw samples with arrival timestamp for debugging
                     for ts, s in paired:
-                        self._raw_log[key].append([ts] + list(s))
+                        self._raw_log_acq[key].append([ts] + list(s))
 
         # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
         # Pelvis samples feed BOTH left and right hip computations, so they are
@@ -1108,7 +1130,7 @@ class AngleCalibrator(QObject):
                 else:
                     safe_paper_cal[seg][k] = v
         data["paper_cal"] = safe_paper_cal
-        data["raw_log"] = {k: np.array(v) for k, v in self._raw_log.items()}
+        data["raw_log"] = {k: np.array(v) for k, v in self._raw_log_acq.items()}
         
         try:
             with open(path, "wb") as f:
@@ -1275,6 +1297,9 @@ class AngleCalibrator(QObject):
         # All offset captures average ~1 s of samples instead of grabbing a
         # single jittery quaternion. Eliminates the ±10° "standing pose" drift.
         AVG_DURATION_S = 1.0
+        
+        for key in self._raw_log_offset:
+            self._raw_log_offset[key].clear()
 
         # ── Paper-style per-segment static collection (Hoegberg 2025) ────────
         # We collect 1 s of accelerometer + quaternion samples ONCE per unique
@@ -1307,7 +1332,7 @@ class AngleCalibrator(QObject):
             if inlet is None:
                 continue
             q_avg, a_avg, _, _ = self.__get_averaged_static_data(
-                inlet, duration_s=AVG_DURATION_S,
+                inlet, name=name, duration_s=AVG_DURATION_S,
             )
             if q_avg is None or a_avg is None:
                 continue
@@ -1499,7 +1524,7 @@ class AngleCalibrator(QObject):
             time.sleep(poll_interval)  # small delay to prevent CPU spinning
         return None
 
-    def __get_averaged_static_data(self, inlet: StreamInlet, duration_s: float = 1.0,
+    def __get_averaged_static_data(self, inlet: StreamInlet, name: str, duration_s: float = 1.0,
                                     poll_interval: float = 0.02):
         """Collect ~``duration_s`` of samples during quiet stance and return
         ``(q_avg, accel_avg, q_buffer, accel_buffer)``.
@@ -1524,8 +1549,10 @@ class AngleCalibrator(QObject):
         q_buf, a_buf = [], []
         while time.time() - t_start < duration_s:
             if inlet.samples_available() > 0:
-                sample, _ = inlet.pull_sample(timeout=0.0)
+                sample, ts = inlet.pull_sample(timeout=0.0)
                 if sample:
+                    if name in self._raw_log_offset:
+                        self._raw_log_offset[name].append(sample)
                     q_buf.append(np.asarray(sample[6:10], dtype=np.float64))
                     a_buf.append(np.asarray(sample[0:3],  dtype=np.float64))
             QCoreApplication.processEvents()
