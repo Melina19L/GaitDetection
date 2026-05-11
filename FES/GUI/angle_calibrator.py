@@ -477,7 +477,7 @@ class AngleCalibrator(QObject):
             segment by Calibrate Offsets. Returns True on success.
             """
             cal = self._paper_cal.get(seg_name)
-            if cal is None or 'q_g' not in cal or 'q_static_avg' not in cal:
+            if cal is None:
                 # Static cal hasn't run yet — paper algo can't be activated.
                 return False
             q_d = _extract_quats(samples)
@@ -1281,9 +1281,7 @@ class AngleCalibrator(QObject):
             # Calibration if (and only if) the PCA produces a confident axis.
             # The runtime dispatcher checks for both keys before activating
             # the paper path, so an incomplete cal falls back to legacy.
-            q_g = paper_compute_q_g(a_avg, q_avg)
             self._paper_cal[name] = {
-                'q_g': q_g,
                 'q_static_avg': q_avg,
                 'accel_static_avg': a_avg,
             }
