@@ -1070,11 +1070,19 @@ class AngleCalibrator(QObject):
             return offset, q_shank, q_foot, shank_vert_axis, foot_fwd_axis, foot_ml_axis
 
         def _one_side_hip(thigh_inlet, offset_val):
-            """Calibrate hip using the shared pelvis sensor as the proximal reference."""
+            """Calibrate hip using the shared pelvis sensor as the proximal reference.
+
+            Uses PAIRED sampling so the pelvis and thigh quaternions are averaged
+            over the *same* 1 s window. Sequential sampling (pelvis 1 s then
+            thigh 1 s) introduced a ~10° residual offset at neutral because tiny
+            postural shifts / breathing between the two windows shifted the
+            relative pelvis-thigh pose.
+            """
             if not (self.pelvis_inlet and thigh_inlet):
                 return None
-            q_pelvis = self.__get_averaged_quaternion(self.pelvis_inlet, duration_s=AVG_DURATION_S)
-            q_thigh  = self.__get_averaged_quaternion(thigh_inlet,       duration_s=AVG_DURATION_S)
+            q_pelvis, q_thigh = self.__get_averaged_quaternions_paired(
+                self.pelvis_inlet, thigh_inlet, duration_s=AVG_DURATION_S,
+            )
             if q_pelvis is None or q_thigh is None:
                 return None
             return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
@@ -1210,6 +1218,53 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(poll_interval)  # small delay to prevent CPU spinning
         return None
+
+    def __get_averaged_quaternions_paired(self, inlet_a: StreamInlet, inlet_b: StreamInlet,
+                                            duration_s: float = 1.0,
+                                            poll_interval: float = 0.02):
+        """Average quaternions from TWO inlets **over the same time window**.
+
+        Why this exists: capturing the pelvis-thigh offset for the hip joint
+        requires the pelvis and thigh quaternions to come from the same neutral
+        pose. The single-inlet ``__get_averaged_quaternion`` samples sequentially
+        (pelvis 1s, then thigh 1s), so any small body sway between the two
+        windows (breathing, postural drift) inflates the offset by several
+        degrees. By accumulating both streams in a SHARED 1-second loop, both
+        averages reflect the *same* static pose.
+
+        Returns ``(q_a_avg, q_b_avg)`` or ``(None, None)`` on failure.
+        """
+        if inlet_a is None or inlet_b is None:
+            return None, None
+        t_start = time.time()
+        ref_a, ref_b = None, None
+        acc_a = np.zeros(4, dtype=np.float64)
+        acc_b = np.zeros(4, dtype=np.float64)
+        n_a = n_b = 0
+        while time.time() - t_start < duration_s:
+            if inlet_a.samples_available() > 0:
+                s, _ = inlet_a.pull_sample(timeout=0.0)
+                if s:
+                    q = np.asarray(s[6:10], dtype=np.float64)
+                    if ref_a is None: ref_a = q
+                    if float(np.dot(q, ref_a)) < 0: q = -q
+                    acc_a += q; n_a += 1
+            if inlet_b.samples_available() > 0:
+                s, _ = inlet_b.pull_sample(timeout=0.0)
+                if s:
+                    q = np.asarray(s[6:10], dtype=np.float64)
+                    if ref_b is None: ref_b = q
+                    if float(np.dot(q, ref_b)) < 0: q = -q
+                    acc_b += q; n_b += 1
+            QCoreApplication.processEvents()
+            time.sleep(poll_interval)
+        if n_a == 0 or n_b == 0:
+            return None, None
+        a = acc_a / float(n_a); na = float(np.linalg.norm(a))
+        b = acc_b / float(n_b); nb = float(np.linalg.norm(b))
+        if na < 1e-9 or nb < 1e-9:
+            return None, None
+        return a / na, b / nb
 
     def __get_averaged_quaternion(self, inlet: StreamInlet, duration_s: float = 1.0,
                                   poll_interval: float = 0.02):
