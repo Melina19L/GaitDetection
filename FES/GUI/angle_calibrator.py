@@ -8,13 +8,9 @@ from stimulator.closed_loop import (
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
     identify_hinge_axis, extract_joint_angle_with_axis,
-    # ── Paper algorithm (Hoegberg, Donahue, Major — Sensors 2025, 25, 2931) ──
     quaternion_average,
-    paper_compute_q_g,
-    paper_compute_q_PCA,
-    paper_finalize_q0,
-    rebait_joint_angle_deg,
 )
+from stimulator.lower_limb_kinematics import calibrate_segment, calculate_kinematics, get_segment_orientation, calc_sagittal_angle
 import time
 from typing import Optional
 
@@ -492,38 +488,30 @@ class AngleCalibrator(QObject):
             if n < 50:
                 return False
                 
+            arr = np.array(samples, dtype=np.float64)
+            acc_static = arr[:50, 0:3]
+            gyro_dynamic = arr[:, 3:6]
+            q_static = arr[:50, 6:10]
+            
             try:
-                q_PCA, ratio = paper_compute_q_PCA(g_d[:n], q_d[:n], cal['q_g'])
-            except Exception as e:
-                self.error_signal.emit(f"PCA Math Error on {seg_name}: {e}")
-                return False
+                q_g, q_PCA, q_0_inv = calibrate_segment(acc_static, gyro_dynamic, q_static)
+                # Save to the dictionary expected by calculate_kinematics
+                if not hasattr(self, 'rebait_calib'):
+                    self.rebait_calib = {}
+                self.rebait_calib[seg_name] = {'q_g': q_g, 'q_PCA': q_PCA, 'q_0': q_0_inv}
                 
-            cal['pca_ratio'] = float(ratio)
-
-            # Hard threshold: only commit q_PCA + q_0 (= activate paper path
-            # at runtime) when the principal axis is at least 1.5× stronger
-            # than the second axis. Below that the PCA pointed somewhere
-            # random and using it forces q_joint into the Eq.11 wrap-around
-            # zone (±180°).
-            PCA_MIN_RATIO = 1.5
-            if ratio < PCA_MIN_RATIO:
-                # Drop any previously stored q_PCA/q_0 so the dispatcher in
-                # __compute_angles_from_data falls back to the legacy path.
-                cal.pop('q_PCA', None)
-                cal.pop('q_0',   None)
+                # Keep paper_ready flag happy by inserting into self._paper_cal
+                cal['q_g'] = q_g
+                cal['q_PCA'] = q_PCA
+                cal['q_0'] = q_0_inv
+                
                 self.message_signal.emit(
-                    f"[paper] {seg_name}: ratio {ratio:.2f} < {PCA_MIN_RATIO} — "
-                    f"REJECTED, falling back to legacy. Redo Functional Calibration "
-                    f"with stronger {seg_name}-specific motion."
+                    f"[paper] {seg_name}: ReBAIT calibration complete (n={n})"
                 )
+                return True
+            except Exception as e:
+                self.error_signal.emit(f"ReBAIT Math Error on {seg_name}: {e}")
                 return False
-            cal['q_PCA'] = q_PCA
-            cal['q_0']   = paper_finalize_q0(cal['q_g'], q_PCA, cal['q_static_avg'])
-            tag = "clean ✓" if ratio >= 2.0 else "acceptable ✓"
-            self.message_signal.emit(
-                f"[paper] {seg_name}: PCA eig-ratio {ratio:.2f} ({tag}, n={n})"
-            )
-            return True
 
         def _identify_axis(prox_samples, dist_samples, joint_name):
             """Run SVD hinge axis identification for a joint pair (legacy path).
@@ -1736,10 +1724,17 @@ class AngleCalibrator(QObject):
             q_dist = np.array(samples_distal[i][6:10],   dtype=np.float64)
             try:
                 if paper_ready:
-                    # ── ReBAIT Exact 1:1 Math ──
-                    angle = rebait_joint_angle_deg(
-                        q_prox, q_dist, cal_proximal, cal_distal, joint_type
-                    )
+                    # ── ReBAIT Lower Limb Kinematics ──
+                    q_pv = get_segment_orientation(q_prox, cal_proximal['q_g'], cal_proximal['q_PCA'], cal_proximal['q_0'])
+                    q_dist_seg = get_segment_orientation(q_dist, cal_distal['q_g'], cal_distal['q_PCA'], cal_distal['q_0'])
+                    
+                    # Note: lower_limb_kinematics.py uses prox.conjugate() * dist for all joints!
+                    # "Hip: q_pv.conjugate() * q_th"
+                    # "Knee: q_sh.conjugate() * q_th"
+                    # "Ankle: q_sh.conjugate() * q_ft"
+                    q_joint = q_pv.conjugate() * q_dist_seg
+                    
+                    angle = calc_sagittal_angle(q_joint)
                     if is_ankle:
                         # Anatomic ankle ROM is ~-30° dorsi / +50° plantar.
                         # Clamp to ±50° so a transient sensor-fusion glitch
