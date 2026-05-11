@@ -215,30 +215,59 @@ ank_tpkl  = unwrap_timestamps(np.asarray(d[f"{side}_ankle_timestamps"],dtype=np.
 hip_pkl   = np.asarray(d[f"{side}_hip_angles"],      dtype=np.float64)
 hip_tpkl  = unwrap_timestamps(np.asarray(d[f"{side}_hip_timestamps"],  dtype=np.float64), global_max_ts)
 
-def find_npose_from_variance(q_prox, window_len):
-    """Find the contiguous window where the subject is standing most still.
+def find_npose_from_gui_offsets(q_th_r, q_sh_r, q_pv_r, d, side):
+    """Find the exact moment the user clicked 'Calibrate Offsets' in the GUI.
     
-    This replaces the brittle method of checking if GUI-computed angles == 0.
-    Instead, we just scan the raw quaternion for the period with minimum
-    sum of variances, which physically corresponds to the static standing 
-    calibration moment.
+    The GUI saves the raw SAA (Segment Axis Angle) at the instant of calibration
+    as 'right_knee_offset' and 'right_hip_offset'. By computing the SAA for the
+    entire offline file and finding the moment where the values exactly match
+    the saved offsets, we reconstruct the exact N-pose intended by the user.
     """
-    if len(q_prox) < window_len: 
-        return 0, len(q_prox)
-    variances = []
-    # Step by 10 to speed up search
-    for i in range(0, len(q_prox) - window_len, 10):
-        v = np.sum(np.var(q_prox[i:i+window_len], axis=0))
-        variances.append(v)
-    best_idx = np.argmin(variances) * 10
-    return best_idx, best_idx + window_len
+    def rotate_x_axis(q):
+        u = q[..., 1:4]
+        s = q[..., 0:1]
+        v = np.array([1.0, 0.0, 0.0])
+        uv = np.cross(u, v)
+        uuv = np.cross(u, uv)
+        return v + 2.0 * (s * uv + uuv)
 
-WIN = int(1.0 * fs)  # 1 second window
-ref_start, ref_end = find_npose_from_variance(q_sh_r, WIN)
+    v_th = rotate_x_axis(q_th_r)
+    v_sh = rotate_x_axis(q_sh_r)
+    v_pv = rotate_x_axis(q_pv_r) if len(q_pv_r) > 0 else None
 
-print(f"N-pose reference window (from minimum quaternion variance):")
+    dot_knee = np.sum(v_th * v_sh, axis=-1)
+    saa_knee = np.degrees(np.arccos(np.clip(dot_knee, -1.0, 1.0)))
+    target_knee = d.get(f"{side}_knee_offset")
+
+    # If the offset wasn't saved, fallback to the first 10 seconds minimum variance
+    if target_knee is None:
+        print("   ⚠ No GUI offsets found in .pkl. Falling back to minimum variance in first 10s.")
+        window_len = int(1.0 * fs)
+        if len(q_sh_r) < window_len: return 0, len(q_sh_r)
+        search_end = min(len(q_sh_r) - window_len, int(10.0 * fs))
+        variances = [np.sum(np.var(q_sh_r[i:i+window_len], axis=0)) for i in range(0, search_end, 10)]
+        best_idx = np.argmin(variances) * 10
+        return best_idx, best_idx + window_len
+
+    if v_pv is not None:
+        dot_hip = np.sum(v_pv * v_th, axis=-1)
+        saa_hip = np.degrees(np.arccos(np.clip(dot_hip, -1.0, 1.0)))
+        target_hip = d.get(f"{side}_hip_offset", 0.0)
+        diff = np.abs(saa_knee - target_knee) + np.abs(saa_hip - target_hip)
+    else:
+        diff = np.abs(saa_knee - target_knee)
+
+    best_idx = np.argmin(diff)
+    # Return a 1-second window around the calibration moment
+    start = max(0, best_idx - int(0.5 * fs))
+    end = min(len(q_sh_r), start + int(1.0 * fs))
+    return start, end
+
+ref_start, ref_end = find_npose_from_gui_offsets(q_th_r, q_sh_r, q_pv_r, d, side)
+
+print(f"N-pose reference window (matched to GUI calibration offsets):")
 print(f"   samples {ref_start}..{ref_end}  "
-      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_end-1]:.2f} s, {WIN} samples)")
+      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_end-1]:.2f} s, {ref_end - ref_start} samples)")
 
 q_th_ref = qnorm(q_th_r[ref_start:ref_end].mean(axis=0))
 q_sh_ref = qnorm(q_sh_r[ref_start:ref_end].mean(axis=0))
@@ -378,7 +407,7 @@ for i in range(len(hs_times) - 1):
     dur = t_end - t_start
     if not (0.7 <= dur <= 1.5):
         continue
-    seg, _ = slice_by_time(ankle, t_rel, t_start, t_end)
+    seg, _ = slice_by_time(knee, t_rel, t_start, t_end)
     if seg.size < 10:
         continue
     score = seg.max() - seg.min()
