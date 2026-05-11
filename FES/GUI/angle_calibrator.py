@@ -126,7 +126,11 @@ class AngleCalibrator(QObject):
         self._paper_cal: dict[str, dict] = {}
 
         # Raw data logging for debugging time-sync issues
-        self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
+        self._raw_log = {
+            'left_thigh': [], 'left_shank': [], 'left_foot': [],
+            'right_thigh': [], 'right_shank': [], 'right_foot': [],
+            'pelvis': []
+        }
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -289,11 +293,28 @@ class AngleCalibrator(QObject):
         try:
             import numpy as np
             raw_file = "raw_imu_data_from_gui.npz"
+            
+            # Convert quaternions to standard lists [w, x, y, z] for safe unpickling
+            safe_paper_cal = {}
+            for seg, cal in getattr(self, '_paper_cal', {}).items():
+                safe_paper_cal[seg] = {}
+                for k, v in cal.items():
+                    if hasattr(v, 'w'): # It's a quaternion
+                        safe_paper_cal[seg][k] = [v.w, v.x, v.y, v.z]
+                    elif isinstance(v, np.ndarray):
+                        safe_paper_cal[seg][k] = v.tolist()
+                    else:
+                        safe_paper_cal[seg][k] = v
+
             np.savez(raw_file, 
-                     left_shank=np.array(self._raw_log['left_shank']),
-                     left_foot=np.array(self._raw_log['left_foot']),
-                     right_shank=np.array(self._raw_log['right_shank']),
-                     right_foot=np.array(self._raw_log['right_foot']))
+                     left_thigh=np.array(self._raw_log.get('left_thigh', [])),
+                     left_shank=np.array(self._raw_log.get('left_shank', [])),
+                     left_foot=np.array(self._raw_log.get('left_foot', [])),
+                     right_thigh=np.array(self._raw_log.get('right_thigh', [])),
+                     right_shank=np.array(self._raw_log.get('right_shank', [])),
+                     right_foot=np.array(self._raw_log.get('right_foot', [])),
+                     pelvis=np.array(self._raw_log.get('pelvis', [])),
+                     paper_cal=np.array(safe_paper_cal, dtype=object))
             print(f"Raw LSL data saved to {raw_file}")
         except Exception as e:
             print(f"Failed to save raw data: {e}")
@@ -1074,6 +1095,21 @@ class AngleCalibrator(QObject):
             "session_end_iso":    _iso(now),
             "session_duration_s": now - start,
         }
+        
+        # Convert quaternions to standard lists [w, x, y, z] for safe unpickling
+        safe_paper_cal = {}
+        for seg, cal in self._paper_cal.items():
+            safe_paper_cal[seg] = {}
+            for k, v in cal.items():
+                if hasattr(v, 'w'): # It's a quaternion
+                    safe_paper_cal[seg][k] = [v.w, v.x, v.y, v.z]
+                elif isinstance(v, np.ndarray):
+                    safe_paper_cal[seg][k] = v.tolist()
+                else:
+                    safe_paper_cal[seg][k] = v
+        data["paper_cal"] = safe_paper_cal
+        data["raw_log"] = {k: np.array(v) for k, v in self._raw_log.items()}
+        
         try:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
@@ -1726,14 +1762,23 @@ class AngleCalibrator(QObject):
                     q_pv = get_segment_orientation(q_prox, cal_proximal['q_g'], cal_proximal['q_PCA'], cal_proximal['q_0'])
                     q_dist_seg = get_segment_orientation(q_dist, cal_distal['q_g'], cal_distal['q_PCA'], cal_distal['q_0'])
                     
-                    # Note: lower_limb_kinematics.py uses prox.conjugate() * dist for all joints!
-                    q_joint = q_pv.conjugate() * q_dist_seg
+                    if joint_type == 'knee':
+                        # lower_limb_kinematics.py defines knee as q_sh.conjugate() * q_th (Distal.conjugate() * Proximal)
+                        q_joint = q_dist_seg.conjugate() * q_pv
+                    else:
+                        q_joint = q_pv.conjugate() * q_dist_seg
+                        
                     raw_rebait = calc_sagittal_angle(q_joint)
                     
                     # Zero it out using the static pose from the calibration, preserving GUI targets
                     q_pv_static = cal_proximal['q_PCA'] * cal_proximal['q_g']
                     q_dist_static = cal_distal['q_PCA'] * cal_distal['q_g']
-                    q_joint_static = q_pv_static.conjugate() * q_dist_static
+                    
+                    if joint_type == 'knee':
+                        q_joint_static = q_dist_static.conjugate() * q_pv_static
+                    else:
+                        q_joint_static = q_pv_static.conjugate() * q_dist_static
+                        
                     static_rebait = calc_sagittal_angle(q_joint_static)
                     
                     target = 0.0
