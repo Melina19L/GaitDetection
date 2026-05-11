@@ -95,7 +95,16 @@ class AngleCalibrator(QObject):
         self.right_ankle_hinge_axis = None
         
         # Raw data logging for debugging time-sync issues
-        self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
+        # Raw per-sample IMU log (timestamp + 10 sensor channels per inlet).
+        # Used to dump quaternions + accel + gyro post-test so the offline
+        # analysis can recompute joint angles with proper signed Euler math
+        # (the live SAA path used by the dispatcher is unsigned and squashes
+        # extension/inversion). All seven LSL inlets are logged.
+        self._raw_log = {
+            'left_thigh':  [], 'left_shank':  [], 'left_foot':  [],
+            'right_thigh': [], 'right_shank': [], 'right_foot': [],
+            'pelvis':      [],
+        }
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -254,16 +263,23 @@ class AngleCalibrator(QObject):
         self.message_signal.emit("Angle calibration stopped (knee + ankle + hip).")
 
     def save_raw_data(self):
-        """Save raw LSL data for debugging time sync."""
+        """Save raw LSL data for debugging time sync.
+
+        Dumps all seven inlets (thigh / shank / foot for both legs + pelvis)
+        to ``raw_imu_data_from_gui.npz``. Each entry is a (N, 11) array with
+        columns ``[lsl_ts, accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]``.
+        """
         try:
             import numpy as np
             raw_file = "raw_imu_data_from_gui.npz"
-            np.savez(raw_file, 
-                     left_shank=np.array(self._raw_log['left_shank']),
-                     left_foot=np.array(self._raw_log['left_foot']),
-                     right_shank=np.array(self._raw_log['right_shank']),
-                     right_foot=np.array(self._raw_log['right_foot']))
-            print(f"Raw LSL data saved to {raw_file}")
+            payload = {
+                k: np.array(v if v else [], dtype=np.float64)
+                for k, v in self._raw_log.items()
+            }
+            np.savez(raw_file, **payload)
+            print(f"Raw LSL data saved to {raw_file} "
+                  f"(segments with data: "
+                  f"{[k for k, v in self._raw_log.items() if v]})")
         except Exception as e:
             print(f"Failed to save raw data: {e}")
 
@@ -855,6 +871,22 @@ class AngleCalibrator(QObject):
             "session_end_iso":    _iso(now),
             "session_duration_s": now - start,
         }
+        # ── Raw quaternions + timestamps per segment ────────────────────────
+        # Used by offline analysis to recompute joint angles with proper
+        # signed Euler decomposition (the live SAA dispatcher is unsigned
+        # and clips extension / inversion).
+        # Each entry is shape (N, 4) for the quaternion and (N,) for the
+        # matching timestamps; empty arrays are written when an inlet
+        # wasn't connected during the session.
+        for seg, rows in self._raw_log.items():
+            if rows:
+                arr = np.asarray(rows, dtype=np.float64)
+                # cols: [lsl_ts, accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]
+                data[f"raw_{seg}_quat"]       = arr[:, 7:11].copy()
+                data[f"raw_{seg}_timestamps"] = arr[:, 0].copy()
+            else:
+                data[f"raw_{seg}_quat"]       = np.empty((0, 4), dtype=np.float64)
+                data[f"raw_{seg}_timestamps"] = np.empty((0,),    dtype=np.float64)
         try:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
