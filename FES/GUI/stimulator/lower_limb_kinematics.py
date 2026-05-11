@@ -16,14 +16,15 @@ def calibrate_segment(acc_static, gyro_dynamic, q_static):
     q_PCA: Quaternion for PCA alignment (medial-lateral axis).
     q_0: Average orientation quaternion during static calibration.
     """
-    # 1. Gravity Alignment (Static Calibration)
-    # Average acceleration vector from the stationary period
+    # 1. Calculate q_0 (Average orientation quaternion during stationary calibration)
+    q_static_np = quaternion.as_quat_array(q_static) if not isinstance(q_static[0], np.quaternion) else q_static
+    q_mean = np.mean(quaternion.as_float_array(q_static_np), axis=0)
+    q_0_inv = np.quaternion(*q_mean).normalized().conjugate() 
+    q_0_quat = q_0_inv.conjugate()
+
+    # 2. Gravity Alignment (Static Calibration)
     g_avg = np.mean(acc_static, axis=0)
-    
-    # Gravitational acceleration vector in the segment-fixed ISB reference frame
     g_anat = np.array([0.0, 9.81, 0.0]) # j_hat
-    
-    # Calculate q_g
     cross_prod = np.cross(g_avg, g_anat)
     norm_cross_prod = np.linalg.norm(cross_prod)
     if norm_cross_prod == 0:
@@ -34,20 +35,26 @@ def calibrate_segment(acc_static, gyro_dynamic, q_static):
         dot_prod = np.dot(g_avg, g_anat)
         mag_g_avg = np.linalg.norm(g_avg)
         mag_g_anat = np.linalg.norm(g_anat)
-        cos_theta = dot_prod / (mag_g_avg * mag_g_anat)
-        # Handle potential floating point errors for arccos
-        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        cos_theta = np.clip(dot_prod / (mag_g_avg * mag_g_anat), -1.0, 1.0)
         theta = np.arccos(cos_theta)
         
     q_g = np.quaternion(np.cos(theta/2), *(np.sin(theta/2) * n_hat))
 
-    # 2. PCA Alignment (Dynamic Calibration)
+    # 3. Transform gyro_dynamic to intermediate frame before PCA
+    q_rot = q_g * q_0_quat
+    gyro_transformed = []
+    for w in gyro_dynamic:
+        w_quat = np.quaternion(0, *w)
+        w_trans = q_rot * w_quat * q_rot.conjugate()
+        gyro_transformed.append([w_trans.x, w_trans.y, w_trans.z])
+    gyro_transformed = np.array(gyro_transformed)
+
+    # 4. PCA Alignment (Dynamic Calibration)
     pca = PCA(n_components=1)
-    pca.fit(gyro_dynamic)
+    pca.fit(gyro_transformed)
     e_pca = pca.components_[0] # principal component (axis of rotation)
     
     e_1 = np.array([0.0, 0.0, 1.0]) # k_hat (normal to sagittal plane)
-    
     cross_prod_pca = np.cross(e_pca, e_1)
     n_hat_pca = cross_prod_pca / np.linalg.norm(cross_prod_pca)
     n_y = n_hat_pca[1] # Component in y-direction (aligned with gravity)
@@ -58,38 +65,16 @@ def calibrate_segment(acc_static, gyro_dynamic, q_static):
     
     # Eq 7
     axis = np.array([0.0, 0.0, 0.0])
-    axis[1] = np.sign(n_y)
-    
+    axis[1] = np.sign(n_y) if n_y != 0 else 1.0
     q_PCA_0 = np.quaternion(np.cos(theta_pca/2), *(np.sin(theta_pca/2) * axis))
     
-    # Determine correct medial-lateral direction
-    # We must rotate gyro data to the lab fixed global reference frame W_L
-    # But wait, to check the direction, let's use the first method from the paper
-    # "The magnitude of the maximum and minimum angular velocity values are compared..."
-    
-    # We need to rotate the gyro dynamic data
-    gyro_W = np.zeros_like(gyro_dynamic)
-    for i in range(len(gyro_dynamic)):
-        # Assuming q_IMU during dynamic calibration is just the current orientation, 
-        # but the paper states we apply this to the angular velocity vectors in W_L.
-        # Actually, let's look at the implementation for q_PCA rotation (half a rotation)
-        # We can approximate by looking at the projected angular velocity.
-        pass # The ReBAIT code might handle this differently, but let's stick to the paper's logic
-        
-    # Simplified check from ReBAIT new_utils.py (ana_Calibration)
-    projected_gyro = np.dot(gyro_dynamic, e_pca)
+    # Check direction: project transformed gyro onto e_pca
+    projected_gyro = np.dot(gyro_transformed, e_pca)
     if np.max(projected_gyro) > np.abs(np.min(projected_gyro)):
-        q_PCA = np.quaternion(0, 0, 1, 0) * q_PCA_0 # Rotation about vertical (y) axis by half a rotation
+        q_PCA = np.quaternion(0, 0, 1, 0) * q_PCA_0 # Half rotation around y
     else:
         q_PCA = q_PCA_0
 
-    # 3. Calculate q_0 (Average orientation quaternion during stationary calibration)
-    # Average quaternions using eigenvector method or simple average (since spread is small during static phase)
-    # We will use simple mean and normalize, which is an acceptable approximation for a static pose.
-    q_static_np = quaternion.as_quat_array(q_static)
-    q_mean = np.mean(quaternion.as_float_array(q_static_np), axis=0)
-    q_0_inv = np.quaternion(*q_mean).normalized().conjugate() # The paper describes right-multiplying by q_0, which is the initial orientation relative inverse
-    
     return q_g, q_PCA, q_0_inv
 
 def get_segment_orientation(q_IMU, q_g, q_PCA, q_0):
