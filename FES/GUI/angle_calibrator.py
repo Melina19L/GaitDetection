@@ -1727,12 +1727,28 @@ class AngleCalibrator(QObject):
                     q_dist_seg = get_segment_orientation(q_dist, cal_distal['q_g'], cal_distal['q_PCA'], cal_distal['q_0'])
                     
                     # Note: lower_limb_kinematics.py uses prox.conjugate() * dist for all joints!
-                    # "Hip: q_pv.conjugate() * q_th"
-                    # "Knee: q_sh.conjugate() * q_th"
-                    # "Ankle: q_sh.conjugate() * q_ft"
                     q_joint = q_pv.conjugate() * q_dist_seg
+                    raw_rebait = calc_sagittal_angle(q_joint)
                     
-                    angle = calc_sagittal_angle(q_joint)
+                    # Zero it out using the static pose from the calibration, preserving GUI targets
+                    q_pv_static = cal_proximal['q_PCA'] * cal_proximal['q_g']
+                    q_dist_static = cal_distal['q_PCA'] * cal_distal['q_g']
+                    q_joint_static = q_pv_static.conjugate() * q_dist_static
+                    static_rebait = calc_sagittal_angle(q_joint_static)
+                    
+                    target = 0.0
+                    if q_proximal_ref is not None and q_distal_ref is not None:
+                        if is_ankle:
+                            static_legacy = ROM.ankle_functional_calibration(
+                                q_proximal_ref, q_distal_ref,
+                                foot_axis=distal_axis, shank_axis=proximal_axis
+                            )
+                        else:
+                            static_legacy = ROM.functional_calibration(q_proximal_ref, q_distal_ref)
+                        target = static_legacy - angle_offset
+                        
+                    angle = raw_rebait - static_rebait + target
+                    angle = (angle + 180) % 360 - 180
                     if is_ankle:
                         # Anatomic ankle ROM is ~-30° dorsi / +50° plantar.
                         # Clamp to ±50° so a transient sensor-fusion glitch
