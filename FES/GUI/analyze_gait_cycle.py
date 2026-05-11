@@ -56,45 +56,25 @@ def to_scipy(q):
     return np.stack([q[..., 1], q[..., 2], q[..., 3], q[..., 0]], axis=-1)
 
 
-# ── Axis auto-detection (uses the static reference quaternion) ──────────────
-AXIS_VEC = {'X': np.array([1.0, 0.0, 0.0]),
-            'Y': np.array([0.0, 1.0, 0.0]),
-            'Z': np.array([0.0, 0.0, 1.0])}
-
-def detect_vertical_axis(q_static):
-    """Return the local axis name whose world projection is most vertical."""
-    best, best_score = 'X', -1.0
-    for name, v in AXIS_VEC.items():
-        gv = qrotate_vec(q_static, v)
-        s = abs(gv[2])  # |z| component → vertical alignment
-        if s > best_score:
-            best, best_score = name, s
-    return best
-
-def detect_horizontal_axis(q_static, exclude=None):
-    """Most-horizontal axis (its world Z-component is small)."""
-    best, best_score = None, -1.0
-    for name, v in AXIS_VEC.items():
-        if name == exclude:
-            continue
-        gv = qrotate_vec(q_static, v)
-        s = 1.0 - abs(gv[2])
-        if s > best_score:
-            best, best_score = name, s
-    return best
-
-def auto_ml_axis(q_static_avg):
-    """Detect the segment's medio-lateral local axis from its static quaternion.
-
-    For an upright segment (thigh / shank / pelvis): vertical = longitudinal,
-    most-horizontal = AP (forward), and the remaining axis is medio-lateral.
-    For the foot (which lies horizontal at neutral) the same logic still
-    works because the foot sensor's "up" axis is the most vertical one and
-    its "forward" axis is along the toes.
+def auto_ml_axis_variance(q_prox, q_dist, ref_start, ref_end):
+    """Detect the segment's medio-lateral local axis dynamically using variance.
+    
+    Walking is predominantly a sagittal-plane motion. The true medio-lateral axis 
+    is simply the one that experiences the largest angular excursion (variance) 
+    in the relative joint rotation during the gait cycle.
     """
-    vert = detect_vertical_axis(q_static_avg)
-    fwd  = detect_horizontal_axis(q_static_avg, exclude=vert)
-    return ({'X', 'Y', 'Z'} - {vert, fwd}).pop()
+    q_prox_ref = qnorm(q_prox[ref_start:ref_end].mean(axis=0, keepdims=True))
+    q_dist_ref = qnorm(q_dist[ref_start:ref_end].mean(axis=0, keepdims=True))
+    
+    q_rel_now = qmul(qconj(q_prox), q_dist)
+    q_rel_ref = qmul(qconj(q_prox_ref), q_dist_ref)
+    
+    q_delta = qmul(q_rel_now, qconj(q_rel_ref))
+    flip = q_delta[..., 0] < 0
+    q_delta[flip] = -q_delta[flip]
+    
+    var_xyz = np.var(q_delta[..., 1:], axis=0)
+    return ['X', 'Y', 'Z'][np.argmax(var_xyz)]
 
 
 # ── Signed sagittal joint angle ─────────────────────────────────────────────
@@ -102,14 +82,10 @@ def signed_sagittal_series(q_prox, q_dist, q_prox_ref, q_dist_ref, ml_axis_prox)
     """Compute the signed sagittal-plane joint angle (degrees) for every sample.
 
     Math:
-        q_rel_t   = conj(q_prox(t))  · q_dist(t)         (foot in shank's frame, …)
-        q_rel_ref = conj(q_prox_ref) · q_dist_ref         (the same at neutral)
-        q_delta   = q_rel_t · conj(q_rel_ref)             (change since neutral)
+        q_rel_t   = conj(q_prox(t))  · q_dist(t)         (distal in prox frame)
+        q_rel_ref = conj(q_prox_ref) · q_dist_ref        (the same at neutral)
+        q_delta   = q_rel_t · conj(q_rel_ref)            (change since neutral)
         first Euler angle of q_delta around the ML axis  = sagittal flex
-
-    Knee:  proximal = thigh,  distal = shank
-    Hip:   proximal = pelvis, distal = thigh
-    Ankle: proximal = shank,  distal = foot
     """
     q_rel_now = qmul(qconj(q_prox), q_dist)
     q_rel_ref = qmul(qconj(q_prox_ref), q_dist_ref)
@@ -195,46 +171,101 @@ fs = 1.0 / np.median(np.diff(t_master))
 print(f"\nMaster clock = shank ({t_master.size} samples, {t_rel[-1]:.1f} s, ~{fs:.1f} Hz)")
 
 
-# ── 3. STATIC REFERENCE — first 1 s of low-motion data ──────────────────────
-# Use the shank's angular displacement to find a calm window. If the very
-# first second is quiet, use that. Otherwise scan for the first quiet 0.5 s.
-def is_quiet(q_seg, n_samples, threshold_deg=5.0):
-    """Return True if the segment quaternion is within ``threshold_deg`` of its
-    own mean over the first ``n_samples`` samples — i.e. the body is still."""
-    if q_seg.shape[0] < n_samples: return False
-    seg = qnorm(q_seg[:n_samples])
-    mean_q = qnorm(seg.mean(axis=0))
-    # Angle between each sample and the mean
-    dots = np.clip(np.abs(seg @ mean_q), 0.0, 1.0)
-    angles = 2.0 * np.degrees(np.arccos(dots))
-    return angles.max() < threshold_deg
+# ── 3. STATIC REFERENCE — use the GUI's calibrated angles as the anchor ─────
+# The previous "look for any quiet window" heuristic was fooled by BLE
+# warm-up at t=0..5s, where all sensors return frozen quaternions for a few
+# seconds before they start streaming valid data. That period IS quiet but
+# does not correspond to the user's neutral pose.
+#
+# The .pkl carries the SAA-calibrated knee/ankle/hip angles (one number per
+# sample, computed from the GUI's "Calibrate Offsets"). They read ~0° iff
+# the user is genuinely in the calibrated N-pose. Find a contiguous window
+# where ALL THREE computed angles are within a tight band, and use the raw
+# quaternions at that moment as the reference for our signed Euler math.
 
-WIN = int(1.0 * fs)
-ref_start = 0
-if not is_quiet(q_sh_r, WIN):
-    # Scan forward in 0.5-s steps for a calm window
-    step = int(0.5 * fs)
-    for i in range(0, q_sh_r.shape[0] - WIN, step):
-        if (is_quiet(q_sh_r[i:i+WIN], WIN) and
-            is_quiet(q_th_r[i:i+WIN], WIN) and
-            is_quiet(q_pv_r[i:i+WIN], WIN)):
-            ref_start = i
-            break
+knee_pkl  = np.asarray(d[f"{side}_knee_angles"],     dtype=np.float64)
+knee_tpkl = np.asarray(d[f"{side}_knee_timestamps"], dtype=np.float64)
+ank_pkl   = np.asarray(d[f"{side}_ankle_angles"],    dtype=np.float64)
+ank_tpkl  = np.asarray(d[f"{side}_ankle_timestamps"],dtype=np.float64)
+hip_pkl   = np.asarray(d[f"{side}_hip_angles"],      dtype=np.float64)
+hip_tpkl  = np.asarray(d[f"{side}_hip_timestamps"],  dtype=np.float64)
 
-print(f"Static reference window: samples {ref_start}..{ref_start + WIN} "
-      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_start + WIN - 1]:.2f} s)")
+# Interpolate the computed angles onto the shank master clock so all 3
+# streams share the same time index as our raw quaternions.
+def _interp_to(t_target, t_src, val_src):
+    if t_src.size == 0:
+        return np.full_like(t_target, np.nan)
+    return np.interp(t_target, t_src, val_src,
+                     left=np.nan, right=np.nan)
 
-q_th_ref = qnorm(q_th_r[ref_start:ref_start+WIN].mean(axis=0))
-q_sh_ref = qnorm(q_sh_r[ref_start:ref_start+WIN].mean(axis=0))
-q_ft_ref = qnorm(q_ft_r[ref_start:ref_start+WIN].mean(axis=0))
-q_pv_ref = qnorm(q_pv_r[ref_start:ref_start+WIN].mean(axis=0))
+knee_at_master = _interp_to(t_master, knee_tpkl, knee_pkl)
+ank_at_master  = _interp_to(t_master, ank_tpkl,  ank_pkl)
+hip_at_master  = _interp_to(t_master, hip_tpkl,  hip_pkl)
 
-# Auto-detect medio-lateral axis per proximal segment
-ml_thigh  = auto_ml_axis(q_th_ref)
-ml_shank  = auto_ml_axis(q_sh_ref)
-ml_pelvis = auto_ml_axis(q_pv_ref)
-print(f"Auto-detected medio-lateral axes:  pelvis = {ml_pelvis},  "
-      f"thigh = {ml_thigh},  shank = {ml_shank}")
+# Tight thresholds: the user is in N-pose only if every joint reads ~0°.
+NPOSE_KNEE  = 3.0
+NPOSE_ANKLE = 3.0
+NPOSE_HIP   = 5.0   # hip naturally drifts a bit more on the pelvis sensor
+
+npose_mask = (
+    np.isfinite(knee_at_master) &
+    np.isfinite(ank_at_master)  &
+    np.isfinite(hip_at_master)  &
+    (np.abs(knee_at_master) < NPOSE_KNEE)  &
+    (np.abs(ank_at_master)  < NPOSE_ANKLE) &
+    (np.abs(hip_at_master)  < NPOSE_HIP)
+)
+# Require a contiguous window of ≥ 0.5 s of stillness.
+WIN = int(0.5 * fs)
+
+def _longest_run(mask):
+    """Return (start, length) of the longest True run in ``mask``."""
+    best_start, best_len = -1, 0
+    run_start, run_len = -1, 0
+    for i, m in enumerate(mask):
+        if m:
+            if run_start < 0: run_start = i
+            run_len += 1
+        else:
+            if run_len > best_len:
+                best_start, best_len = run_start, run_len
+            run_start, run_len = -1, 0
+    if run_len > best_len:
+        best_start, best_len = run_start, run_len
+    return best_start, best_len
+
+ref_start, ref_len = _longest_run(npose_mask)
+if ref_start < 0 or ref_len < WIN:
+    print("\n⚠ Could not find a contiguous 0.5 s window where all three")
+    print(f"  GUI-computed angles read |.|<{NPOSE_KNEE}° (knee/ankle) and")
+    print(f"  |.|<{NPOSE_HIP}° (hip). The .pkl was probably saved without")
+    print("  a clean N-pose moment after Calibrate Offsets. Walk back into")
+    print("  N-pose for ≥ 1 s during the recording, then re-save.")
+    sys.exit(1)
+
+# Use the middle of the longest static window for the reference average
+ref_end = ref_start + min(ref_len, int(1.0 * fs))   # cap at 1 s
+print(f"N-pose reference window (from GUI-computed angles ~0):")
+print(f"   samples {ref_start}..{ref_end}  "
+      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_end-1]:.2f} s, {ref_len} samples)")
+print(f"   knee  during ref: mean {knee_at_master[ref_start:ref_end].mean():+.2f}°, "
+      f"std {knee_at_master[ref_start:ref_end].std():.2f}°")
+print(f"   ankle during ref: mean {ank_at_master[ref_start:ref_end].mean():+.2f}°, "
+      f"std {ank_at_master[ref_start:ref_end].std():.2f}°")
+print(f"   hip   during ref: mean {hip_at_master[ref_start:ref_end].mean():+.2f}°, "
+      f"std {hip_at_master[ref_start:ref_end].std():.2f}°")
+
+q_th_ref = qnorm(q_th_r[ref_start:ref_end].mean(axis=0))
+q_sh_ref = qnorm(q_sh_r[ref_start:ref_end].mean(axis=0))
+q_ft_ref = qnorm(q_ft_r[ref_start:ref_end].mean(axis=0))
+q_pv_ref = qnorm(q_pv_r[ref_start:ref_end].mean(axis=0))
+
+# Auto-detect medio-lateral axis using dynamic variance over the gait cycle
+ml_thigh  = auto_ml_axis_variance(q_th_r, q_sh_r, ref_start, ref_end)
+ml_shank  = auto_ml_axis_variance(q_sh_r, q_ft_r, ref_start, ref_end)
+ml_pelvis = auto_ml_axis_variance(q_pv_r, q_th_r, ref_start, ref_end)
+print(f"Auto-detected medio-lateral axes (by variance): pelvis = {ml_pelvis}, "
+      f"thigh = {ml_thigh}, shank = {ml_shank}")
 
 
 # ── 4. COMPUTE SIGNED SAGITTAL ANGLES (Euler decomposition) ─────────────────
@@ -245,15 +276,75 @@ hip   = signed_sagittal_series(q_pv_r, q_th_r, q_pv_ref, q_th_ref, ml_pelvis)
 # Ankle = shank ↔ foot, ML axis in the SHANK frame
 ankle = signed_sagittal_series(q_sh_r, q_ft_r, q_sh_ref, q_ft_ref, ml_shank)
 
+# Fix signs to match clinical conventions (Whittle / Perry)
+# Knee and Hip flexion are positive in clinical convention. 
+# They naturally spend more time / have higher peaks in flexion.
+if np.abs(np.min(knee)) > np.max(knee):
+    print("   ⚠ Sign-flipped: Knee flexion appeared negative. Inverting.")
+    knee = -knee
+if np.abs(np.min(hip)) > np.max(hip):
+    print("   ⚠ Sign-flipped: Hip flexion appeared negative. Inverting.")
+    hip = -hip
+
 
 # ── 5. DETECT TOE-OFFS + DERIVE HEEL-STRIKES (HS-HS convention) ─────────────
-toe_offs, _ = find_peaks(-ankle, distance=int(0.5 * fs),
-                           prominence=15.0, height=15.0)
-print(f"\nToe-offs detected: {len(toe_offs)}")
+# The new Euler-based math gives physiological magnitudes (~10-20° plantar at
+# toe-off, not the ~50° the old SAA produced). Use ADAPTIVE thresholds
+# instead of fixed 15° so the detection survives whatever the current data
+# magnitude is. Also try BOTH polarities — depending on how the medio-lateral
+# axis sign falls out of the auto-detection, plantar may be the local minima
+# OR the local maxima.
+print(f"\nAnkle signal stats: range [{ankle.min():+.1f}..{ankle.max():+.1f}]°, "
+      f"std = {ankle.std():.1f}°")
+
+def detect_gait_events(signal, fs, label="signal"):
+    """Try both polarities of ``signal``, return the one with more clean peaks.
+    Adaptive threshold = 0.5 × signal range, capped at 30°."""
+    rng = float(signal.max() - signal.min())
+    if rng < 8.0:
+        print(f"   {label}: range only {rng:.1f}° — no walking-like motion.")
+        return np.array([], dtype=int), False
+    # Threshold scales with the actual data, but never below 4° (= rejects
+    # micro-jitter) or above 30° (= keeps real ROM in).
+    thr = max(4.0, min(0.3 * rng, 30.0))
+    prom = max(4.0, min(0.4 * rng, 30.0))
+    print(f"   {label}: adaptive thresholds  height ≥ {thr:.1f}°,  "
+          f"prominence ≥ {prom:.1f}°  (signal range {rng:.1f}°)")
+
+    # Try plantar = NEGATIVE direction (standard convention)
+    pks_neg, _ = find_peaks(-signal, distance=int(0.5 * fs),
+                              prominence=prom, height=thr)
+    # Also try plantar = POSITIVE (sign-flipped axis)
+    pks_pos, _ = find_peaks(+signal, distance=int(0.5 * fs),
+                              prominence=prom, height=thr)
+    if len(pks_neg) >= len(pks_pos):
+        return pks_neg, False    # standard polarity, no flip
+    return pks_pos, True         # need to flip the ankle sign for plot
+
+toe_offs, flip_sign = detect_gait_events(ankle, fs, label="ankle")
+if flip_sign:
+    print("   ⚠ Sign-flipped: ankle plantar appears POSITIVE in the raw")
+    print("      Euler output. Inverting so plots use the clinical convention.")
+    ankle = -ankle
+
+print(f"Toe-offs detected: {len(toe_offs)}")
 for i, idx in enumerate(toe_offs[:15]):
     print(f"   TO #{i+1}:  t = {t_rel[idx]:6.2f}s   ankle = {ankle[idx]:+6.1f}°")
 if len(toe_offs) < 2:
-    print("⚠ Less than 2 toe-offs — buffer doesn't contain walking.")
+    print("\n⚠ Less than 2 toe-offs — couldn't identify walking.")
+    print("  Plotting full buffer for diagnosis. If you DID walk, the ankle")
+    print("  signal might be too noisy or the calibration was unstable.")
+    fig_diag, axd = plt.subplots(3, 1, figsize=(14, 8), sharex=True)
+    axd[0].plot(t_rel, ankle, color="purple", lw=0.8); axd[0].set_ylabel("Caviglia (°)"); axd[0].grid(alpha=0.3)
+    axd[0].axhline(0, color="k", lw=0.4)
+    axd[0].set_title(f"Buffer completo (no toe-offs trovati) — {pkl_path.name}")
+    axd[1].plot(t_rel, knee, color="orange", lw=0.8); axd[1].set_ylabel("Ginocchio (°)"); axd[1].grid(alpha=0.3)
+    axd[1].axhline(0, color="k", lw=0.4)
+    axd[2].plot(t_rel, hip, color="goldenrod", lw=0.8); axd[2].set_ylabel("Anca (°)"); axd[2].grid(alpha=0.3)
+    axd[2].axhline(0, color="k", lw=0.4)
+    axd[2].set_xlabel("Tempo (s)")
+    fig_diag.tight_layout()
+    plt.show()
     sys.exit(0)
 
 # HS = 40% of the TO-TO cycle after the previous TO
