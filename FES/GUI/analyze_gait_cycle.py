@@ -146,10 +146,35 @@ q_th = qnorm(np.asarray(d[f"raw_{side}_thigh_quat"], dtype=np.float64))
 q_sh = qnorm(np.asarray(d[f"raw_{side}_shank_quat"], dtype=np.float64))
 q_ft = qnorm(np.asarray(d[f"raw_{side}_foot_quat"],  dtype=np.float64))
 q_pv = qnorm(np.asarray(d["raw_pelvis_quat"],        dtype=np.float64))
-t_th = np.asarray(d[f"raw_{side}_thigh_timestamps"], dtype=np.float64)
-t_sh = np.asarray(d[f"raw_{side}_shank_timestamps"], dtype=np.float64)
-t_ft = np.asarray(d[f"raw_{side}_foot_timestamps"],  dtype=np.float64)
-t_pv = np.asarray(d["raw_pelvis_timestamps"],        dtype=np.float64)
+
+# Collect all raw timestamps to find the global maximum before unwrapping
+ts_keys = [k for k in d.keys() if "timestamps" in k]
+global_max_ts = 0.0
+for k in ts_keys:
+    if len(d[k]) > 0:
+        global_max_ts = max(global_max_ts, np.max(d[k]))
+
+def unwrap_timestamps(ts, global_max):
+    """Fix 32-bit timer overflows in the IMU (wraps every ~4294.96s)."""
+    ts = ts.copy()
+    if len(ts) == 0:
+        return ts
+    # If the stream starts low but the session had high timestamps,
+    # it means this entire stream started after the wrap-around.
+    if ts[0] < 1000.0 and global_max > 4000.0:
+        ts += 4294.967296
+    
+    diffs = np.diff(ts)
+    jumps = np.where(diffs < -1000.0)[0]
+    for j in jumps:
+        ts[j+1:] += 4294.967296  # 2^32 milliseconds
+    return ts
+
+t_th = unwrap_timestamps(np.asarray(d[f"raw_{side}_thigh_timestamps"], dtype=np.float64), global_max_ts)
+t_sh = unwrap_timestamps(np.asarray(d[f"raw_{side}_shank_timestamps"], dtype=np.float64), global_max_ts)
+t_ft = unwrap_timestamps(np.asarray(d[f"raw_{side}_foot_timestamps"],  dtype=np.float64), global_max_ts)
+t_pv = unwrap_timestamps(np.asarray(d["raw_pelvis_timestamps"],        dtype=np.float64), global_max_ts)
+
 for name, q in [("thigh", q_th), ("shank", q_sh), ("foot", q_ft), ("pelvis", q_pv)]:
     print(f"   raw {name}: {q.shape[0]} samples")
 
@@ -184,76 +209,36 @@ print(f"\nMaster clock = shank ({t_master.size} samples, {t_rel[-1]:.1f} s, ~{fs
 # quaternions at that moment as the reference for our signed Euler math.
 
 knee_pkl  = np.asarray(d[f"{side}_knee_angles"],     dtype=np.float64)
-knee_tpkl = np.asarray(d[f"{side}_knee_timestamps"], dtype=np.float64)
+knee_tpkl = unwrap_timestamps(np.asarray(d[f"{side}_knee_timestamps"], dtype=np.float64), global_max_ts)
 ank_pkl   = np.asarray(d[f"{side}_ankle_angles"],    dtype=np.float64)
-ank_tpkl  = np.asarray(d[f"{side}_ankle_timestamps"],dtype=np.float64)
+ank_tpkl  = unwrap_timestamps(np.asarray(d[f"{side}_ankle_timestamps"],dtype=np.float64), global_max_ts)
 hip_pkl   = np.asarray(d[f"{side}_hip_angles"],      dtype=np.float64)
-hip_tpkl  = np.asarray(d[f"{side}_hip_timestamps"],  dtype=np.float64)
+hip_tpkl  = unwrap_timestamps(np.asarray(d[f"{side}_hip_timestamps"],  dtype=np.float64), global_max_ts)
 
-# Interpolate the computed angles onto the shank master clock so all 3
-# streams share the same time index as our raw quaternions.
-def _interp_to(t_target, t_src, val_src):
-    if t_src.size == 0:
-        return np.full_like(t_target, np.nan)
-    return np.interp(t_target, t_src, val_src,
-                     left=np.nan, right=np.nan)
+def find_npose_from_variance(q_prox, window_len):
+    """Find the contiguous window where the subject is standing most still.
+    
+    This replaces the brittle method of checking if GUI-computed angles == 0.
+    Instead, we just scan the raw quaternion for the period with minimum
+    sum of variances, which physically corresponds to the static standing 
+    calibration moment.
+    """
+    if len(q_prox) < window_len: 
+        return 0, len(q_prox)
+    variances = []
+    # Step by 10 to speed up search
+    for i in range(0, len(q_prox) - window_len, 10):
+        v = np.sum(np.var(q_prox[i:i+window_len], axis=0))
+        variances.append(v)
+    best_idx = np.argmin(variances) * 10
+    return best_idx, best_idx + window_len
 
-knee_at_master = _interp_to(t_master, knee_tpkl, knee_pkl)
-ank_at_master  = _interp_to(t_master, ank_tpkl,  ank_pkl)
-hip_at_master  = _interp_to(t_master, hip_tpkl,  hip_pkl)
+WIN = int(1.0 * fs)  # 1 second window
+ref_start, ref_end = find_npose_from_variance(q_sh_r, WIN)
 
-# Tight thresholds: the user is in N-pose only if every joint reads ~0°.
-NPOSE_KNEE  = 3.0
-NPOSE_ANKLE = 3.0
-NPOSE_HIP   = 5.0   # hip naturally drifts a bit more on the pelvis sensor
-
-npose_mask = (
-    np.isfinite(knee_at_master) &
-    np.isfinite(ank_at_master)  &
-    np.isfinite(hip_at_master)  &
-    (np.abs(knee_at_master) < NPOSE_KNEE)  &
-    (np.abs(ank_at_master)  < NPOSE_ANKLE) &
-    (np.abs(hip_at_master)  < NPOSE_HIP)
-)
-# Require a contiguous window of ≥ 0.5 s of stillness.
-WIN = int(0.5 * fs)
-
-def _longest_run(mask):
-    """Return (start, length) of the longest True run in ``mask``."""
-    best_start, best_len = -1, 0
-    run_start, run_len = -1, 0
-    for i, m in enumerate(mask):
-        if m:
-            if run_start < 0: run_start = i
-            run_len += 1
-        else:
-            if run_len > best_len:
-                best_start, best_len = run_start, run_len
-            run_start, run_len = -1, 0
-    if run_len > best_len:
-        best_start, best_len = run_start, run_len
-    return best_start, best_len
-
-ref_start, ref_len = _longest_run(npose_mask)
-if ref_start < 0 or ref_len < WIN:
-    print("\n⚠ Could not find a contiguous 0.5 s window where all three")
-    print(f"  GUI-computed angles read |.|<{NPOSE_KNEE}° (knee/ankle) and")
-    print(f"  |.|<{NPOSE_HIP}° (hip). The .pkl was probably saved without")
-    print("  a clean N-pose moment after Calibrate Offsets. Walk back into")
-    print("  N-pose for ≥ 1 s during the recording, then re-save.")
-    sys.exit(1)
-
-# Use the middle of the longest static window for the reference average
-ref_end = ref_start + min(ref_len, int(1.0 * fs))   # cap at 1 s
-print(f"N-pose reference window (from GUI-computed angles ~0):")
+print(f"N-pose reference window (from minimum quaternion variance):")
 print(f"   samples {ref_start}..{ref_end}  "
-      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_end-1]:.2f} s, {ref_len} samples)")
-print(f"   knee  during ref: mean {knee_at_master[ref_start:ref_end].mean():+.2f}°, "
-      f"std {knee_at_master[ref_start:ref_end].std():.2f}°")
-print(f"   ankle during ref: mean {ank_at_master[ref_start:ref_end].mean():+.2f}°, "
-      f"std {ank_at_master[ref_start:ref_end].std():.2f}°")
-print(f"   hip   during ref: mean {hip_at_master[ref_start:ref_end].mean():+.2f}°, "
-      f"std {hip_at_master[ref_start:ref_end].std():.2f}°")
+      f"(t = {t_rel[ref_start]:.2f}..{t_rel[ref_end-1]:.2f} s, {WIN} samples)")
 
 q_th_ref = qnorm(q_th_r[ref_start:ref_end].mean(axis=0))
 q_sh_ref = qnorm(q_sh_r[ref_start:ref_end].mean(axis=0))
