@@ -715,7 +715,7 @@ class AngleCalibrator(QObject):
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.left_ankle_offset, self._diag["left_shank"],
-                    is_ankle=True,
+                    is_ankle=False,
                     proximal_axis=self.left_ankle_shank_axis,
                     distal_axis=self.left_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
@@ -768,7 +768,7 @@ class AngleCalibrator(QObject):
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.right_ankle_offset, self._diag["right_shank"],
-                    is_ankle=True,
+                    is_ankle=False,
                     proximal_axis=self.right_ankle_shank_axis,
                     distal_axis=self.right_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
