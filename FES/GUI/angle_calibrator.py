@@ -668,26 +668,19 @@ class AngleCalibrator(QObject):
                 elif key == "right_foot":
                     self._acc["r_ankle_foot"].extend(paired)
 
-        # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
-        # Pelvis samples feed BOTH left and right hip computations, so they are
-        # NOT included in the per-leg `min` and we don't pop them per-leg either.
-        # Instead we take a snapshot, peek for hip math on each side, then pop
-        # only the maximum count actually used by either side.
-        pelvis_snapshot = list(self._acc["pelvis"]) if self.pelvis_inlet else []
-        pelvis_used = 0
+                self._diag[key]["count"]  += len(samples)
+                self._diag[key]["last_ts"] = now
+                if hasattr(self, '_raw_log') and key in self._raw_log:
+                    for ts, s in paired:
+                        self._raw_log[key].append([ts] + list(s))
 
-        # ── 3. Process LEFT LEG ───────────────────────────────────────────────
-        l_thigh_q = list(self._acc["left_thigh"]) if self.left_thigh_inlet else []
-        l_shank_q = list(self._acc["left_shank"]) if self.left_shank_inlet else []
-        l_foot_q  = list(self._acc["left_foot"]) if self.left_foot_inlet else []
-
-        l_thigh_used = 0
-        l_shank_used = 0
-        l_foot_used  = 0
+        # ── 2. Process LEFT LEG ───────────────────────────────────────────────
 
         # Hip LEFT
         if self.pelvis_inlet and self.left_thigh_inlet:
-            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, l_thigh_q)
+            q_p = list(self._acc["l_hip_pelvis"])
+            q_t = list(self._acc["l_hip_thigh"])
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(q_p, q_t)
             if p_s:
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
@@ -695,12 +688,14 @@ class AngleCalibrator(QObject):
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
-                pelvis_used = max(pelvis_used, c_p)
-                l_thigh_used = max(l_thigh_used, c_t)
+                for _ in range(c_p): self._acc["l_hip_pelvis"].popleft()
+                for _ in range(c_t): self._acc["l_hip_thigh"].popleft()
 
         # Knee LEFT
         if self.left_thigh_inlet and self.left_shank_inlet:
-            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(l_thigh_q, l_shank_q)
+            q_t = list(self._acc["l_knee_thigh"])
+            q_s = list(self._acc["l_knee_shank"])
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(q_t, q_s)
             if t_s:
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
@@ -708,12 +703,14 @@ class AngleCalibrator(QObject):
                 )
                 self.left_angle_data = np.append(self.left_angle_data, angles)
                 self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
-                l_thigh_used = max(l_thigh_used, c_t)
-                l_shank_used = max(l_shank_used, c_s)
+                for _ in range(c_t): self._acc["l_knee_thigh"].popleft()
+                for _ in range(c_s): self._acc["l_knee_shank"].popleft()
 
         # Ankle LEFT
         if self.left_shank_inlet and self.left_foot_inlet:
-            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(l_shank_q, l_foot_q)
+            q_s = list(self._acc["l_ankle_shank"])
+            q_f = list(self._acc["l_ankle_foot"])
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(q_s, q_f)
             if s_s:
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
@@ -727,21 +724,16 @@ class AngleCalibrator(QObject):
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
-                l_shank_used = max(l_shank_used, c_s)
-                l_foot_used = max(l_foot_used, c_f)
+                for _ in range(c_s): self._acc["l_ankle_shank"].popleft()
+                for _ in range(c_f): self._acc["l_ankle_foot"].popleft()
 
-        # ── 4. Process RIGHT LEG ──────────────────────────────────────────────
-        r_thigh_q = list(self._acc["right_thigh"]) if self.right_thigh_inlet else []
-        r_shank_q = list(self._acc["right_shank"]) if self.right_shank_inlet else []
-        r_foot_q  = list(self._acc["right_foot"]) if self.right_foot_inlet else []
-
-        r_thigh_used = 0
-        r_shank_used = 0
-        r_foot_used  = 0
+        # ── 3. Process RIGHT LEG ──────────────────────────────────────────────
 
         # Hip RIGHT
         if self.pelvis_inlet and self.right_thigh_inlet:
-            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, r_thigh_q)
+            q_p = list(self._acc["r_hip_pelvis"])
+            q_t = list(self._acc["r_hip_thigh"])
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(q_p, q_t)
             if p_s:
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
@@ -749,12 +741,14 @@ class AngleCalibrator(QObject):
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
-                pelvis_used = max(pelvis_used, c_p)
-                r_thigh_used = max(r_thigh_used, c_t)
+                for _ in range(c_p): self._acc["r_hip_pelvis"].popleft()
+                for _ in range(c_t): self._acc["r_hip_thigh"].popleft()
 
         # Knee RIGHT
         if self.right_thigh_inlet and self.right_shank_inlet:
-            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(r_thigh_q, r_shank_q)
+            q_t = list(self._acc["r_knee_thigh"])
+            q_s = list(self._acc["r_knee_shank"])
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(q_t, q_s)
             if t_s:
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
@@ -762,12 +756,14 @@ class AngleCalibrator(QObject):
                 )
                 self.right_angle_data = np.append(self.right_angle_data, angles)
                 self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
-                r_thigh_used = max(r_thigh_used, c_t)
-                r_shank_used = max(r_shank_used, c_s)
+                for _ in range(c_t): self._acc["r_knee_thigh"].popleft()
+                for _ in range(c_s): self._acc["r_knee_shank"].popleft()
 
         # Ankle RIGHT
         if self.right_shank_inlet and self.right_foot_inlet:
-            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(r_shank_q, r_foot_q)
+            q_s = list(self._acc["r_ankle_shank"])
+            q_f = list(self._acc["r_ankle_foot"])
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(q_s, q_f)
             if s_s:
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
@@ -781,31 +777,8 @@ class AngleCalibrator(QObject):
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
-                r_shank_used = max(r_shank_used, c_s)
-                r_foot_used = max(r_foot_used, c_f)
-
-        # ── 5. Drop the samples consumed by computations ───────────
-        if self.pelvis_inlet and pelvis_used > 0:
-            for _ in range(min(pelvis_used, len(self._acc["pelvis"]))):
-                self._acc["pelvis"].popleft()
-        if self.left_thigh_inlet and l_thigh_used > 0:
-            for _ in range(min(l_thigh_used, len(self._acc["left_thigh"]))):
-                self._acc["left_thigh"].popleft()
-        if self.left_shank_inlet and l_shank_used > 0:
-            for _ in range(min(l_shank_used, len(self._acc["left_shank"]))):
-                self._acc["left_shank"].popleft()
-        if self.left_foot_inlet and l_foot_used > 0:
-            for _ in range(min(l_foot_used, len(self._acc["left_foot"]))):
-                self._acc["left_foot"].popleft()
-        if self.right_thigh_inlet and r_thigh_used > 0:
-            for _ in range(min(r_thigh_used, len(self._acc["right_thigh"]))):
-                self._acc["right_thigh"].popleft()
-        if self.right_shank_inlet and r_shank_used > 0:
-            for _ in range(min(r_shank_used, len(self._acc["right_shank"]))):
-                self._acc["right_shank"].popleft()
-        if self.right_foot_inlet and r_foot_used > 0:
-            for _ in range(min(r_foot_used, len(self._acc["right_foot"]))):
-                self._acc["right_foot"].popleft()
+                for _ in range(c_s): self._acc["r_ankle_shank"].popleft()
+                for _ in range(c_f): self._acc["r_ankle_foot"].popleft()
 
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
