@@ -125,13 +125,23 @@ class AngleCalibrator(QObject):
         # BLE delivers shank and foot samples at different host-clock times.
         # Accumulating independently and matching when both have data ensures we
         # never miss a pair just because they didn't arrive in the same 20 ms tick.
-        # Max 300 samples ≈ 3 s at 100 Hz — enough headroom without memory risk.
-        _BUF = 300
+        # Max 1000 samples ≈ 16 s at 60 Hz — extremely resilient to BT dropouts.
+        _BUF = 1000
         self._acc = {
-            name: deque(maxlen=_BUF)
-            for name in ("left_thigh", "left_shank", "left_foot",
-                          "right_thigh", "right_shank", "right_foot",
-                          "pelvis")
+            "l_hip_pelvis": deque(maxlen=_BUF),
+            "l_hip_thigh": deque(maxlen=_BUF),
+            "r_hip_pelvis": deque(maxlen=_BUF),
+            "r_hip_thigh": deque(maxlen=_BUF),
+            
+            "l_knee_thigh": deque(maxlen=_BUF),
+            "l_knee_shank": deque(maxlen=_BUF),
+            "r_knee_thigh": deque(maxlen=_BUF),
+            "r_knee_shank": deque(maxlen=_BUF),
+            
+            "l_ankle_shank": deque(maxlen=_BUF),
+            "l_ankle_foot": deque(maxlen=_BUF),
+            "r_ankle_shank": deque(maxlen=_BUF),
+            "r_ankle_foot": deque(maxlen=_BUF),
         }
 
         # Diagnostic timer — fires every 2 s, reads the counters and emits
@@ -637,13 +647,26 @@ class AngleCalibrator(QObject):
             if samples:
                 # Store as (timestamp, sample) tuples to allow time-sync matching
                 paired = list(zip(timestamps, samples))
-                self._acc[key].extend(paired)
-                self._diag[key]["count"]  += len(samples)
-                self._diag[key]["last_ts"] = now
-                if hasattr(self, '_raw_log') and key in self._raw_log:
-                    # Save raw samples with arrival timestamp for debugging
-                    for ts, s in paired:
-                        self._raw_log[key].append([ts] + list(s))
+                # Distribute into strictly independent queues to prevent multi-consumer popping bugs
+                if key == "pelvis":
+                    self._acc["l_hip_pelvis"].extend(paired)
+                    self._acc["r_hip_pelvis"].extend(paired)
+                elif key == "left_thigh":
+                    self._acc["l_hip_thigh"].extend(paired)
+                    self._acc["l_knee_thigh"].extend(paired)
+                elif key == "right_thigh":
+                    self._acc["r_hip_thigh"].extend(paired)
+                    self._acc["r_knee_thigh"].extend(paired)
+                elif key == "left_shank":
+                    self._acc["l_knee_shank"].extend(paired)
+                    self._acc["l_ankle_shank"].extend(paired)
+                elif key == "right_shank":
+                    self._acc["r_knee_shank"].extend(paired)
+                    self._acc["r_ankle_shank"].extend(paired)
+                elif key == "left_foot":
+                    self._acc["l_ankle_foot"].extend(paired)
+                elif key == "right_foot":
+                    self._acc["r_ankle_foot"].extend(paired)
 
         # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
         # Pelvis samples feed BOTH left and right hip computations, so they are
