@@ -7,7 +7,7 @@ from stimulator.closed_loop import (
     ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
-    compute_axis_alignment_quaternion,
+    identify_hinge_axis,
 )
 import time
 from typing import Optional
@@ -20,6 +20,7 @@ class CalibrationStep(Enum):
     READY = 0
     NEUTRAL_POSE = 1
     COLLECT_DATA = 2
+    ANKLE_CALIBRATION = 3
 
 
 class SIDE(Enum):
@@ -90,27 +91,20 @@ class AngleCalibrator(QObject):
         self.right_ankle_shank_axis = 'X'
         self.right_ankle_foot_axis  = 'X'
 
-        # Sensor-to-segment alignment quaternions captured at Functional
-        # Calibration (PCA on gyro during ~5 s of dynamic motion). When set,
-        # they rotate the IMU local frame so that local-Y truly corresponds
-        # to the anatomical medio-lateral axis — eliminates the residual
-        # ankle ↔ knee cross-talk seen with static-only calibration.
-        # Default = None → signed_ankle_angle behaves as before.
-        self.left_shank_align_quat:  Optional[np.ndarray] = None
-        self.left_foot_align_quat:   Optional[np.ndarray] = None
-        self.right_shank_align_quat: Optional[np.ndarray] = None
-        self.right_foot_align_quat:  Optional[np.ndarray] = None
-
-        # Functional Calibration state — buffers gyro samples while active.
-        self._funcal_active: bool = False
-        self._funcal_gyro_buffer: dict[str, list] = {
-            "left_shank":  [], "left_foot":  [],
-            "right_shank": [], "right_foot": [],
-        }
-        self._funcal_timer: Optional[QTimer] = None
+        self.left_ankle_hinge_axis = None
+        self.right_ankle_hinge_axis = None
         
         # Raw data logging for debugging time-sync issues
-        self._raw_log = {'left_shank': [], 'left_foot': [], 'right_shank': [], 'right_foot': []}
+        # Raw per-sample IMU log (timestamp + 10 sensor channels per inlet).
+        # Used to dump quaternions + accel + gyro post-test so the offline
+        # analysis can recompute joint angles with proper signed Euler math
+        # (the live SAA path used by the dispatcher is unsigned and squashes
+        # extension/inversion). All seven LSL inlets are logged.
+        self._raw_log = {
+            'left_thigh':  [], 'left_shank':  [], 'left_foot':  [],
+            'right_thigh': [], 'right_shank': [], 'right_foot': [],
+            'pelvis':      [],
+        }
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -131,13 +125,23 @@ class AngleCalibrator(QObject):
         # BLE delivers shank and foot samples at different host-clock times.
         # Accumulating independently and matching when both have data ensures we
         # never miss a pair just because they didn't arrive in the same 20 ms tick.
-        # Max 300 samples ≈ 3 s at 100 Hz — enough headroom without memory risk.
-        _BUF = 300
+        # Max 1000 samples ≈ 16 s at 60 Hz — extremely resilient to BT dropouts.
+        _BUF = 1000
         self._acc = {
-            name: deque(maxlen=_BUF)
-            for name in ("left_thigh", "left_shank", "left_foot",
-                          "right_thigh", "right_shank", "right_foot",
-                          "pelvis")
+            "l_hip_pelvis": deque(maxlen=_BUF),
+            "l_hip_thigh": deque(maxlen=_BUF),
+            "r_hip_pelvis": deque(maxlen=_BUF),
+            "r_hip_thigh": deque(maxlen=_BUF),
+            
+            "l_knee_thigh": deque(maxlen=_BUF),
+            "l_knee_shank": deque(maxlen=_BUF),
+            "r_knee_thigh": deque(maxlen=_BUF),
+            "r_knee_shank": deque(maxlen=_BUF),
+            
+            "l_ankle_shank": deque(maxlen=_BUF),
+            "l_ankle_foot": deque(maxlen=_BUF),
+            "r_ankle_shank": deque(maxlen=_BUF),
+            "r_ankle_foot": deque(maxlen=_BUF),
         }
 
         # Diagnostic timer — fires every 2 s, reads the counters and emits
@@ -161,99 +165,6 @@ class AngleCalibrator(QObject):
         left_hip = self.left_thigh_inlet is not None and self.pelvis_inlet is not None
         right_hip = self.right_thigh_inlet is not None and self.pelvis_inlet is not None
         return left_knee or right_knee or left_ankle or right_ankle or left_hip or right_hip
-
-    # ──────────────────────────────────────────────────────────────────────
-    # Functional Calibration (PCA-based sensor-to-segment alignment)
-    # ──────────────────────────────────────────────────────────────────────
-    @Slot()
-    def start_functional_calibration(self, duration_s: float = 5.0):
-        """Begin a ~``duration_s``-second buffering period during which the operator
-        walks (or does a few squats). Per-sensor gyro vectors are accumulated;
-        when the timer fires, PCA on each sensor's gyro identifies the joint's
-        true rotation axis in the local frame, and an alignment quaternion is
-        stored that brings local-Y onto that axis (anatomical medio-lateral).
-
-        Reduces residual ankle ↔ knee cross-talk caused by sensor mounting
-        misalignment from ~10° (static-only calibration) to ~1-3°.
-
-        Reference: Hoegberg, Donahue, Major (2025) *Sensors* 25, 2931 § 2.1.2.
-        """
-        if not self.has_any_sensor():
-            self.error_signal.emit("Functional Calibration: no sensors connected.")
-            return
-        if self._funcal_active:
-            self.message_signal.emit("Functional Calibration already running.")
-            return
-        for k in self._funcal_gyro_buffer:
-            self._funcal_gyro_buffer[k] = []
-        self._funcal_active = True
-        self.message_signal.emit(
-            f"<b>Functional Calibration started.</b> Walk normally for "
-            f"{duration_s:.0f} seconds (or do 3-5 squats). Stand still until done."
-        )
-        if self._funcal_timer is None:
-            self._funcal_timer = QTimer(self)
-            self._funcal_timer.setSingleShot(True)
-            self._funcal_timer.timeout.connect(self._finalise_functional_calibration)
-        else:
-            self._funcal_timer.stop()
-        self._funcal_timer.start(int(duration_s * 1000))
-
-    @Slot()
-    def _finalise_functional_calibration(self):
-        """Run PCA on the buffered gyro and store per-sensor alignment quaternions."""
-        self._funcal_active = False
-        identity_q = np.array([1.0, 0.0, 0.0, 0.0])
-        good = []   # sensors with a meaningful alignment captured
-        rejected = []   # sensors whose PCA failed validation
-        skipped = []   # sensors with too few samples (probably not connected)
-        for key, attr in (
-            ("left_shank",  "left_shank_align_quat"),
-            ("left_foot",   "left_foot_align_quat"),
-            ("right_shank", "right_shank_align_quat"),
-            ("right_foot",  "right_foot_align_quat"),
-        ):
-            buf = self._funcal_gyro_buffer.get(key) or []
-            if len(buf) < 50:
-                setattr(self, attr, None)
-                if buf:
-                    skipped.append(f"{key} (n={len(buf)})")
-                self._funcal_gyro_buffer[key] = []
-                continue
-            arr = np.asarray(buf, dtype=float)
-            q_align = compute_axis_alignment_quaternion(arr, target_axis='Y')
-            # Identity quaternion (within tolerance) means PCA refused to
-            # produce an alignment because motion was insufficient or noisy.
-            is_identity = (abs(q_align[0] - 1.0) < 1e-3 and
-                           abs(q_align[1]) + abs(q_align[2]) + abs(q_align[3]) < 1e-3)
-            if is_identity:
-                setattr(self, attr, None)  # explicit None → no alignment applied at runtime
-                rejected.append(f"{key} (n={len(arr)})")
-            else:
-                setattr(self, attr, q_align)
-                good.append(f"{key}: q=[{q_align[0]:+.2f},{q_align[1]:+.2f},{q_align[2]:+.2f},{q_align[3]:+.2f}]")
-            self._funcal_gyro_buffer[key] = []
-
-        # User-visible report — distinguishes the three outcomes clearly so the
-        # operator knows whether to retry (rejected) or accept (good).
-        lines = []
-        if good:
-            lines.append("<b style='color:#27ae60;'>✓ Aligned:</b> " + "; ".join(good))
-        if rejected:
-            lines.append(
-                "<b style='color:#e67e22;'>⚠ REJECTED (insufficient motion):</b> "
-                + ", ".join(rejected) +
-                "<br><i>Press Functional Calibration again and walk for the full 5 seconds.</i>"
-            )
-        if skipped:
-            lines.append("<span style='color:#888;'>Skipped (not connected): " + ", ".join(skipped) + "</span>")
-        if lines:
-            self.message_signal.emit("<b>Functional Calibration complete.</b><br>" + "<br>".join(lines))
-        else:
-            self.error_signal.emit(
-                "Functional Calibration: no gyro samples buffered. "
-                "Are sensors connected and streaming?"
-            )
 
     def _connected_inlets(self) -> list:
         """Return the list of ``(display_name, inlet, diag_key)`` for inlets the
@@ -362,16 +273,23 @@ class AngleCalibrator(QObject):
         self.message_signal.emit("Angle calibration stopped (knee + ankle + hip).")
 
     def save_raw_data(self):
-        """Save raw LSL data for debugging time sync."""
+        """Save raw LSL data for debugging time sync.
+
+        Dumps all seven inlets (thigh / shank / foot for both legs + pelvis)
+        to ``raw_imu_data_from_gui.npz``. Each entry is a (N, 11) array with
+        columns ``[lsl_ts, accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]``.
+        """
         try:
             import numpy as np
             raw_file = "raw_imu_data_from_gui.npz"
-            np.savez(raw_file, 
-                     left_shank=np.array(self._raw_log['left_shank']),
-                     left_foot=np.array(self._raw_log['left_foot']),
-                     right_shank=np.array(self._raw_log['right_shank']),
-                     right_foot=np.array(self._raw_log['right_foot']))
-            print(f"Raw LSL data saved to {raw_file}")
+            payload = {
+                k: np.array(v if v else [], dtype=np.float64)
+                for k, v in self._raw_log.items()
+            }
+            np.savez(raw_file, **payload)
+            print(f"Raw LSL data saved to {raw_file} "
+                  f"(segments with data: "
+                  f"{[k for k, v in self._raw_log.items() if v]})")
         except Exception as e:
             print(f"Failed to save raw data: {e}")
 
@@ -455,6 +373,100 @@ class AngleCalibrator(QObject):
         )
         self.calibration_done_signal.emit(banner)
 
+    def ankle_functional_calibration(self):
+        """Functional calibration for the ankle joint. Requires user to do dorsi/plantarflexion for 5 seconds."""
+        if not self.has_any_sensor():
+            self.error_signal.emit("Ankle Calibration failed: no sensors connected.")
+            return
+
+        if self.calibration_step != CalibrationStep.READY:
+            self.message_signal.emit("System is busy, please wait...")
+            return
+
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
+        
+        self.diagnostic_signal.emit(
+            '<p style="color:#3498db; font-weight:bold;">'
+            '&#128095; Ankle Functional Calibration&hellip;<br/>'
+            'Please repeatedly flex and extend your ankle (dorsiflexion/plantarflexion) for 5 seconds.</p>'
+        )
+        QCoreApplication.processEvents()
+        
+        self.timer.stop()
+        
+        for _name, inlet, _key in self._connected_inlets():
+            try:
+                inlet.flush()
+            except Exception:
+                pass
+                
+        import time
+        from stimulator.closed_loop import detect_most_vertical_axis, detect_most_horizontal_axis
+        
+        duration = 5.0
+        start_t = time.time()
+        
+        left_shank_qs = []
+        left_foot_qs = []
+        right_shank_qs = []
+        right_foot_qs = []
+        
+        while time.time() - start_t < duration:
+            if self.left_checkbox.isChecked() and self.left_shank_inlet and self.left_foot_inlet:
+                qs_chunk, _ = self.left_shank_inlet.pull_chunk(timeout=0.0)
+                qf_chunk, _ = self.left_foot_inlet.pull_chunk(timeout=0.0)
+                if qs_chunk: left_shank_qs.extend(qs_chunk)
+                if qf_chunk: left_foot_qs.extend(qf_chunk)
+                
+            if self.right_checkbox.isChecked() and self.right_shank_inlet and self.right_foot_inlet:
+                qs_chunk, _ = self.right_shank_inlet.pull_chunk(timeout=0.0)
+                qf_chunk, _ = self.right_foot_inlet.pull_chunk(timeout=0.0)
+                if qs_chunk: right_shank_qs.extend(qs_chunk)
+                if qf_chunk: right_foot_qs.extend(qf_chunk)
+                
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+            
+        if self.left_checkbox.isChecked() and left_shank_qs and left_foot_qs:
+            n_min = min(len(left_shank_qs), len(left_foot_qs))
+            if n_min > 50:
+                qs_arr = np.array([s[6:10] for s in left_shank_qs[:n_min]], dtype=np.float64)
+                qf_arr = np.array([s[6:10] for s in left_foot_qs[:n_min]], dtype=np.float64)
+                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
+                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
+                
+                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
+                self.left_ankle_hinge_axis = hinge_axis
+                self.message_signal.emit(f"Left Ankle Functional Calib DONE.")
+            else:
+                self.error_signal.emit("Not enough data collected for Left Ankle.")
+                
+        if self.right_checkbox.isChecked() and right_shank_qs and right_foot_qs:
+            n_min = min(len(right_shank_qs), len(right_foot_qs))
+            if n_min > 50:
+                qs_arr = np.array([s[6:10] for s in right_shank_qs[:n_min]], dtype=np.float64)
+                qf_arr = np.array([s[6:10] for s in right_foot_qs[:n_min]], dtype=np.float64)
+                qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
+                qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
+                
+                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
+                if hinge_axis[1] < 0: # Ensure consistent Y direction for right leg
+                    hinge_axis *= -1
+                self.right_ankle_hinge_axis = hinge_axis
+                self.message_signal.emit(f"Right Ankle Functional Calib DONE.")
+            else:
+                self.error_signal.emit("Not enough data collected for Right Ankle.")
+        
+        self.timer.start()
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        
+        self.diagnostic_signal.emit(
+            '<p style="color:#2ecc71; font-weight:bold;">'
+            '&#10004; Ankle Functional Calibration Complete.</p>'
+        )
+
 
     def get_offset(self) -> tuple[float, float]:
         """Return the knee angle offsets for both legs.
@@ -473,19 +485,21 @@ class AngleCalibrator(QObject):
         return self.left_ankle_offset, self.right_ankle_offset
 
     def get_ankle_reference(self):
-        """Return the calibration quaternions (q_shank_ref, q_foot_ref) for each leg.
+        """Return the calibration quaternions (q_shank_ref, q_foot_ref) and
+        hinge axes for each leg.
 
         Used to pass the reference quaternions to ROM.set_ankle_reference() so that
         the stable relative-quaternion ankle angle algorithm can be used at runtime.
 
-        :return: (left_qs, left_qf, right_qs, right_qf) or (None, None, None, None)
-                 when no ankle calibration has been performed yet.
+        :return: (left_qs, left_qf, right_qs, right_qf, left_axis, right_axis)
         """
         left_qs  = getattr(self, 'left_ankle_qshank_ref',  None)
         left_qf  = getattr(self, 'left_ankle_qfoot_ref',   None)
         right_qs = getattr(self, 'right_ankle_qshank_ref', None)
         right_qf = getattr(self, 'right_ankle_qfoot_ref',  None)
-        return left_qs, left_qf, right_qs, right_qf
+        left_axis = getattr(self, 'left_ankle_hinge_axis', None)
+        right_axis = getattr(self, 'right_ankle_hinge_axis', None)
+        return left_qs, left_qf, right_qs, right_qf, left_axis, right_axis
 
     def get_angle_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the knee angle data for both legs.
@@ -633,42 +647,40 @@ class AngleCalibrator(QObject):
             if samples:
                 # Store as (timestamp, sample) tuples to allow time-sync matching
                 paired = list(zip(timestamps, samples))
-                self._acc[key].extend(paired)
+                # Distribute into strictly independent queues to prevent multi-consumer popping bugs
+                if key == "pelvis":
+                    self._acc["l_hip_pelvis"].extend(paired)
+                    self._acc["r_hip_pelvis"].extend(paired)
+                elif key == "left_thigh":
+                    self._acc["l_hip_thigh"].extend(paired)
+                    self._acc["l_knee_thigh"].extend(paired)
+                elif key == "right_thigh":
+                    self._acc["r_hip_thigh"].extend(paired)
+                    self._acc["r_knee_thigh"].extend(paired)
+                elif key == "left_shank":
+                    self._acc["l_knee_shank"].extend(paired)
+                    self._acc["l_ankle_shank"].extend(paired)
+                elif key == "right_shank":
+                    self._acc["r_knee_shank"].extend(paired)
+                    self._acc["r_ankle_shank"].extend(paired)
+                elif key == "left_foot":
+                    self._acc["l_ankle_foot"].extend(paired)
+                elif key == "right_foot":
+                    self._acc["r_ankle_foot"].extend(paired)
+
                 self._diag[key]["count"]  += len(samples)
                 self._diag[key]["last_ts"] = now
                 if hasattr(self, '_raw_log') and key in self._raw_log:
-                    # Save raw samples with arrival timestamp for debugging
                     for ts, s in paired:
                         self._raw_log[key].append([ts] + list(s))
-                # Buffer gyro vectors for Functional Calibration (PCA later)
-                if self._funcal_active and key in self._funcal_gyro_buffer:
-                    # Movella DOT LSL sample layout: [accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]
-                    for s in samples:
-                        try:
-                            self._funcal_gyro_buffer[key].append([float(s[3]), float(s[4]), float(s[5])])
-                        except Exception:
-                            pass
 
-        # ── 2. Snapshot pelvis (shared between both hips) ─────────────────────
-        # Pelvis samples feed BOTH left and right hip computations, so they are
-        # NOT included in the per-leg `min` and we don't pop them per-leg either.
-        # Instead we take a snapshot, peek for hip math on each side, then pop
-        # only the maximum count actually used by either side.
-        pelvis_snapshot = list(self._acc["pelvis"]) if self.pelvis_inlet else []
-        pelvis_used = 0
-
-        # ── 3. Process LEFT LEG ───────────────────────────────────────────────
-        l_thigh_q = list(self._acc["left_thigh"]) if self.left_thigh_inlet else []
-        l_shank_q = list(self._acc["left_shank"]) if self.left_shank_inlet else []
-        l_foot_q  = list(self._acc["left_foot"]) if self.left_foot_inlet else []
-
-        l_thigh_used = 0
-        l_shank_used = 0
-        l_foot_used  = 0
+        # ── 2. Process LEFT LEG ───────────────────────────────────────────────
 
         # Hip LEFT
         if self.pelvis_inlet and self.left_thigh_inlet:
-            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, l_thigh_q)
+            q_p = list(self._acc["l_hip_pelvis"])
+            q_t = list(self._acc["l_hip_thigh"])
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(q_p, q_t)
             if p_s:
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
@@ -676,12 +688,14 @@ class AngleCalibrator(QObject):
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
-                pelvis_used = max(pelvis_used, c_p)
-                l_thigh_used = max(l_thigh_used, c_t)
+                for _ in range(c_p): self._acc["l_hip_pelvis"].popleft()
+                for _ in range(c_t): self._acc["l_hip_thigh"].popleft()
 
         # Knee LEFT
         if self.left_thigh_inlet and self.left_shank_inlet:
-            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(l_thigh_q, l_shank_q)
+            q_t = list(self._acc["l_knee_thigh"])
+            q_s = list(self._acc["l_knee_shank"])
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(q_t, q_s)
             if t_s:
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
@@ -689,41 +703,37 @@ class AngleCalibrator(QObject):
                 )
                 self.left_angle_data = np.append(self.left_angle_data, angles)
                 self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
-                l_thigh_used = max(l_thigh_used, c_t)
-                l_shank_used = max(l_shank_used, c_s)
+                for _ in range(c_t): self._acc["l_knee_thigh"].popleft()
+                for _ in range(c_s): self._acc["l_knee_shank"].popleft()
 
         # Ankle LEFT
         if self.left_shank_inlet and self.left_foot_inlet:
-            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(l_shank_q, l_foot_q)
+            q_s = list(self._acc["l_ankle_shank"])
+            q_f = list(self._acc["l_ankle_foot"])
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(q_s, q_f)
             if s_s:
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.left_ankle_offset, self._diag["left_shank"],
-                    is_ankle=True,
+                    is_ankle=False,
                     proximal_axis=self.left_ankle_shank_axis,
                     distal_axis=self.left_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'left_ankle_qfoot_ref', None),
-                    q_proximal_align=self.left_shank_align_quat,
-                    q_distal_align=self.left_foot_align_quat,
+                    hinge_axis=getattr(self, 'left_ankle_hinge_axis', None),
                 )
                 self.left_ankle_data = np.append(self.left_ankle_data, ankle_angles)
                 self.left_ankle_timestamps = np.append(self.left_ankle_timestamps, f_ts)
-                l_shank_used = max(l_shank_used, c_s)
-                l_foot_used = max(l_foot_used, c_f)
+                for _ in range(c_s): self._acc["l_ankle_shank"].popleft()
+                for _ in range(c_f): self._acc["l_ankle_foot"].popleft()
 
-        # ── 4. Process RIGHT LEG ──────────────────────────────────────────────
-        r_thigh_q = list(self._acc["right_thigh"]) if self.right_thigh_inlet else []
-        r_shank_q = list(self._acc["right_shank"]) if self.right_shank_inlet else []
-        r_foot_q  = list(self._acc["right_foot"]) if self.right_foot_inlet else []
-
-        r_thigh_used = 0
-        r_shank_used = 0
-        r_foot_used  = 0
+        # ── 3. Process RIGHT LEG ──────────────────────────────────────────────
 
         # Hip RIGHT
         if self.pelvis_inlet and self.right_thigh_inlet:
-            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(pelvis_snapshot, r_thigh_q)
+            q_p = list(self._acc["r_hip_pelvis"])
+            q_t = list(self._acc["r_hip_thigh"])
+            p_s, p_ts, t_s, t_ts, c_p, c_t = self._match_snapshots(q_p, q_t)
             if p_s:
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
@@ -731,12 +741,14 @@ class AngleCalibrator(QObject):
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
-                pelvis_used = max(pelvis_used, c_p)
-                r_thigh_used = max(r_thigh_used, c_t)
+                for _ in range(c_p): self._acc["r_hip_pelvis"].popleft()
+                for _ in range(c_t): self._acc["r_hip_thigh"].popleft()
 
         # Knee RIGHT
         if self.right_thigh_inlet and self.right_shank_inlet:
-            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(r_thigh_q, r_shank_q)
+            q_t = list(self._acc["r_knee_thigh"])
+            q_s = list(self._acc["r_knee_shank"])
+            t_s, t_ts, s_s, s_ts, c_t, c_s = self._match_snapshots(q_t, q_s)
             if t_s:
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
@@ -744,51 +756,29 @@ class AngleCalibrator(QObject):
                 )
                 self.right_angle_data = np.append(self.right_angle_data, angles)
                 self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
-                r_thigh_used = max(r_thigh_used, c_t)
-                r_shank_used = max(r_shank_used, c_s)
+                for _ in range(c_t): self._acc["r_knee_thigh"].popleft()
+                for _ in range(c_s): self._acc["r_knee_shank"].popleft()
 
         # Ankle RIGHT
         if self.right_shank_inlet and self.right_foot_inlet:
-            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(r_shank_q, r_foot_q)
+            q_s = list(self._acc["r_ankle_shank"])
+            q_f = list(self._acc["r_ankle_foot"])
+            s_s, s_ts, f_s, f_ts, c_s, c_f = self._match_snapshots(q_s, q_f)
             if s_s:
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.right_ankle_offset, self._diag["right_shank"],
-                    is_ankle=True,
+                    is_ankle=False,
                     proximal_axis=self.right_ankle_shank_axis,
                     distal_axis=self.right_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
                     q_distal_ref=getattr(self, 'right_ankle_qfoot_ref', None),
-                    q_proximal_align=self.right_shank_align_quat,
-                    q_distal_align=self.right_foot_align_quat,
+                    hinge_axis=getattr(self, 'right_ankle_hinge_axis', None),
                 )
                 self.right_ankle_data = np.append(self.right_ankle_data, ankle_angles)
                 self.right_ankle_timestamps = np.append(self.right_ankle_timestamps, f_ts)
-                r_shank_used = max(r_shank_used, c_s)
-                r_foot_used = max(r_foot_used, c_f)
-
-        # ── 5. Drop the samples consumed by computations ───────────
-        if self.pelvis_inlet and pelvis_used > 0:
-            for _ in range(min(pelvis_used, len(self._acc["pelvis"]))):
-                self._acc["pelvis"].popleft()
-        if self.left_thigh_inlet and l_thigh_used > 0:
-            for _ in range(min(l_thigh_used, len(self._acc["left_thigh"]))):
-                self._acc["left_thigh"].popleft()
-        if self.left_shank_inlet and l_shank_used > 0:
-            for _ in range(min(l_shank_used, len(self._acc["left_shank"]))):
-                self._acc["left_shank"].popleft()
-        if self.left_foot_inlet and l_foot_used > 0:
-            for _ in range(min(l_foot_used, len(self._acc["left_foot"]))):
-                self._acc["left_foot"].popleft()
-        if self.right_thigh_inlet and r_thigh_used > 0:
-            for _ in range(min(r_thigh_used, len(self._acc["right_thigh"]))):
-                self._acc["right_thigh"].popleft()
-        if self.right_shank_inlet and r_shank_used > 0:
-            for _ in range(min(r_shank_used, len(self._acc["right_shank"]))):
-                self._acc["right_shank"].popleft()
-        if self.right_foot_inlet and r_foot_used > 0:
-            for _ in range(min(r_foot_used, len(self._acc["right_foot"]))):
-                self._acc["right_foot"].popleft()
+                for _ in range(c_s): self._acc["r_ankle_shank"].popleft()
+                for _ in range(c_f): self._acc["r_ankle_foot"].popleft()
 
         if self.left_angle_data.size > MAX_BUFFER:
             self.left_angle_data       = self.left_angle_data[-MAX_BUFFER:]
@@ -877,6 +867,22 @@ class AngleCalibrator(QObject):
             "session_end_iso":    _iso(now),
             "session_duration_s": now - start,
         }
+        # ── Raw quaternions + timestamps per segment ────────────────────────
+        # Used by offline analysis to recompute joint angles with proper
+        # signed Euler decomposition (the live SAA dispatcher is unsigned
+        # and clips extension / inversion).
+        # Each entry is shape (N, 4) for the quaternion and (N,) for the
+        # matching timestamps; empty arrays are written when an inlet
+        # wasn't connected during the session.
+        for seg, rows in self._raw_log.items():
+            if rows:
+                arr = np.asarray(rows, dtype=np.float64)
+                # cols: [lsl_ts, accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]
+                data[f"raw_{seg}_quat"]       = arr[:, 7:11].copy()
+                data[f"raw_{seg}_timestamps"] = arr[:, 0].copy()
+            else:
+                data[f"raw_{seg}_quat"]       = np.empty((0, 4), dtype=np.float64)
+                data[f"raw_{seg}_timestamps"] = np.empty((0,),    dtype=np.float64)
         try:
             with open(path, "wb") as f:
                 pickle.dump(data, f)
@@ -1092,11 +1098,19 @@ class AngleCalibrator(QObject):
             return offset, q_shank, q_foot, shank_vert_axis, foot_fwd_axis, foot_ml_axis
 
         def _one_side_hip(thigh_inlet, offset_val):
-            """Calibrate hip using the shared pelvis sensor as the proximal reference."""
+            """Calibrate hip using the shared pelvis sensor as the proximal reference.
+
+            Uses PAIRED sampling so the pelvis and thigh quaternions are averaged
+            over the *same* 1 s window. Sequential sampling (pelvis 1 s then
+            thigh 1 s) introduced a ~10° residual offset at neutral because tiny
+            postural shifts / breathing between the two windows shifted the
+            relative pelvis-thigh pose.
+            """
             if not (self.pelvis_inlet and thigh_inlet):
                 return None
-            q_pelvis = self.__get_averaged_quaternion(self.pelvis_inlet, duration_s=AVG_DURATION_S)
-            q_thigh  = self.__get_averaged_quaternion(thigh_inlet,       duration_s=AVG_DURATION_S)
+            q_pelvis, q_thigh = self.__get_averaged_quaternions_paired(
+                self.pelvis_inlet, thigh_inlet, duration_s=AVG_DURATION_S,
+            )
             if q_pelvis is None or q_thigh is None:
                 return None
             return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
@@ -1232,6 +1246,53 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(poll_interval)  # small delay to prevent CPU spinning
         return None
+
+    def __get_averaged_quaternions_paired(self, inlet_a: StreamInlet, inlet_b: StreamInlet,
+                                            duration_s: float = 1.0,
+                                            poll_interval: float = 0.02):
+        """Average quaternions from TWO inlets **over the same time window**.
+
+        Why this exists: capturing the pelvis-thigh offset for the hip joint
+        requires the pelvis and thigh quaternions to come from the same neutral
+        pose. The single-inlet ``__get_averaged_quaternion`` samples sequentially
+        (pelvis 1s, then thigh 1s), so any small body sway between the two
+        windows (breathing, postural drift) inflates the offset by several
+        degrees. By accumulating both streams in a SHARED 1-second loop, both
+        averages reflect the *same* static pose.
+
+        Returns ``(q_a_avg, q_b_avg)`` or ``(None, None)`` on failure.
+        """
+        if inlet_a is None or inlet_b is None:
+            return None, None
+        t_start = time.time()
+        ref_a, ref_b = None, None
+        acc_a = np.zeros(4, dtype=np.float64)
+        acc_b = np.zeros(4, dtype=np.float64)
+        n_a = n_b = 0
+        while time.time() - t_start < duration_s:
+            if inlet_a.samples_available() > 0:
+                s, _ = inlet_a.pull_sample(timeout=0.0)
+                if s:
+                    q = np.asarray(s[6:10], dtype=np.float64)
+                    if ref_a is None: ref_a = q
+                    if float(np.dot(q, ref_a)) < 0: q = -q
+                    acc_a += q; n_a += 1
+            if inlet_b.samples_available() > 0:
+                s, _ = inlet_b.pull_sample(timeout=0.0)
+                if s:
+                    q = np.asarray(s[6:10], dtype=np.float64)
+                    if ref_b is None: ref_b = q
+                    if float(np.dot(q, ref_b)) < 0: q = -q
+                    acc_b += q; n_b += 1
+            QCoreApplication.processEvents()
+            time.sleep(poll_interval)
+        if n_a == 0 or n_b == 0:
+            return None, None
+        a = acc_a / float(n_a); na = float(np.linalg.norm(a))
+        b = acc_b / float(n_b); nb = float(np.linalg.norm(b))
+        if na < 1e-9 or nb < 1e-9:
+            return None, None
+        return a / na, b / nb
 
     def __get_averaged_quaternion(self, inlet: StreamInlet, duration_s: float = 1.0,
                                   poll_interval: float = 0.02):
@@ -1399,8 +1460,7 @@ class AngleCalibrator(QObject):
         distal_axis:   str = 'X',
         q_proximal_ref: np.ndarray = None,
         q_distal_ref:   np.ndarray = None,
-        q_proximal_align: np.ndarray = None,
-        q_distal_align:   np.ndarray = None,
+        hinge_axis: np.ndarray = None,
     ) -> np.ndarray:
         """Compute joint angles from pre-matched sample lists.
         
@@ -1437,12 +1497,12 @@ class AngleCalibrator(QObject):
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
                         q_shank_ref=q_proximal_ref, q_foot_ref=q_distal_ref,
-                        q_shank_align=q_proximal_align, q_foot_align=q_distal_align,
+                        hinge_axis=hinge_axis,
                     )
                     # Clamp to physiological range to filter magnetometer spikes.
-                    # Normal ankle: -10° (plantarflexion) to +20° (dorsiflexion).
-                    # We use a wider window to avoid cutting real dynamic peaks.
-                    ANKLE_MIN, ANKLE_MAX = -30.0, 40.0
+                    # Normal gait: ~-20° (plantarflexion) to ~+30° (dorsiflexion).
+                    # Use a generous window to avoid cutting real dynamic peaks.
+                    ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)

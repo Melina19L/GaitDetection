@@ -1166,7 +1166,8 @@ class StimulationIMUs(StimulationBasic):
                        knee_left:   float, knee_right:   float,
                        ankle_left:  float, ankle_right:  float,
                        ankle_left_qshank_ref  = None, ankle_left_qfoot_ref   = None,
-                       ankle_right_qshank_ref = None, ankle_right_qfoot_ref  = None) -> None:
+                       ankle_right_qshank_ref = None, ankle_right_qfoot_ref  = None,
+                       ankle_left_hinge_axis  = None, ankle_right_hinge_axis = None) -> None:
         """Hot-update the ROM calibration offsets while the test is running.
 
         Called whenever 'Calibrate Offsets' is pressed (even mid-test) so that
@@ -1181,11 +1182,11 @@ class StimulationIMUs(StimulationBasic):
         self.right_knee_rom.set_offset(knee_right)
         # Ankle: prefer reference-quaternion path
         if ankle_left_qshank_ref is not None and ankle_left_qfoot_ref is not None:
-            self.left_ankle_rom.set_ankle_reference(ankle_left_qshank_ref, ankle_left_qfoot_ref)
+            self.left_ankle_rom.set_ankle_reference(ankle_left_qshank_ref, ankle_left_qfoot_ref, ankle_left_hinge_axis)
         else:
             self.left_ankle_rom.set_offset(ankle_left)
         if ankle_right_qshank_ref is not None and ankle_right_qfoot_ref is not None:
-            self.right_ankle_rom.set_ankle_reference(ankle_right_qshank_ref, ankle_right_qfoot_ref)
+            self.right_ankle_rom.set_ankle_reference(ankle_right_qshank_ref, ankle_right_qfoot_ref, ankle_right_hinge_axis)
         else:
             self.right_ankle_rom.set_offset(ankle_right)
 

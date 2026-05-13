@@ -236,150 +236,88 @@ def twist_angle_around_axis(q: np.ndarray, axis: np.ndarray) -> float:
     return angle
 
 
-def compute_axis_alignment_quaternion(
-    gyro_samples: np.ndarray,
-    target_axis: str = 'Y',
-) -> np.ndarray:
-    """Return a quaternion [w,x,y,z] that rotates the dominant gyro rotation axis
-    onto ``target_axis`` (default 'Y' = anatomical medio-lateral).
-
-    Implementation per Hoegberg 2025 (ReBAIT § 2.1.2) / Picerno 2008:
-      1. PCA on the per-sample gyro vectors (Nx3) → first principal component
-         is the axis of maximum angular-velocity variance, i.e. the joint's
-         true rotation axis in the sensor's local frame.
-      2. Build the quaternion that rotates this axis onto the target axis.
-
-    Used at functional calibration: the user walks/squats for a few seconds
-    while ``gyro_samples`` are buffered; this function returns the alignment
-    quaternion that brings the IMU local frame into anatomical alignment.
-    Apply it on every runtime quaternion via ``q_aligned = q_imu * q_align``.
-    """
-    g = np.asarray(gyro_samples, dtype=float)
-    if g.ndim != 2 or g.shape[0] < 50 or g.shape[1] != 3:
-        return np.array([1.0, 0.0, 0.0, 0.0])  # identity → no alignment
-    # Centre the samples (PCA assumption)
-    g = g - g.mean(axis=0, keepdims=True)
-    # Covariance matrix and eigendecomposition
-    cov = np.cov(g.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-
-    # ── Validity checks ────────────────────────────────────────────────
-    # If the operator stood still during the calibration window, the gyro
-    # samples are dominated by noise: the largest eigenvalue is tiny and
-    # the principal direction is random. Detect this and refuse to set an
-    # alignment (return identity → behaves like no Functional Calibration).
-    largest = float(eigvals[-1])
-    second  = float(eigvals[-2]) if len(eigvals) >= 2 else 0.0
-    # 1. Absolute variance threshold (rad²/s²): walking knee gyro has
-    #    >0.5 rad²/s² variance along the principal axis; standing still
-    #    gives <0.01.
-    if largest < 0.05:
-        print(f"[PCA align] INSUFFICIENT MOTION (largest eigenvalue {largest:.4f} < 0.05). "
-              "Operator did not move enough during functional calibration. Returning identity.")
-        return np.array([1.0, 0.0, 0.0, 0.0])
-    # 2. Ratio of largest to second-largest: if close to 1, the rotation
-    #    is poorly defined (multi-axis motion or pure noise) and the
-    #    principal direction is unreliable.
-    ratio = largest / (second + 1e-9)
-    if ratio < 2.0:
-        print(f"[PCA align] AMBIGUOUS AXIS (eigenvalue ratio {ratio:.2f} < 2.0). "
-              "Motion was multi-axis or noisy. Returning identity.")
-        return np.array([1.0, 0.0, 0.0, 0.0])
-    print(f"[PCA align] OK — largest eigenvalue {largest:.3f}, ratio {ratio:.2f}")
-
-    # Largest eigenvalue → principal component
-    principal = eigvecs[:, -1]
-    principal = principal / (np.linalg.norm(principal) + 1e-9)
-
-    target = AXIS_VECTORS.get(target_axis, AXIS_VECTORS['Y'])
-    # PCA eigenvectors are unique up to sign; flip so the principal axis
-    # points in the same hemisphere as the target (shortest-arc rotation).
-    if float(np.dot(principal, target)) < 0:
-        principal = -principal
-    # Quaternion rotating principal → target via shortest arc
-    cross = np.cross(principal, target)
-    dot   = float(np.dot(principal, target))
-    if dot < -0.999:
-        # 180° flip: pick any perpendicular axis
-        ortho = np.array([1.0, 0.0, 0.0]) if abs(principal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-        axis  = np.cross(principal, ortho)
-        axis  = axis / (np.linalg.norm(axis) + 1e-9)
-        return np.array([0.0, axis[0], axis[1], axis[2]])
-    s = float(np.sqrt((1.0 + dot) * 2.0))
-    if s < 1e-9:
-        return np.array([1.0, 0.0, 0.0, 0.0])
-    return normalize(np.array([s * 0.5, cross[0] / s, cross[1] / s, cross[2] / s]))
-
-
 def signed_ankle_angle(
     q_shank: np.ndarray,
     q_foot: np.ndarray,
     q_shank_ref: np.ndarray,
     q_foot_ref: np.ndarray,
+    foot_axis: str = 'Y',
+    shank_long_axis: str = 'X',
+    foot_fwd_axis: str = 'X',
     shank_ml_axis: str = 'Y',
-    q_shank_align: np.ndarray = None,
-    q_foot_align:  np.ndarray = None,
-    **_unused_kwargs,
 ) -> float:
     """Return signed ankle dorsi-/plantar-flexion in degrees.
 
-    Standard approach (ReBAIT, Hoegberg 2025; ISB Wu 2002):
-      1. ``q_rel = q_shank⁻¹ · q_foot`` — orientation of foot expressed in
-         the shank's local frame. By construction independent of how the
-         knee or hip moves: pure ankle relative orientation.
-      2. ``q_delta = q_rel_now · q_rel_ref⁻¹`` — change in relative
-         orientation since the calibration pose, so neutral standing → 0°.
-      3. Decompose ``q_delta`` into Euler angles. The component around the
-         shank's medio-lateral axis ``shank_ml_axis`` is sagittal-plane
-         dorsi/plantarflexion. The other two components (frontal +
-         transverse) are ignored.
+    Uses a **gravity-constrained sagittal-plane projection** that is
+    geometrically decoupled from knee flexion:
 
-    ``shank_ml_axis`` defaults to ``'Y'`` for the user's mounting (Movella
-    DOT button-up vertical along tibia: shank-X = longitudinal, shank-Y =
-    medio-lateral, shank-Z = anterior-posterior, per the on-screen Sensor
-    Axis Diagnostic). Uses scipy ``Rotation.as_euler`` for robust handling
-    of quaternion double-cover and gimbal-lock edge cases.
+      1. Compute the shank's medio-lateral (ML) axis in the global frame.
+      2. Project it onto the horizontal plane (zero-out vertical component).
+         Knee flexion rotates the shank *around* the ML axis, so the ML axis
+         itself does NOT change direction — this is the key insight.
+      3. Define the sagittal plane as perpendicular to this horizontal ML.
+      4. Project the shank's longitudinal axis and the foot's forward axis
+         onto this sagittal plane.
+      5. The angle between these two projections IS the ankle flex/extension.
+
+    The calibration-pose quaternions are used only to compute a static
+    offset so that neutral standing reads 0°.
+
+    Why the old twist-decomposition failed:
+      Both knee flexion and ankle dorsiflexion are rotations around the
+      same medio-lateral axis.  The relative quaternion q_delta picks up
+      both indistinguishably.  The sagittal projection avoids this because
+      it measures the *geometric angle between two body segments*, not the
+      relative rotation.
     """
     qs     = normalize(np.asarray(q_shank,     dtype=float))
     qf     = normalize(np.asarray(q_foot,      dtype=float))
     qs_ref = normalize(np.asarray(q_shank_ref, dtype=float))
     qf_ref = normalize(np.asarray(q_foot_ref,  dtype=float))
 
-    # Apply per-segment anatomical-alignment quaternions (from Functional
-    # Calibration). This rotates each sensor's local frame so that local-Y
-    # actually corresponds to the anatomical medio-lateral axis. Without this
-    # step the Euler decomposition picks up bleed from knee flexion (~10°
-    # cross-talk per 50° knee flex) because sensor-Y ≠ anatomical-ML.
-    if q_shank_align is not None:
-        qs_align = normalize(np.asarray(q_shank_align, dtype=float))
-        qs     = quat_mul(qs,     qs_align)
-        qs_ref = quat_mul(qs_ref, qs_align)
-    if q_foot_align is not None:
-        qf_align = normalize(np.asarray(q_foot_align, dtype=float))
-        qf     = quat_mul(qf,     qf_align)
-        qf_ref = quat_mul(qf_ref, qf_align)
+    def _sagittal_angle(qs_cur, qf_cur):
+        # Shank ML axis in global frame — stays horizontal during knee flexion
+        shank_ml = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(shank_ml_axis, AXIS_VECTORS['Y']), qs_cur,
+        )
+        # Keep only the horizontal component (remove gravity contamination)
+        shank_ml[2] = 0.0
+        n = float(np.linalg.norm(shank_ml))
+        if n < 1e-6:
+            return 0.0
+        ml_dir = shank_ml / n
 
-    # Foot expressed in shank frame, now and at calibration
-    q_rel_now = quat_mul(quat_conjugate(qs),     qf)
-    q_rel_ref = quat_mul(quat_conjugate(qs_ref), qf_ref)
+        # Shank longitudinal axis (along the tibia) and foot forward axis
+        shank_long = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(shank_long_axis, AXIS_VECTORS['X']), qs_cur,
+        )
+        foot_fwd = rotate_vector_by_quaternion(
+            AXIS_VECTORS.get(foot_fwd_axis, AXIS_VECTORS['X']), qf_cur,
+        )
 
-    # Change since calibration (in shank frame)
-    q_delta = quat_mul(q_rel_now, quat_conjugate(q_rel_ref))
-    q_delta = normalize(q_delta)
-    # Canonicalise: q and -q are the same rotation; force w ≥ 0 so the
-    # extracted Euler angle stays continuous instead of wrapping.
-    if q_delta[0] < 0:
-        q_delta = -q_delta
+        # Project both onto the sagittal plane (⊥ to ml_dir)
+        shank_proj = shank_long - np.dot(shank_long, ml_dir) * ml_dir
+        foot_proj  = foot_fwd  - np.dot(foot_fwd,  ml_dir) * ml_dir
 
-    # scipy uses [x, y, z, w]; ours is [w, x, y, z]
-    r = R.from_quat([q_delta[1], q_delta[2], q_delta[3], q_delta[0]])
+        ns = float(np.linalg.norm(shank_proj))
+        nf = float(np.linalg.norm(foot_proj))
+        if ns < 1e-6 or nf < 1e-6:
+            return 0.0
+        shank_proj /= ns
+        foot_proj  /= nf
 
-    # Pick the Euler order so the FIRST component is rotation around the
-    # shank's medio-lateral axis = sagittal-plane dorsi/plantarflexion.
-    order_map = {'X': 'XYZ', 'Y': 'YXZ', 'Z': 'ZXY'}
-    order = order_map.get(shank_ml_axis, 'YXZ')
-    flex, _abd, _rot = r.as_euler(order, degrees=True)
-    return float(flex)
+        dot   = float(np.clip(np.dot(shank_proj, foot_proj), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(dot)))
+
+        # Sign convention: positive = dorsiflexion
+        cross = np.cross(foot_proj, shank_proj)
+        if float(np.dot(cross, ml_dir)) < 0:
+            angle = -angle
+        return angle
+
+    # Calibration offset (angle at neutral standing pose)
+    offset = _sagittal_angle(qs_ref, qf_ref)
+    return _sagittal_angle(qs, qf) - offset
 
 
 # ── Sensor-axis detection ────────────────────────────────────────────────────
@@ -519,6 +457,70 @@ def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = Non
     return best_name
 
 
+def identify_hinge_axis(q_prox_array: np.ndarray, q_dist_array: np.ndarray) -> np.ndarray:
+    """
+    Identifies the hinge axis for a joint given synchronized arrays of quaternions.
+    Based on the SVD of the relative rotation vectors.
+    """
+    def quat_mul(q1, q2):
+        w1,x1,y1,z1 = q1; w2,x2,y2,z2 = q2
+        return np.array([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2
+        ])
+    def quat_conj(q):
+        return np.array([q[0], -q[1], -q[2], -q[3]])
+        
+    diff_rotvecs = []
+    q_rel_ref = quat_mul(quat_conj(q_prox_array[0]), q_dist_array[0])
+    
+    for i in range(len(q_prox_array)):
+        q_rel = quat_mul(quat_conj(q_prox_array[i]), q_dist_array[i])
+        q_diff = quat_mul(quat_conj(q_rel_ref), q_rel)
+        if q_diff[0] < 0:
+            q_diff *= -1
+            
+        norm_v = np.linalg.norm(q_diff[1:])
+        if norm_v > 1e-8:
+            angle_rad = 2 * np.arctan2(norm_v, q_diff[0])
+            rotvec = (q_diff[1:] / norm_v) * angle_rad
+            diff_rotvecs.append(rotvec)
+            
+    diff_rotvecs = np.array(diff_rotvecs)
+    if len(diff_rotvecs) == 0:
+        return np.array([0, 1.0, 0])
+        
+    magnitudes = np.linalg.norm(diff_rotvecs, axis=1, keepdims=True)
+    weighted_rotvecs = diff_rotvecs * magnitudes
+    
+    U, S, Vt = np.linalg.svd(weighted_rotvecs, full_matrices=False)
+    hinge_axis = Vt[0]
+    return hinge_axis
+
+def extract_functional_angle(qs: np.ndarray, qf: np.ndarray, qs_ref: np.ndarray, qf_ref: np.ndarray, hinge_axis: np.ndarray) -> float:
+    """Extract the ankle hinge angle using swing-twist decomposition.
+
+    Instead of a simple dot-product projection of the rotation vector
+    (which is only accurate for small angles), this uses the proper
+    swing-twist decomposition to isolate the rotation component around
+    the functional hinge axis identified during calibration.
+
+    This correctly decouples the ankle angle from knee flexion even
+    for large relative rotations.
+    """
+    q_rel_ref = quat_mul(quat_conjugate(qs_ref), qf_ref)
+    q_rel     = quat_mul(quat_conjugate(qs), qf)
+    q_diff    = quat_mul(quat_conjugate(q_rel_ref), q_rel)
+    if q_diff[0] < 0:
+        q_diff = -q_diff
+
+    # Swing-twist decomposition: extract ONLY the twist around hinge_axis
+    angle_rad = twist_angle_around_axis(q_diff, hinge_axis)
+    return float(np.degrees(angle_rad))
+
+
 class ROM:
     def __init__(self, offset: float = 0.0, scale: float = 1.0):
         self.timestamp: float = 0.0
@@ -531,6 +533,7 @@ class ROM:
         # ``set_ankle_axes`` after auto-detection at calibration time.
         self.shank_axis: str = 'X'
         self.foot_axis:  str = 'X'
+        self.hinge_axis: np.ndarray = None
 
     def set_ankle_axes(self, shank_axis: str, foot_axis: str) -> None:
         """Configure which sensor-local axes represent "along the segment" for the
@@ -564,7 +567,7 @@ class ROM:
         self.offset = offset
 
     # ── Ankle methods (relative-quaternion approach) ──────────────────────────
-    def set_ankle_reference(self, q_shank_ref: np.ndarray, q_foot_ref: np.ndarray) -> None:
+    def set_ankle_reference(self, q_shank_ref: np.ndarray, q_foot_ref: np.ndarray, hinge_axis: np.ndarray = None) -> None:
         """Store calibration-pose quaternions for the stable relative-quaternion path.
 
         Call this immediately after `ankle_functional_calibration` with the same
@@ -575,6 +578,7 @@ class ROM:
         """
         self.q_shank_ref = normalize(np.asarray(q_shank_ref, dtype=float))
         self.q_foot_ref  = normalize(np.asarray(q_foot_ref,  dtype=float))
+        self.hinge_axis  = hinge_axis if hinge_axis is not None else None
         self.offset      = 0.0  # zeroing is handled by the relative-quat formula
 
     @staticmethod
@@ -601,29 +605,22 @@ class ROM:
         shank_axis: str = 'X',
         q_shank_ref: np.ndarray = None,
         q_foot_ref:  np.ndarray = None,
-        q_shank_align: np.ndarray = None,
-        q_foot_align:  np.ndarray = None,
+        hinge_axis: np.ndarray = None,
     ) -> float:
         """Return the calibrated ankle angle in degrees.
-
-        If ``q_shank_ref`` AND ``q_foot_ref`` are provided, uses the
-        sagittal-plane projection algorithm (decoupled from knee flexion).
-        Otherwise falls back to the legacy unsigned ``angle_between_quaternions``
-        with offset subtraction.
         
-        ``foot_axis`` is the foot's FORWARD axis (toward toes).
-        ``shank_axis`` is the shank's LONGITUDINAL axis (along the tibia).
-        The shank's ML axis is determined by elimination (the axis that is
-        neither longitudinal nor vertical).
+        If ``hinge_axis`` is provided (from functional calibration), uses the 
+        SVD-based projection algorithm for complete decoupling from the knee.
+        Otherwise falls back to the legacy algorithm.
         """
+        if q_shank_ref is not None and q_foot_ref is not None and hinge_axis is not None:
+            return extract_functional_angle(q_shank, q_foot, q_shank_ref, q_foot_ref, hinge_axis)
+
+        # Fallback if no functional calibration was done
         if q_shank_ref is not None and q_foot_ref is not None:
-            # Determine the shank's ML axis by elimination
             shank_vert = detect_most_vertical_axis(q_shank_ref)
             all_axes = {'X', 'Y', 'Z'}
             remaining = all_axes - {shank_vert, shank_axis}
-            # shank_axis here is shank_long (the vertical axis for shank)
-            # Actually for the shank, the "longitudinal" axis is the VERTICAL one
-            # and the ML axis is the remaining one
             shank_ml = remaining.pop() if len(remaining) == 1 else 'Y'
             
             return signed_ankle_angle(
@@ -632,8 +629,6 @@ class ROM:
                 shank_long_axis=shank_axis,
                 foot_fwd_axis=foot_axis,
                 shank_ml_axis=shank_ml,
-                q_shank_align=q_shank_align,
-                q_foot_align=q_foot_align,
             )
         return ankle_angle_between_quaternions(q_shank, q_foot, foot_axis, shank_axis) - offset
 
@@ -641,9 +636,18 @@ class ROM:
         """Compute, store and return the calibrated ankle angle, using the
         per-instance ``shank_axis`` / ``foot_axis`` configured via ``set_ankle_axes``.
         """
-        angle = ankle_angle_between_quaternions(
-            q_shank, q_foot, self.foot_axis, self.shank_axis,
-        ) - self.offset
+        if hasattr(self, 'q_shank_ref') and hasattr(self, 'q_foot_ref'):
+            angle = ROM.calculate_ankle_angle(
+                q_shank, q_foot, self.offset,
+                foot_axis=self.foot_axis, shank_axis=self.shank_axis,
+                q_shank_ref=self.q_shank_ref, q_foot_ref=self.q_foot_ref,
+                hinge_axis=self.hinge_axis
+            )
+        else:
+            angle = ankle_angle_between_quaternions(
+                q_shank, q_foot, self.foot_axis, self.shank_axis,
+            ) - self.offset
+            
         angle *= self.scale
         self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
         return angle

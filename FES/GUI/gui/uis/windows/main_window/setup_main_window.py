@@ -6155,24 +6155,13 @@ class SetupMainWindow:
         self.calibrate_offset_btn.setMinimumHeight(LINE_HEIGHT)
         self.calibrate_offset_btn.setToolTip("Calibrate the angle offset of the connected legs in neutral pose.")
 
+        self.calibrate_ankle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Calibrate Ankle Axis")
+        self.calibrate_ankle_btn.setMinimumHeight(LINE_HEIGHT)
+        self.calibrate_ankle_btn.setToolTip("Perform functional calibration (dorsi/plantarflexion) to identify the ankle hinge axis.")
+
         self.start_graph_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Start Graph")
         self.start_graph_btn.setMinimumHeight(LINE_HEIGHT)
         self.start_graph_btn.setToolTip("Open the real-time angle plot window.")
-
-        # Functional Calibration button — runs PCA on gyro during ~5 s of dynamic
-        # motion to align each sensor's local Y onto the anatomical medio-lateral
-        # axis. Eliminates the residual ankle ↔ knee cross-talk caused by sensor
-        # mounting misalignment (~10° → ~1-3°). Press AFTER Calibrate Offsets,
-        # then walk normally for 5 s.
-        self.functional_calib_btn = SetupMainWindow.create_std_push_btn(
-            self.themes, text="Functional Calibration",
-        )
-        self.functional_calib_btn.setMinimumHeight(LINE_HEIGHT)
-        self.functional_calib_btn.setToolTip(
-            "Press, then walk normally for 5 s. PCA on gyro identifies the "
-            "anatomical knee/ankle axes and aligns the sensor frames "
-            "(reduces ankle ↔ knee cross-talk)."
-        )
 
         self.finish_btn_7 = SetupMainWindow.create_std_push_btn(self.themes, text="Finish")
 
@@ -6403,7 +6392,7 @@ class SetupMainWindow:
         self.hip_extension_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-30, 30), value=10,
+            value_range=(-30, 30), value=0,
         )
         self.hip_flexion_left_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
@@ -6413,7 +6402,7 @@ class SetupMainWindow:
         self.hip_extension_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
-            value_range=(-30, 30), value=10,
+            value_range=(-30, 30), value=0,
         )
         self.hip_flexion_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
@@ -6736,42 +6725,8 @@ class SetupMainWindow:
         # ── CONNECT BUTTONS ──
         self.imu_btn.clicked.connect(open_imu_gui)
         self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
+        self.calibrate_ankle_btn.clicked.connect(self.angle_calibrator.ankle_functional_calibration)
         self.start_graph_btn.clicked.connect(open_plot_dialog)
-
-        # Functional Calibration: visual countdown on the button itself, plus
-        # disable it during the calibration window, so the operator clearly
-        # sees when it starts and ends without watching the log box.
-        self._funcal_countdown_timer = QTimer(self)
-        self._funcal_countdown_timer.setInterval(250)
-        self._funcal_remaining_ms = 0
-        self._funcal_button_default_text = "Functional Calibration"
-
-        def _funcal_tick():
-            self._funcal_remaining_ms -= 250
-            if self._funcal_remaining_ms <= 0:
-                self._funcal_countdown_timer.stop()
-                self.functional_calib_btn.setText("✓ Done")
-                # Restore label after 2 s so the operator sees the completion confirm
-                QTimer.singleShot(2000, lambda: (
-                    self.functional_calib_btn.setText(self._funcal_button_default_text),
-                    self.functional_calib_btn.setEnabled(True),
-                ))
-            else:
-                self.functional_calib_btn.setText(
-                    f"Walking… {self._funcal_remaining_ms / 1000:.1f}s"
-                )
-
-        self._funcal_countdown_timer.timeout.connect(_funcal_tick)
-
-        def _start_funcal():
-            duration_s = 5.0
-            self.angle_calibrator.start_functional_calibration(duration_s)
-            self.functional_calib_btn.setEnabled(False)
-            self._funcal_remaining_ms = int(duration_s * 1000)
-            self.functional_calib_btn.setText(f"Walking… {duration_s:.1f}s")
-            self._funcal_countdown_timer.start()
-
-        self.functional_calib_btn.clicked.connect(_start_funcal)
         self.left_leg_toggle.checkStateChanged.connect(left_leg_state_changed)
         self.right_leg_toggle.checkStateChanged.connect(right_leg_state_changed)
         self.left_knee_toggle.checkStateChanged.connect(left_knee_state_changed)
@@ -6899,10 +6854,11 @@ class SetupMainWindow:
             try:
                 kl, kr = self.angle_calibrator.get_offset()
                 al, ar = self.angle_calibrator.get_ankle_offset()
-                l_qs, l_qf, r_qs, r_qf = self.angle_calibrator.get_ankle_reference()
+                l_qs, l_qf, r_qs, r_qf, l_ax, r_ax = self.angle_calibrator.get_ankle_reference()
                 stim.update_offsets(kl, kr, al, ar,
                                     ankle_left_qshank_ref=l_qs,  ankle_left_qfoot_ref=l_qf,
-                                    ankle_right_qshank_ref=r_qs, ankle_right_qfoot_ref=r_qf)
+                                    ankle_right_qshank_ref=r_qs, ankle_right_qfoot_ref=r_qf,
+                                    ankle_left_hinge_axis=l_ax, ankle_right_hinge_axis=r_ax)
                 self.imu_status_box.append(
                     '<span style="color:#2ecc71">✔ Offsets updated live in running test.</span>'
                 )
@@ -6933,7 +6889,7 @@ class SetupMainWindow:
         bbar.addStretch(1)
         bbar.addWidget(self.imu_btn)
         bbar.addWidget(self.calibrate_offset_btn)
-        bbar.addWidget(self.functional_calib_btn)
+        bbar.addWidget(self.calibrate_ankle_btn)
         bbar.addWidget(self.start_graph_btn)
         bbar.addStretch(1)
 
