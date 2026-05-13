@@ -1090,11 +1090,12 @@ class AngleCalibrator(QObject):
             print(f"  Foot forward axis:   {foot_fwd_axis}")
             print(f"  Foot medio-lat axis: {foot_ml_axis}")
 
-            # Use the detected longitudinal axes for the legacy offset calculation
-            offset = ROM.ankle_functional_calibration(
-                q_shank, q_foot,
-                foot_axis=foot_fwd_axis, shank_axis=shank_vert_axis,
-            )
+            # Use the GENERIC joint-angle formula (angle_between_quaternions)
+            # for calibration — this MUST match the runtime formula used in
+            # __compute_angles_from_data (is_ankle=False → calculate_joint_angle).
+            # Using ankle_functional_calibration here would create a mismatch
+            # (different math → offset ≠ 0° at neutral).
+            offset = ROM.functional_calibration(q_shank, q_foot)
             return offset, q_shank, q_foot, shank_vert_axis, foot_fwd_axis, foot_ml_axis
 
         def _one_side_hip(thigh_inlet, offset_val):
