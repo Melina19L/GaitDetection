@@ -7601,7 +7601,7 @@ class SetupMainWindow:
         offset_left, offset_right = main_window.angle_calibrator.get_offset()
         offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
         # Reference quaternions for the stable relative-quaternion ankle algorithm
-        l_qs, l_qf, r_qs, r_qf = main_window.angle_calibrator.get_ankle_reference()
+        l_qs, l_qf, r_qs, r_qf, _l_hinge, _r_hinge = main_window.angle_calibrator.get_ankle_reference()
         # Per-side ankle longitudinal axes auto-detected at calibration so the
         # stimulator-side ROM (whose data feeds the saved .pkl/.xlsx) uses the
         # same axes as the live calibrator-side computation that drives the plots.
