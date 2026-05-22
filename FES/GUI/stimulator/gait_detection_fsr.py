@@ -51,6 +51,8 @@ class FSRGaitFSM(QObject):
         self.data_ff_offline = np.array([])
         self.data_mf_offline = np.array([])
         self.data_bf_offline = np.array([])
+        self.data_cop_x_offline = np.array([])
+        self.data_cop_y_offline = np.array([])
         self.timestamps_offline = np.array([])
 
         self.first_step_detected = FirstStep.DETECTING_HEEL_STRIKE  # Initial state for first step detection
@@ -91,6 +93,8 @@ class FSRGaitFSM(QObject):
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples]))
             self.data_mf_offline = np.append(self.data_mf_offline, np.array([sample[1] for sample in samples]))
             self.data_bf_offline = np.append(self.data_bf_offline, np.array([sample[2] for sample in samples]))
+            self.data_cop_x_offline = np.append(self.data_cop_x_offline, np.array([sample[3] for sample in samples]))
+            self.data_cop_y_offline = np.append(self.data_cop_y_offline, np.array([sample[4] for sample in samples]))
             self.timestamps_offline = np.append(self.timestamps_offline, np.array(timestamps))
 
     def fsr_phase_detection(self):
@@ -294,6 +298,8 @@ class FSRGaitFSM_2(QObject):
         self.data_ff_offline = np.array([])
         self.data_mf_offline = np.array([])
         self.data_bf_offline = np.array([])
+        self.data_cop_x_offline = np.array([])
+        self.data_cop_y_offline = np.array([])
         self.timestamps_offline = np.array([])
         
         #Loading phase info
@@ -341,6 +347,8 @@ class FSRGaitFSM_2(QObject):
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples]))
             self.data_mf_offline = np.append(self.data_mf_offline, np.array([sample[1] for sample in samples]))
             self.data_bf_offline = np.append(self.data_bf_offline, np.array([sample[2] for sample in samples]))
+            self.data_cop_x_offline = np.append(self.data_cop_x_offline, np.array([sample[3] for sample in samples]))
+            self.data_cop_y_offline = np.append(self.data_cop_y_offline, np.array([sample[4] for sample in samples]))
             self.timestamps_offline = np.append(self.timestamps_offline, np.array(timestamps))
 
     def fsr_phase_detection(self):
@@ -606,6 +614,8 @@ class FSRGaitFSM_DUMMY(QObject):
         self.data_ff_offline = np.array([])
         self.data_mf_offline = np.array([])
         self.data_bf_offline = np.array([])
+        self.data_cop_x_offline = np.array([])
+        self.data_cop_y_offline = np.array([])
         self.timestamps_offline = np.array([])
         
         #Loading phase info
@@ -620,6 +630,8 @@ class FSRGaitFSM_DUMMY(QObject):
         self.data_ff_offline = np.array([])
         self.data_mf_offline = np.array([])
         self.data_bf_offline = np.array([])
+        self.data_cop_x_offline = np.array([])
+        self.data_cop_y_offline = np.array([])
         self.timestamps_fsr_offline = np.array([])
         
         # IMU DATA

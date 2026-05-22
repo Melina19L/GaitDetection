@@ -17,7 +17,7 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLayout, QSizePolicy,
-    QStackedWidget, QVBoxLayout, QWidget)
+    QStackedWidget, QVBoxLayout, QWidget, QComboBox)
 
 class Ui_MainPages(object):
     def setupUi(self, MainPages):
@@ -1125,6 +1125,21 @@ class Ui_MainPages(object):
         self.title_label_8.setStyleSheet(u"font-size:16pt")
 
         self.verticalLayout_3.addWidget(self.title_label_8, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Shoe size selector
+        self.insole_size_widget = QWidget(self.page_08)
+        self.insole_size_widget.setObjectName(u"insole_size_widget")
+        self.insole_size_layout = QHBoxLayout(self.insole_size_widget)
+        self.insole_size_layout.setObjectName(u"insole_size_layout")
+        self.insole_size_label = QLabel(self.insole_size_widget)
+        self.insole_size_label.setObjectName(u"insole_size_label")
+        self.insole_size_label.setText("Insole Size:")
+        self.insole_size_combobox = QComboBox(self.insole_size_widget)
+        self.insole_size_combobox.setObjectName(u"insole_size_combobox")
+        self.insole_size_combobox.addItems(["S", "M", "L", "XL"])
+        self.insole_size_layout.addWidget(self.insole_size_label)
+        self.insole_size_layout.addWidget(self.insole_size_combobox)
+        self.verticalLayout_3.addWidget(self.insole_size_widget, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.fsr_status_widget = QWidget(self.page_08)
         self.fsr_status_widget.setObjectName(u"fsr_status_widget")

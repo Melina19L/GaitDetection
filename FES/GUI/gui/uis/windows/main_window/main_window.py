@@ -335,21 +335,49 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
     # -------------------- FSR DATA SLOTS --------------------
+    def get_cop_coordinates(self):
+        size = self.ui.load_pages.insole_size_combobox.currentText()
+        if size == "S":
+            return 8.7, 2.35, -7.9
+        elif size == "M":
+            return 9.05, 2.525, -9.1
+        elif size == "L":
+            return 9.35, 2.6, -10.4
+        elif size == "XL":
+            # TODO: replace with exact XL values once available
+            return 9.35, 2.6, -10.4
+        else:
+            return 9.05, 2.525, -9.1
+
     @Slot(list)
     def update_fsr_data_left(self, data):
         self.ui.load_pages.ff_value_left.setText(str(data[0]))
         self.ui.load_pages.mf_value_left.setText(str(data[1]))
         self.ui.load_pages.bf_value_left.setText(str(data[2]))
+        
+        yff, ymf, ybf = self.get_cop_coordinates()
+        ff, mf, bf = data[0], data[1], data[2]
+        total_force = ff + mf + bf
+        cop_y = (ff * yff + mf * ymf + bf * ybf) / total_force if total_force > 0 else 0.0
+        extended_data = [float(ff), float(mf), float(bf), 0.0, float(cop_y)]
+
         if self.fsr_outlet_left:
-            self.fsr_outlet_left.push_sample(data)
+            self.fsr_outlet_left.push_sample(extended_data)
 
     @Slot(list)
     def update_fsr_data_right(self, data):
         self.ui.load_pages.ff_value_right.setText(str(data[0]))
         self.ui.load_pages.mf_value_right.setText(str(data[1]))
         self.ui.load_pages.bf_value_right.setText(str(data[2]))
+        
+        yff, ymf, ybf = self.get_cop_coordinates()
+        ff, mf, bf = data[0], data[1], data[2]
+        total_force = ff + mf + bf
+        cop_y = (ff * yff + mf * ymf + bf * ybf) / total_force if total_force > 0 else 0.0
+        extended_data = [float(ff), float(mf), float(bf), 0.0, float(cop_y)]
+
         if self.fsr_outlet_right:
-            self.fsr_outlet_right.push_sample(data)
+            self.fsr_outlet_right.push_sample(extended_data)
 
     @Slot(bool)
     def update_stream(self, connected: bool, side: str):
@@ -357,7 +385,7 @@ class MainWindow(QMainWindow):
             self.left_connected_checkbox.setChecked(connected)
             if connected:
                 self.fsr_outlet_left = pylsl.StreamOutlet(
-                    pylsl.StreamInfo("FSR_Left", "Motion Data", 3, pylsl.IRREGULAR_RATE, pylsl.cf_int16)
+                    pylsl.StreamInfo("FSR_Left", "Motion Data", 5, pylsl.IRREGULAR_RATE, pylsl.cf_float32)
                 )
             else:
                 self.fsr_outlet_left = None
@@ -365,7 +393,7 @@ class MainWindow(QMainWindow):
             self.right_connected_checkbox.setChecked(connected)
             if connected:
                 self.fsr_outlet_right = pylsl.StreamOutlet(
-                    pylsl.StreamInfo("FSR_Right", "Motion Data", 3, pylsl.IRREGULAR_RATE, pylsl.cf_int16)
+                    pylsl.StreamInfo("FSR_Right", "Motion Data", 5, pylsl.IRREGULAR_RATE, pylsl.cf_float32)
                 )
             else:
                 self.fsr_outlet_right = None

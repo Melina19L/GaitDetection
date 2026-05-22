@@ -69,6 +69,8 @@ class FSRIMUGaitFSM(QObject):
         self.data_ff_offline = np.array([])
         self.data_mf_offline = np.array([])
         self.data_bf_offline = np.array([])
+        self.data_cop_x_offline = np.array([])
+        self.data_cop_y_offline = np.array([])
         self.timestamps_fsr_offline = np.array([])
         
         # IMU DATA
@@ -128,6 +130,8 @@ class FSRIMUGaitFSM(QObject):
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples_fsr]))
             self.data_mf_offline = np.append(self.data_mf_offline, np.array([sample[1] for sample in samples_fsr]))
             self.data_bf_offline = np.append(self.data_bf_offline, np.array([sample[2] for sample in samples_fsr]))
+            self.data_cop_x_offline = np.append(self.data_cop_x_offline, np.array([sample[3] for sample in samples_fsr]))
+            self.data_cop_y_offline = np.append(self.data_cop_y_offline, np.array([sample[4] for sample in samples_fsr]))
             self.timestamps_fsr_offline = np.append(self.timestamps_fsr_offline, np.array(timestamps_fsr))
             
         #IMU
