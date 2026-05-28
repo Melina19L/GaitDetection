@@ -364,7 +364,7 @@ def plot_angles(data):
             ax_foot.plot(to_times, to_y, "v", color="#ff5555", ms=7,
                          label=f"Toe-off (n={to_times.size})")
 
-        ax_foot.set_title("Foot Pitch — fasi del passo (sensore dorsale)",
+        ax_foot.set_title("Foot Pitch — gait phases (dorsal foot sensor)",
                           fontsize=14, fontweight='bold')
         ax_foot.set_ylabel("Pitch (°)\n+toes up / −toes down")
         ax_foot.legend(loc="upper right", fontsize=9)
@@ -393,6 +393,27 @@ def plot_angles(data):
 
     # Set x-label on the BOTTOM panel only
     axes[-1].set_xlabel("Timestamp (s)", fontsize=12)
+
+    # Trim the x-axis so the plot starts where joint angles begin (not at
+    # t=0 of the foot quaternion log, which often contains 30-60 s of idle
+    # pre-recording before the operator starts walking).
+    angle_keys = ("left_hip_timestamps",  "right_hip_timestamps",
+                  "left_knee_timestamps", "right_knee_timestamps",
+                  "left_ankle_timestamps","right_ankle_timestamps",
+                  "imu_left_hip_timestamps",  "imu_right_hip_timestamps",
+                  "imu_left_knee_timestamps", "imu_right_knee_timestamps")
+    first_angle_t = float('inf')
+    last_angle_t  = float('-inf')
+    for k in angle_keys:
+        ts = data.get(k)
+        if ts is not None and len(ts) > 0:
+            first_angle_t = min(first_angle_t, float(np.min(ts)))
+            last_angle_t  = max(last_angle_t,  float(np.max(ts)))
+    if first_angle_t != float('inf'):
+        # Small margin (1 s) on either side so the first / last sample isn't
+        # glued to the axis border.
+        for ax in axes:
+            ax.set_xlim(left=first_angle_t - 1.0, right=last_angle_t + 1.0)
 
     return fig, axes
 

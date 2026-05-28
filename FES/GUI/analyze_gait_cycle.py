@@ -397,10 +397,18 @@ green_patch  = Patch(color="#2ecc71", alpha=0.3, label="Stance (HS→TO)")
 orange_patch = Patch(color="#e67e22", alpha=0.3, label="Swing (TO→HS)")
 axes[0].legend(handles=[green_patch, orange_patch], loc="upper right", fontsize=9)
 
-# Highlight the BEST cycle (largest ankle ROM) for the per-cycle plot
+# Highlight the BEST cycle for the per-cycle plot.
+# We pick the cycle whose ankle ROM is closest to a physiological 35° (Whittle
+# reference). Earlier "max ROM" picked sensor-shake artefacts where the
+# quaternions varied wildly (e.g. while the operator was removing the sensors
+# from the patient) — those segments give ROMs >80° that are anatomically
+# impossible. Distance-from-target penalises both too-small (no real walking)
+# and too-large (sensor noise) cycles.
+PHYSIO_ANKLE_ROM = 35.0   # Whittle / Perry, normal walking
 def cycle_score(c):
     h0, to, h1 = c
-    return ankle[h0:h1].max() - ankle[h0:h1].min()
+    rom = ankle[h0:h1].max() - ankle[h0:h1].min()
+    return -abs(rom - PHYSIO_ANKLE_ROM)   # higher (less negative) is better
 best_cycle = max(cycles, key=cycle_score)
 h0, to_best, h1 = best_cycle
 for ax in axes:
