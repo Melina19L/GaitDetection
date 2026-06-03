@@ -181,6 +181,78 @@ def export_xlsx_log(save_path, data_to_save):
     if df_stim is not None:
         sheets["Stim_Events"] = df_stim
 
+    # 5) All_Synchronized_Data — IMU 60 Hz master grid, FSR & joint angles
+    #    interpolated row-by-row onto the same timeline.
+    #    Rationale: IMUs sample at 60 Hz (native), FSR at ~12 Hz (native).
+    #    We build a uniform 60 Hz grid over the common time span and resample
+    #    every channel onto it via np.interp. IMU keeps full resolution;
+    #    FSR columns are linearly interpolated between native samples.
+    imu_t_arrays = []
+    for sensor_data in (rom_data.values() if rom_data else ()):
+        ts = sensor_data.get("timestamps")
+        if ts is None:
+            continue
+        arr = np.asarray(ts, dtype=float)
+        if arr.size >= 2:
+            imu_t_arrays.append(arr)
+
+    if imu_t_arrays:
+        # Intersection of all IMU sensor ranges -> no extrapolation
+        t_lo = max(arr[0]  for arr in imu_t_arrays)
+        t_hi = min(arr[-1] for arr in imu_t_arrays)
+        if t_hi > t_lo:
+            n_samples = int(round((t_hi - t_lo) * 60.0)) + 1
+            master_t = np.linspace(t_lo, t_hi, n_samples)
+
+            sync_cols = {"Timestamp": master_t.tolist()}
+
+            # 5a) Per-sensor IMU channels -> interp onto master grid
+            for sensor_key, sensor_data in rom_data.items():
+                ts = np.asarray(sensor_data.get("timestamps", []), dtype=float)
+                if ts.size < 2:
+                    continue
+                for var_key, col_suffix in (
+                    ("accx", "AccX"), ("accy", "AccY"), ("accz", "AccZ"),
+                    ("gx",   "GyrX"), ("gy",   "GyrY"), ("gz",   "GyrZ"),
+                    ("qw",   "QuatW"), ("qx",  "QuatX"), ("qy",  "QuatY"), ("qz", "QuatZ"),
+                ):
+                    vals = np.asarray(sensor_data.get(var_key) or [], dtype=float)
+                    if vals.size != ts.size:
+                        continue
+                    sync_cols[f"{sensor_key}_{col_suffix}"] = np.interp(master_t, ts, vals).tolist()
+
+            # 5b) FSR per side -> interp onto master grid (12 Hz -> 60 Hz, linear)
+            for side in ("left", "right"):
+                fsr_t = np.asarray(data_to_save.get(f"fsr_timestamps_{side}") or [], dtype=float)
+                if fsr_t.size < 2:
+                    continue
+                side_cap = side.capitalize()
+                for src_key, col_label in (
+                    (f"fsr_data_ff_{side}", "FSR_Front"),
+                    (f"fsr_data_mf_{side}", "FSR_Mid"),
+                    (f"fsr_data_bf_{side}", "FSR_Back"),
+                    (f"fsr_cop_x_{side}",   "FSR_CoP_X"),
+                    (f"fsr_cop_y_{side}",   "FSR_CoP_Y"),
+                ):
+                    vals = np.asarray(data_to_save.get(src_key) or [], dtype=float)
+                    if vals.size != fsr_t.size:
+                        continue
+                    sync_cols[f"{side_cap}_Foot_{col_label}"] = np.interp(master_t, fsr_t, vals).tolist()
+
+            # 5c) Joint angles per side -> interp onto master grid
+            for side in ("left", "right"):
+                side_cap = side.capitalize()
+                for joint in ("hip", "knee", "ankle"):
+                    jt = np.asarray(data_to_save.get(f"imu_{side}_{joint}_timestamps") or [], dtype=float)
+                    ja = np.asarray(data_to_save.get(f"imu_{side}_{joint}_angles") or [], dtype=float)
+                    if jt.size < 2 or jt.size != ja.size:
+                        continue
+                    sync_cols[f"{side_cap}_{joint.capitalize()}_Angle"] = np.interp(master_t, jt, ja).tolist()
+
+            # Only emit the sheet if we got at least one data column beyond Timestamp
+            if len(sync_cols) > 1:
+                sheets["All_Synchronized_Data"] = pd.DataFrame(sync_cols)
+
     if not sheets:
         print("Excel export skipped: no streams to write.")
         return

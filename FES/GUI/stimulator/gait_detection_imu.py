@@ -1,10 +1,28 @@
 import numpy as np
-from scipy.signal import find_peaks
+import sys, subprocess
+from scipy.signal import find_peaks, butter, filtfilt, argrelextrema
 from pylsl import StreamInlet
 from collections import deque
 from enum import Enum
 from PySide6.QtCore import QTimer, Qt, QObject, Slot, SLOT, Signal
 from .gait_phases import Phase
+
+
+def _play_step_beep() -> None:
+    """Non-blocking audible cue for a detected gait event (HS or TO).
+    Failures are silently ignored so they never disturb the real-time loop.
+    """
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys.platform == "win32":
+            import winsound
+            winsound.Beep(800, 60)
+        else:
+            print("\a", end="", flush=True)
+    except Exception:
+        pass
 
 #PEAK_DETECTION_DEADZONE = 0.25  # seconds
 #HEEL_STRIKE_PEAK_RANGE = 0.5  # seconds
@@ -827,6 +845,10 @@ class IMUGaitFSM(QObject):
 
 
 class IMUGaitFSM_2(QObject):
+    # Class-level flag toggled by the GUI checkbox "Audio cues on gait events".
+    # When True, every recorded HS/TO event triggers a non-blocking beep.
+    audio_cues_enabled = False
+
     # initialize the class and phase counters
     steps_changed = Signal(int)
     phase_changed = Signal(int)
@@ -1136,6 +1158,56 @@ class IMUGaitFSM_2(QObject):
     
 
 
+    @staticmethod
+    def _aminian_pipeline(gyr_y_degps: np.ndarray, fs: float = 60.0,
+                          ms_threshold_degps: float = 50.0,
+                          ms_prominence: float = 50.0,
+                          ms_min_spacing_s: float = 0.5,
+                          hs_window_s: tuple = (0.05, 0.20),
+                          to_window_s: tuple = (0.30, 0.10)):
+        """Aminian-style HS/TO detection on a foot-mounted IMU gyro pitch axis.
+
+        References: Aminian et al. 2002; Salarian et al. 2004; Sabatini 2005.
+
+        Pipeline:
+          1. Butterworth 2nd-order 15 Hz low-pass, zero-phase (filtfilt).
+          2. Mid-swing (MS) = positive peaks > 50°/s (large foot rotation in swing).
+          3. HS = first local minimum 50-200 ms AFTER each MS peak (foot-slap).
+          4. TO = last local minimum 100-300 ms BEFORE each MS peak (push-off).
+
+        Returns:
+            (ms_indices, hs_indices, to_indices) into the input array.
+        """
+        arr = np.asarray(gyr_y_degps, dtype=float)
+        if arr.size < 100:
+            return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=int)
+
+        b, a = butter(2, 15.0/(fs/2), btype="low")
+        gyr_f = filtfilt(b, a, arr)
+
+        ms_idx, _ = find_peaks(gyr_f,
+                               height=ms_threshold_degps,
+                               distance=int(ms_min_spacing_s * fs),
+                               prominence=ms_prominence)
+
+        hs_list, to_list = [], []
+        hs_w0_s, hs_w1_s = hs_window_s
+        to_w0_s, to_w1_s = to_window_s
+        for ip in ms_idx:
+            # HS: first local min in [MS+hs_w0, MS+hs_w1]
+            w0, w1 = ip + int(hs_w0_s * fs), ip + int(hs_w1_s * fs)
+            if w1 < gyr_f.size:
+                mins = argrelextrema(gyr_f[w0:w1], np.less)[0]
+                hs_list.append(int(w0 + (mins[0] if mins.size else int(np.argmin(gyr_f[w0:w1])))))
+            # TO: last local min in [MS-to_w0, MS-to_w1]
+            w0, w1 = ip - int(to_w0_s * fs), ip - int(to_w1_s * fs)
+            if w0 >= 0 and w1 > w0:
+                mins = argrelextrema(gyr_f[w0:w1], np.less)[0]
+                to_list.append(int(w0 + (mins[-1] if mins.size else int(np.argmin(gyr_f[w0:w1])))))
+
+        return ms_idx.astype(int), np.array(hs_list, dtype=int), np.array(to_list, dtype=int)
+
+
     def imu_phase_detection(self):
         """Detect the gait phase based on the IMU data."""
         # Ensure we have enough data points to update the plot
@@ -1157,14 +1229,20 @@ class IMUGaitFSM_2(QObject):
         if start_idx >= ts.size:
             return
 
-        g_norm = np.sqrt(gx*gx + gy*gy + gz*gz)
+        # Aminian-style HS/TO detection (Salarian 2004; Sabatini 2005):
+        # Mid-swing peaks on Butter-filtered gyrY, then HS = first local min
+        # 50-200 ms AFTER MS, TO = last local min 100-300 ms BEFORE MS.
+        # Replaces the previous gyro-norm threshold which mis-aligned events
+        # with the gait cycle (validated HS at 24% / TO at 89% of cycle).
+        _ms_idx, hs_idx, to_idx = self._aminian_pipeline(gy, fs=60.0)
+        hs_set = set(int(x) for x in hs_idx)
+        to_set = set(int(x) for x in to_idx)
 
         for i in range(start_idx, ts.size):
             t = ts[i]
-            norm_gyro = g_norm[i]
 
             # --- TO detection ---
-            if norm_gyro > self.TO_threshold:
+            if i in to_set:
                 if not self._swing_active and not self._to_gate_open:
                     last_to_ts = self.toe_off_peaks_timestamps[-1] if self.toe_off_peaks_timestamps.size else None
                     if (last_to_ts is None) or ((t - last_to_ts) >= self.min_event_distance):
@@ -1203,8 +1281,7 @@ class IMUGaitFSM_2(QObject):
                 pass
 
             # --- HS detection (only after a TO has occurred) ---
-            if (norm_gyro < self.HS_threshold) and self._to_gate_open:
-                #print(f"HS CHECK: norm={norm_gyro:.2f}, threshold={self.HS_threshold}")
+            if (i in hs_set) and self._to_gate_open:
                 last_hs_ts = self.heel_strike_peaks_timestamps[-1] if self.heel_strike_peaks_timestamps.size else None
                 last_to_ts = self.toe_off_peaks_timestamps[-1]      if self.toe_off_peaks_timestamps.size else None
 
@@ -1410,6 +1487,8 @@ class IMUGaitFSM_2(QObject):
         self.heel_strike_peaks = np.append(self.heel_strike_peaks, self.peaks[-1])
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
+        if IMUGaitFSM_2.audio_cues_enabled:
+            _play_step_beep()
         self._adaptive_update_params()
 
     def _adaptive_update_params(self) -> None:
@@ -1483,7 +1562,9 @@ class IMUGaitFSM_2(QObject):
         self.toe_off_peaks = np.append(self.toe_off_peaks, self.peaks[-1])
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
-        
+        if IMUGaitFSM_2.audio_cues_enabled:
+            _play_step_beep()
+
     def __record_valley_timestamp(self) -> None:
         """Detect and record the timestamp of the latest valley.
 

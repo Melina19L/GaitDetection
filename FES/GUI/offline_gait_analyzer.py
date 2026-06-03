@@ -236,13 +236,100 @@ def _pair_hs_to(hs_times, to_times, min_cycle=0.7, max_cycle=1.5):
     return triples
 
 
+def _aminian_gait_events_from_pitch(pitch, timestamps,
+                                    ms_threshold_degps=50.0,
+                                    ms_prominence=50.0,
+                                    ms_min_spacing_s=0.7,
+                                    hs_window_s=(0.05, 0.20),
+                                    to_window_s=(0.30, 0.10),
+                                    pitch_smooth_cutoff_hz=None,
+                                    cycle_min_s=0.7,
+                                    cycle_max_s=1.5):
+    """Aminian-style HS/TO detection (Salarian 2004; Sabatini 2005) adapted to
+    work from foot pitch (deg). Computes pitch rate by central differencing
+    (functionally equivalent to gyro_Y in the sagittal plane) then applies the
+    standard pipeline:
+
+      0. (Optional) Pre-smooth pitch with Butterworth (``pitch_smooth_cutoff_hz``).
+      1. Butterworth 2nd-order 15 Hz low-pass, zero-phase (filtfilt) on rate.
+      2. Mid-swing (MS) = positive peaks > 50 °/s (min spacing 0.7s avoids the
+         intra-cycle sub-peak that the pitch-differentiation introduces).
+      3. (Optional) Cycle validation: keep only MS with a neighbour in
+         ``[cycle_min_s, cycle_max_s]`` — useful when the recording contains
+         sporadic non-gait motion.
+      4. HS = first local minimum 50-200 ms AFTER each MS (foot-slap).
+      5. TO = last local minimum 100-300 ms BEFORE each MS (push-off).
+
+    Returns ``(gyr_filtered, ms_times, hs_times, to_times)``. ``gyr_filtered``
+    matches the input timestamps; the three time arrays are subsets of it.
+    """
+    from scipy.signal import butter, filtfilt, find_peaks, argrelextrema
+    empty = (None, np.array([]), np.array([]), np.array([]))
+    if pitch is None or timestamps is None or len(timestamps) < 100:
+        return empty
+    ts = np.asarray(timestamps, dtype=float)
+    fs = 1.0 / np.median(np.diff(ts))
+
+    # 0) Pre-smooth pitch (kills high-freq artifact before differentiation)
+    pitch_in = np.asarray(pitch, dtype=float)
+    if pitch_smooth_cutoff_hz and pitch_smooth_cutoff_hz < fs/2:
+        b_p, a_p = butter(2, pitch_smooth_cutoff_hz/(fs/2), btype="low")
+        pitch_in = filtfilt(b_p, a_p, pitch_in)
+
+    pitch_rate = np.gradient(pitch_in, ts)  # °/s
+
+    # 1) Filter the pitch rate (standard Aminian)
+    b, a = butter(2, 15.0/(fs/2), btype="low")
+    gyr_f = filtfilt(b, a, pitch_rate)
+
+    # 2) Mid-swing peaks
+    ms_idx, _ = find_peaks(gyr_f,
+                           height=ms_threshold_degps,
+                           distance=int(ms_min_spacing_s * fs),
+                           prominence=ms_prominence)
+
+    # 3) Cycle validation
+    if cycle_min_s and cycle_max_s and ms_idx.size > 1:
+        t_ms = ts[ms_idx]
+        keep = np.zeros(ms_idx.size, dtype=bool)
+        for i, t in enumerate(t_ms):
+            others = np.delete(t_ms, i)
+            if others.size == 0:
+                continue
+            nearest_dt = float(np.min(np.abs(others - t)))
+            if cycle_min_s <= nearest_dt <= cycle_max_s:
+                keep[i] = True
+        ms_idx = ms_idx[keep]
+
+    # 4-5) HS / TO windowed search around each surviving MS
+    hs_list, to_list = [], []
+    hs_w0_s, hs_w1_s = hs_window_s
+    to_w0_s, to_w1_s = to_window_s
+    for ip in ms_idx:
+        w0, w1 = ip + int(hs_w0_s*fs), ip + int(hs_w1_s*fs)
+        if w1 < gyr_f.size:
+            mins = argrelextrema(gyr_f[w0:w1], np.less)[0]
+            hs_list.append(int(w0 + (mins[0] if mins.size else int(np.argmin(gyr_f[w0:w1])))))
+        w0, w1 = ip - int(to_w0_s*fs), ip - int(to_w1_s*fs)
+        if w0 >= 0 and w1 > w0:
+            mins = argrelextrema(gyr_f[w0:w1], np.less)[0]
+            to_list.append(int(w0 + (mins[-1] if mins.size else int(np.argmin(gyr_f[w0:w1])))))
+
+    return (gyr_f,
+            ts[ms_idx.astype(int)],
+            ts[np.array(hs_list, dtype=int)] if hs_list else np.array([]),
+            ts[np.array(to_list, dtype=int)] if to_list else np.array([]))
+
+
 def plot_angles(data):
     """
     Funzione per plottare Angoli di Anca, Ginocchio e Caviglia (se presenti).
 
     Se il file contiene quaternioni grezzi del piede (``raw_<side>_foot_quat``),
-    aggiunge un quarto pannello con il foot pitch e marca le fasi del passo
-    (banda verde = stance, banda arancio = swing).
+    aggiunge un quarto pannello con il segnale gyro del piede e gli eventi
+    HS/TO/MS rilevati con la pipeline Aminian (Salarian 2004; Sabatini 2005).
+    Gli stessi eventi sono proiettati come linee verticali sui pannelli
+    Hip / Knee / Ankle per la lettura biomeccanica sincronizzata.
     """
     has_hip = any("hip_angles" in k for k in data.keys())
 
@@ -345,51 +432,74 @@ def plot_angles(data):
         ax_ankle.legend(loc="upper right")
         ax_ankle.grid(True, linestyle="--", alpha=0.6)
 
-    # --- FOOT PITCH + gait phases ----------------------------------------
+    # --- FOOT GYR Y + Aminian gait detection (master signal) -------------
     if has_foot and ax_foot is not None:
         pitch = _compute_foot_pitch(foot_quat)
-        pitch, hs_times, to_times = _detect_foot_events(pitch, foot_ts)
+        # Restrict foot data to the joint-angle time window: events outside
+        # this window come from pre-calibration / setup / transitions and
+        # are not part of the analyzed gait task.
+        angle_keys = ("left_hip_timestamps",  "right_hip_timestamps",
+                      "left_knee_timestamps", "right_knee_timestamps",
+                      "left_ankle_timestamps","right_ankle_timestamps")
+        t_min, t_max = float("inf"), float("-inf")
+        for k in angle_keys:
+            ts_k = data.get(k)
+            if ts_k is not None and len(ts_k) > 0:
+                t_min = min(t_min, float(np.min(ts_k)))
+                t_max = max(t_max, float(np.max(ts_k)))
+        if t_min != float("inf"):
+            mask = (foot_ts >= t_min) & (foot_ts <= t_max)
+            foot_ts_win = foot_ts[mask]
+            pitch_win = pitch[mask] if pitch is not None else None
+        else:
+            foot_ts_win, pitch_win = foot_ts, pitch
+        gyr_f_win, ms_times, hs_times, to_times = _aminian_gait_events_from_pitch(
+            pitch_win, foot_ts_win)
+        # Re-embed the filtered signal in the original timeline (zeros outside
+        # the window) so the foot panel still draws on the full time axis.
+        gyr_f = np.zeros_like(foot_ts) if gyr_f_win is not None else None
+        if gyr_f_win is not None and t_min != float("inf"):
+            gyr_f[mask] = gyr_f_win
 
-        ax_foot.plot(foot_ts, pitch, label=f"Foot pitch ({foot_side})",
-                     color="#8be9fd", linewidth=1.6)
-        ax_foot.axhline(0, color="#6272a4", linewidth=0.6, linestyle="--", alpha=0.6)
+        # Panel 4: filtered pitch-rate (≡ gyrY in sagittal plane)
+        if gyr_f is not None:
+            ax_foot.plot(foot_ts, gyr_f, color="#8be9fd", linewidth=1.4,
+                         label=f"Foot pitch rate ({foot_side}) — Butter 15 Hz")
+        ax_foot.axhline(50, color="black", linewidth=0.6, linestyle=":",
+                        alpha=0.5, label="MS threshold 50 °/s")
+        ax_foot.axhline(0, color="#6272a4", linewidth=0.6, linestyle="--",
+                        alpha=0.6)
 
-        # Heel-strike / toe-off markers on the foot panel
-        if hs_times.size:
-            hs_y = np.interp(hs_times, foot_ts, pitch)
-            ax_foot.plot(hs_times, hs_y, "^", color="#50fa7b", ms=7,
-                         label=f"Heel-strike (n={hs_times.size})")
-        if to_times.size:
-            to_y = np.interp(to_times, foot_ts, pitch)
+        # Event markers on the foot panel (filled at peak height for context)
+        if gyr_f is not None and ms_times.size:
+            ms_y = np.interp(ms_times, foot_ts, gyr_f)
+            ax_foot.plot(ms_times, ms_y, "o", color="#5599ff", ms=6,
+                         label=f"MS (mid-swing, n={ms_times.size})")
+        if gyr_f is not None and hs_times.size:
+            hs_y = np.interp(hs_times, foot_ts, gyr_f)
+            ax_foot.plot(hs_times, hs_y, "v", color="#50fa7b", ms=7,
+                         label=f"HS (heel-strike, n={hs_times.size})")
+        if gyr_f is not None and to_times.size:
+            to_y = np.interp(to_times, foot_ts, gyr_f)
             ax_foot.plot(to_times, to_y, "v", color="#ff5555", ms=7,
-                         label=f"Toe-off (n={to_times.size})")
+                         label=f"TO (toe-off, n={to_times.size})")
 
-        ax_foot.set_title("Foot Pitch — gait phases (dorsal foot sensor)",
-                          fontsize=14, fontweight='bold')
-        ax_foot.set_ylabel("Pitch (°)\n+toes up / −toes down")
+        ax_foot.set_title(
+            "Gait Detection — Master signal (foot pitch rate, Aminian pipeline)",
+            fontsize=14, fontweight='bold')
+        ax_foot.set_ylabel("Pitch rate (°/s)")
         ax_foot.legend(loc="upper right", fontsize=9)
         ax_foot.grid(True, linestyle="--", alpha=0.6)
 
-        # Shade stance (HS→TO, green) and swing (TO→next HS, orange) on
-        # every panel so the user can see at a glance which gait phase
-        # each joint sample belongs to.
-        cycles = _pair_hs_to(hs_times, to_times)
+        # Project events as vertical lines on ALL panels (incl. foot itself)
+        # MS faint (blue), HS green, TO red. Drawn behind the curves.
         for ax in axes:
-            for (h0, to, h1) in cycles:
-                ax.axvspan(h0, to,  color="#50fa7b", alpha=0.18)
-                ax.axvspan(to, h1,  color="#ffb86c", alpha=0.18)
-        # Add a small legend block on the foot panel for the bands
-        if cycles:
-            from matplotlib.patches import Patch
-            band_legend = [
-                Patch(color="#50fa7b", alpha=0.4, label="Stance (HS→TO)"),
-                Patch(color="#ffb86c", alpha=0.4, label="Swing  (TO→HS)"),
-            ]
-            # Combine with existing markers
-            handles, labels = ax_foot.get_legend_handles_labels()
-            ax_foot.legend(handles + band_legend,
-                            labels + ["Stance (HS→TO)", "Swing  (TO→HS)"],
-                            loc="upper right", fontsize=9)
+            for p in ms_times:
+                ax.axvline(p, color="#5599ff", linewidth=0.9, alpha=0.35, zorder=0)
+            for p in hs_times:
+                ax.axvline(p, color="#50fa7b", linewidth=1.1, alpha=0.55, zorder=0)
+            for p in to_times:
+                ax.axvline(p, color="#ff5555", linewidth=1.1, alpha=0.55, zorder=0)
 
     # Set x-label on the BOTTOM panel only
     axes[-1].set_xlabel("Timestamp (s)", fontsize=12)
