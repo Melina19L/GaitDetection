@@ -2867,9 +2867,11 @@ class SetupMainWindow:
         self.page10_controls_row_layout.addWidget(self.page10_audio_cues_cb)
         # Wire the audio-cues checkbox directly to the FSM class flag
         try:
-            from stimulator.gait_detection_imu import IMUGaitFSM_2 as _FSM2
-            self.page10_audio_cues_cb.toggled.connect(
-                lambda checked: setattr(_FSM2, "audio_cues_enabled", bool(checked)))
+            from stimulator.gait_detection_imu import IMUGaitFSM as _FSM1, IMUGaitFSM_2 as _FSM2
+            def _set_audio_cues(checked):
+                setattr(_FSM1, "audio_cues_enabled", bool(checked))
+                setattr(_FSM2, "audio_cues_enabled", bool(checked))
+            self.page10_audio_cues_cb.toggled.connect(_set_audio_cues)
         except Exception:
             pass
         self.page10_controls_row_layout.addStretch(1)

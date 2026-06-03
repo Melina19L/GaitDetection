@@ -216,14 +216,16 @@ def export_xlsx_log(save_path, data_to_save):
                     ("gx",   "GyrX"), ("gy",   "GyrY"), ("gz",   "GyrZ"),
                     ("qw",   "QuatW"), ("qx",  "QuatX"), ("qy",  "QuatY"), ("qz", "QuatZ"),
                 ):
-                    vals = np.asarray(sensor_data.get(var_key) or [], dtype=float)
+                    val = sensor_data.get(var_key)
+                    vals = np.asarray(val if val is not None else [], dtype=float)
                     if vals.size != ts.size:
                         continue
                     sync_cols[f"{sensor_key}_{col_suffix}"] = np.interp(master_t, ts, vals).tolist()
 
             # 5b) FSR per side -> interp onto master grid (12 Hz -> 60 Hz, linear)
             for side in ("left", "right"):
-                fsr_t = np.asarray(data_to_save.get(f"fsr_timestamps_{side}") or [], dtype=float)
+                val_t = data_to_save.get(f"fsr_timestamps_{side}")
+                fsr_t = np.asarray(val_t if val_t is not None else [], dtype=float)
                 if fsr_t.size < 2:
                     continue
                 side_cap = side.capitalize()
@@ -234,7 +236,8 @@ def export_xlsx_log(save_path, data_to_save):
                     (f"fsr_cop_x_{side}",   "FSR_CoP_X"),
                     (f"fsr_cop_y_{side}",   "FSR_CoP_Y"),
                 ):
-                    vals = np.asarray(data_to_save.get(src_key) or [], dtype=float)
+                    val = data_to_save.get(src_key)
+                    vals = np.asarray(val if val is not None else [], dtype=float)
                     if vals.size != fsr_t.size:
                         continue
                     sync_cols[f"{side_cap}_Foot_{col_label}"] = np.interp(master_t, fsr_t, vals).tolist()
@@ -243,8 +246,10 @@ def export_xlsx_log(save_path, data_to_save):
             for side in ("left", "right"):
                 side_cap = side.capitalize()
                 for joint in ("hip", "knee", "ankle"):
-                    jt = np.asarray(data_to_save.get(f"imu_{side}_{joint}_timestamps") or [], dtype=float)
-                    ja = np.asarray(data_to_save.get(f"imu_{side}_{joint}_angles") or [], dtype=float)
+                    val_t = data_to_save.get(f"imu_{side}_{joint}_timestamps")
+                    jt = np.asarray(val_t if val_t is not None else [], dtype=float)
+                    val_a = data_to_save.get(f"imu_{side}_{joint}_angles")
+                    ja = np.asarray(val_a if val_a is not None else [], dtype=float)
                     if jt.size < 2 or jt.size != ja.size:
                         continue
                     sync_cols[f"{side_cap}_{joint.capitalize()}_Angle"] = np.interp(master_t, jt, ja).tolist()
@@ -1135,26 +1140,9 @@ class StimulationIMUs(StimulationBasic):
                         setattr(self, attr, fsm)
                        
 
-                        # Re-emit total steps (same handler you used before)
+                        # Forward fsm phase updates dynamically (only for shank/foot)
                         try:
-                            fsm.steps_changed.connect(self.__on_leg_steps_changed)
-                        except Exception:
-                            pass
-
-                        # Forward per-leg IMU counts dynamically (capture fsm & side now)
-                        try:
-                            # Only forward shank/foot FSMs to the per-leg step signals.
-                            # Thigh FSMs must NOT drive the step counter.
                             if placement in ("shank", "foot"):
-                                sig_name = f"imu_{side}_step_count_changed"
-                                if hasattr(self, sig_name):
-                                    sig = getattr(self, sig_name)
-                                    # capture fsm and sig in defaults to avoid late-binding issues
-                                    fsm.steps_changed.connect(
-                                        lambda _c, _f=fsm, _sig=sig: _sig.emit(int(_f.get_step_count()))
-                                    )
-                                    
-                                # forward fsm phase updates
                                 if hasattr(fsm, "phase_changed"):
                                     target_sig = getattr(self, f"imu_{side}_phase_changed", None)
                                     if target_sig is not None:

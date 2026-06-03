@@ -18,7 +18,7 @@ def _play_step_beep() -> None:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif sys.platform == "win32":
             import winsound
-            winsound.Beep(800, 60)
+            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
         else:
             print("\a", end="", flush=True)
     except Exception:
@@ -107,6 +107,10 @@ def identify_valleys(data: np.ndarray, valley_height: float, distance_valleys: f
 
 
 class IMUGaitFSM(QObject):
+    # Class-level flag toggled by the GUI checkbox "Audio cues on gait events".
+    # When True, every recorded HS/TO event triggers a non-blocking beep.
+    audio_cues_enabled = False
+
     # initialize the class and phase counters
     steps_changed = Signal(int)
     phase_changed = Signal(int)
@@ -700,6 +704,8 @@ class IMUGaitFSM(QObject):
         self.heel_strike_peaks = np.append(self.heel_strike_peaks, self.peaks[-1])
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
+        if IMUGaitFSM.audio_cues_enabled:
+            _play_step_beep()
         self._adaptive_update_params()
 
     def __record_toe_off_peak(self, peak_timestamp: float) -> None:
@@ -707,6 +713,8 @@ class IMUGaitFSM(QObject):
         self.toe_off_peaks = np.append(self.toe_off_peaks, self.peaks[-1])
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
+        if IMUGaitFSM.audio_cues_enabled:
+            _play_step_beep()
 
     def __record_valley_timestamp(self) -> float:
         """Detect and record the timestamp of the latest valley.
