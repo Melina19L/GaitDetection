@@ -1301,10 +1301,16 @@ class StimulationIMUs(StimulationBasic):
         return None
 
     def _wire_preferred_step_signals(self):
+        # Reset is_preferred on all FSMs first
+        for _side, _placement, _suffix, any_fsm in self._iter_all_fsms():
+            any_fsm.is_preferred = False
+
         # Connect only the preferred IMU per side to frontend signals and total steps
         for side in ("left", "right"):
             fsm = self._get_preferred_fsm_for_side(side)
             self._chosen_step_fsm[side] = fsm
+            if fsm is not None:
+                fsm.is_preferred = True
             try:
                 sig = getattr(self, f"imu_{side}_step_count_changed")
             except Exception:
@@ -1314,6 +1320,7 @@ class StimulationIMUs(StimulationBasic):
                 fsm.steps_changed.connect(lambda _c, _f=fsm, _sig=sig: _sig.emit(int(_f.get_step_count())))
                 # Recompute and emit total from chosen pair
                 fsm.steps_changed.connect(self.__on_imu_leg_steps_changed)
+
     
     def __on_imu_leg_steps_changed(self, *_):
         total = 0

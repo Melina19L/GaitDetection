@@ -206,6 +206,8 @@ class IMUGaitFSM(QObject):
         self.timestamps_rom = []
 
         self.first_step_detected = FirstStep.DETECTING_HEEL_STRIKE  # Initial state for first step detection
+        self.is_preferred = False
+
         
         # Increase the number of samples between two peaks, if the gait is slow (e.g., walking at 1 km/h)
         
@@ -394,7 +396,7 @@ class IMUGaitFSM(QObject):
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
-            return np.array(self.quaternion[-last_n:])
+            return np.array(list(self.quaternion)[-last_n:])
         return np.array(self.quaternion)
 
     def imu_phase_detection(self):
@@ -710,7 +712,7 @@ class IMUGaitFSM(QObject):
         self.heel_strike_peaks = np.append(self.heel_strike_peaks, self.peaks[-1])
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
-        if IMUGaitFSM.audio_cues_enabled:
+        if IMUGaitFSM.audio_cues_enabled and getattr(self, "is_preferred", False):
             _play_step_beep(is_hs=True)
         self._adaptive_update_params()
 
@@ -719,7 +721,7 @@ class IMUGaitFSM(QObject):
         self.toe_off_peaks = np.append(self.toe_off_peaks, self.peaks[-1])
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
-        if IMUGaitFSM.audio_cues_enabled:
+        if IMUGaitFSM.audio_cues_enabled and getattr(self, "is_preferred", False):
             _play_step_beep(is_hs=False)
 
     def __record_valley_timestamp(self) -> float:
@@ -954,6 +956,8 @@ class IMUGaitFSM_2(QObject):
         self.timestamps_rom = []
 
         self.first_step_detected = FirstStep.DETECTING_HEEL_STRIKE  # Initial state for first step detection
+        self.is_preferred = False
+
         
         # Increase the number of samples between two peaks, if the gait is slow (e.g., walking at 1 km/h)
         
@@ -1162,7 +1166,7 @@ class IMUGaitFSM_2(QObject):
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
-            return np.array(self.quaternion[-last_n:])
+            return np.array(list(self.quaternion)[-last_n:])
         return np.array(self.quaternion)
     
 
@@ -1484,7 +1488,7 @@ class IMUGaitFSM_2(QObject):
         self.heel_strike_peaks = np.append(self.heel_strike_peaks, self.peaks[-1])
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
-        if IMUGaitFSM_2.audio_cues_enabled:
+        if IMUGaitFSM_2.audio_cues_enabled and getattr(self, "is_preferred", False):
             _play_step_beep(is_hs=True)
         self._adaptive_update_params()
 
@@ -1559,7 +1563,7 @@ class IMUGaitFSM_2(QObject):
         self.toe_off_peaks = np.append(self.toe_off_peaks, self.peaks[-1])
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
-        if IMUGaitFSM_2.audio_cues_enabled:
+        if IMUGaitFSM_2.audio_cues_enabled and getattr(self, "is_preferred", False):
             _play_step_beep(is_hs=False)
 
     def __record_valley_timestamp(self) -> None:
@@ -1624,6 +1628,8 @@ class IMUGaitFSM_DUMMY(QObject):
         :type fast_walking: bool, optional
         """
         super().__init__()
+        self.quaternion = deque(maxlen=10)
+
         
         self.active_phase = Phase.UNKNOWN  # Initial state
         self.previous_phase = Phase.UNKNOWN  # Previous state
@@ -1684,7 +1690,7 @@ class IMUGaitFSM_DUMMY(QObject):
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
-            return np.array(self.quaternion[-last_n:])
+            return np.array(list(self.quaternion)[-last_n:])
         return np.array(self.quaternion)
     
 
