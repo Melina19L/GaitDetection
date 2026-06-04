@@ -8,21 +8,32 @@ from PySide6.QtCore import QTimer, Qt, QObject, Slot, SLOT, Signal
 from .gait_phases import Phase
 
 
-def _play_step_beep() -> None:
+import threading
+
+def _play_step_beep(is_hs: bool = True) -> None:
     """Non-blocking audible cue for a detected gait event (HS or TO).
     Failures are silently ignored so they never disturb the real-time loop.
     """
     try:
         if sys.platform == "darwin":
-            subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"],
+            sound_file = "/System/Library/Sounds/Tink.aiff" if is_hs else "/System/Library/Sounds/Pop.aiff"
+            subprocess.Popen(["afplay", sound_file],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif sys.platform == "win32":
-            import winsound
-            winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
+            freq = 800 if is_hs else 1200
+            dur = 70
+            def run_beep():
+                try:
+                    import winsound
+                    winsound.Beep(freq, dur)
+                except Exception:
+                    pass
+            threading.Thread(target=run_beep, daemon=True).start()
         else:
             print("\a", end="", flush=True)
     except Exception:
         pass
+
 
 #PEAK_DETECTION_DEADZONE = 0.25  # seconds
 #HEEL_STRIKE_PEAK_RANGE = 0.5  # seconds
@@ -700,7 +711,7 @@ class IMUGaitFSM(QObject):
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
         if IMUGaitFSM.audio_cues_enabled:
-            _play_step_beep()
+            _play_step_beep(is_hs=True)
         self._adaptive_update_params()
 
     def __record_toe_off_peak(self, peak_timestamp: float) -> None:
@@ -709,7 +720,7 @@ class IMUGaitFSM(QObject):
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
         if IMUGaitFSM.audio_cues_enabled:
-            _play_step_beep()
+            _play_step_beep(is_hs=False)
 
     def __record_valley_timestamp(self) -> float:
         """Detect and record the timestamp of the latest valley.
@@ -1474,7 +1485,7 @@ class IMUGaitFSM_2(QObject):
         self.heel_strike_peaks_timestamps = np.append(self.heel_strike_peaks_timestamps, peak_timestamp)
         self.height_heel_strike = np.append(self.height_heel_strike, self.height_peaks[-1])
         if IMUGaitFSM_2.audio_cues_enabled:
-            _play_step_beep()
+            _play_step_beep(is_hs=True)
         self._adaptive_update_params()
 
     def _adaptive_update_params(self) -> None:
@@ -1549,7 +1560,7 @@ class IMUGaitFSM_2(QObject):
         self.toe_off_peaks_timestamps = np.append(self.toe_off_peaks_timestamps, peak_timestamp)
         self.height_toe_off = np.append(self.height_toe_off, self.height_peaks[-1])
         if IMUGaitFSM_2.audio_cues_enabled:
-            _play_step_beep()
+            _play_step_beep(is_hs=False)
 
     def __record_valley_timestamp(self) -> None:
         """Detect and record the timestamp of the latest valley.

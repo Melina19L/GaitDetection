@@ -1534,10 +1534,6 @@ class StimulationIMUs(StimulationBasic):
     @override
     def update_closed_loop(self):
        
-        # Master switch
-        if not self.do_closed_loop:
-            return
-        
 
         # Availability checks (shank + at least one between thigh and foot)
         left_shank_ready_fsm1 = getattr(self, "left_leg_shank_fsm1", None) is not None
@@ -1623,8 +1619,8 @@ class StimulationIMUs(StimulationBasic):
                 left_fsm = self.get_first_available_fsm(side="left")
                 phase_left = left_fsm.active_phase if left_fsm is not None else None
 
-                # PI target and compute (guard against missing FSM)
-                if phase_left is not None:
+                # PI target and compute (guard against missing FSM, only run stimulation if do_closed_loop is active)
+                if self.do_closed_loop and phase_left is not None:
                     self.left_pi_controller.update_target(phase_left, self.left_knee_rom.get_pi_angle())
                     output_left = self.left_pi_controller.compute(self.left_knee_rom.get_pi_angle(), ts_left)
 
@@ -1673,7 +1669,7 @@ class StimulationIMUs(StimulationBasic):
                 right_fsm = self.get_first_available_fsm(side="right")
                 phase_right = right_fsm.active_phase if right_fsm is not None else None
 
-                if phase_right is not None:
+                if self.do_closed_loop and phase_right is not None:
                     self.right_pi_controller.update_target(phase_right, self.right_knee_rom.get_pi_angle())
                     output_right = self.right_pi_controller.compute(self.right_knee_rom.get_pi_angle(), ts_right)
 
