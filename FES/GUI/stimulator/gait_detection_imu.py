@@ -1545,13 +1545,14 @@ class IMUGaitFSM_2(QObject):
         # ── Amplitude adaptation from confirmed HS peak heights ───────────────
         N_AMP_WINDOW   = 8
         AMP_UPDATE_THR = 0.20
-        MIN_THRESHOLD  = 0.08
+        MIN_THRESHOLD  = 0.08 * self._deg
+        MAX_THRESHOLD  = 5.0 * self._deg
 
         if self.height_heel_strike.size >= N_AMP_WINDOW:
             median_height = float(np.median(self.height_heel_strike[-N_AMP_WINDOW:]))
             if median_height > 0:
-                new_hs_thr = float(np.clip(median_height * 0.40, MIN_THRESHOLD, 5.0))
-                new_to_thr = float(np.clip(median_height * 0.50, MIN_THRESHOLD, 5.0))
+                new_hs_thr = float(np.clip(median_height * 0.40, MIN_THRESHOLD, MAX_THRESHOLD))
+                new_to_thr = float(np.clip(median_height * 0.50, MIN_THRESHOLD, MAX_THRESHOLD))
                 if self.HS_threshold > 0:
                     rel_thr = abs(new_hs_thr - self.HS_threshold) / self.HS_threshold
                     if rel_thr >= AMP_UPDATE_THR:
