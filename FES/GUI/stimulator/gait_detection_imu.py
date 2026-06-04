@@ -354,19 +354,14 @@ class IMUGaitFSM(QObject):
 
         if timestamps:
             # Extend deque with new data, data_gy is the only one used online
-            if self.do_closed_loop is True: # Assumes Functional Calibration
-                self.data_gy.extend(sample[4] for sample in samples)
-            else: #open-loop doesnt need calibration for now so just invert y
-                self.data_gy.extend(-sample[4] for sample in samples) # ADDING A MINUS INORDER TO AVOID CALIBRATION OF IMU SENSORS, THIS ASSUMES THAT IMU IS PLACED ON THE FRONTAL PLANE, ON THE SHANK JUST BELOW THE KNEES, WITH THE X-SENSE LOGO AT THE BOTTOM (READABLE)
+            # We always invert the Y gyro to match the algorithm's expected coordinate system
+            self.data_gy.extend(-sample[4] for sample in samples)
             self.quaternion.extend([timestamp] + sample[6:10] for sample, timestamp in zip(samples, timestamps))
             self.timestamps.extend(timestamps)
 
             # Update the data for ROM calculation (offline)
             self.data_gx_rom.extend(sample[3] for sample in samples)
-            if self.do_closed_loop is True: # Assumes Functional Calibration
-                self.data_gy_rom.extend(sample[4] for sample in samples)
-            else: #open-loop doesnt need calibration for now so just invert y
-                self.data_gy_rom.extend(-sample[4] for sample in samples)
+            self.data_gy_rom.extend(-sample[4] for sample in samples)
             
             self.data_gz_rom.extend(sample[5] for sample in samples)
             self.data_accx_rom.extend(sample[0] for sample in samples)
@@ -1020,7 +1015,7 @@ class IMUGaitFSM_2(QObject):
                 if speed <= 0.1:
                     self.TO_threshold=25
                     self.HS_threshold=5 
-                    self.min_event_distance=5
+                    self.min_event_distance=0.8
                     self.min_TO_HS_distance=2.4
                     self.valley_height= 0.5
                     self.distance_valleys=45
@@ -1029,7 +1024,7 @@ class IMUGaitFSM_2(QObject):
                 elif 0.1 < speed <= 0.5: 
                     self.TO_threshold=50
                     self.HS_threshold=25
-                    self.min_event_distance=2
+                    self.min_event_distance=0.8
                     self.min_TO_HS_distance=0.5
                     self.valley_height= 0.5
                     self.distance_valleys=45
@@ -1038,7 +1033,7 @@ class IMUGaitFSM_2(QObject):
                 elif 0.5 < speed <= 0.8: 
                     self.TO_threshold=100
                     self.HS_threshold=25
-                    self.min_event_distance=2
+                    self.min_event_distance=0.8
                     self.min_TO_HS_distance=0.5
                     self.valley_height= 0.5
                     self.distance_valleys=45
@@ -1047,7 +1042,7 @@ class IMUGaitFSM_2(QObject):
                 else: # this would mean 0.8 km/h - 1.5 km/h, and we leave the parameters as they are
                     self.TO_threshold=125
                     self.HS_threshold=25
-                    self.min_event_distance=2
+                    self.min_event_distance=0.8
                     self.min_TO_HS_distance=0.5              
                     self.valley_height= 0.5
                     self.distance_valleys=45
@@ -1125,10 +1120,8 @@ class IMUGaitFSM_2(QObject):
                     self.data_gx.extend(sample[3] for sample in samples)
                 except Exception:
                     pass
-                if self.do_closed_loop is True:
-                    self.data_gy.extend(sample[4] for sample in samples)
-                else:
-                    self.data_gy.extend(-sample[4] for sample in samples)
+                # We always invert the Y gyro to match the algorithm's expected coordinate system
+                self.data_gy.extend(-sample[4] for sample in samples)
                 try:
                     self.data_gz.extend(sample[5] for sample in samples)
                 except Exception:
@@ -1139,10 +1132,7 @@ class IMUGaitFSM_2(QObject):
 
                 # offline / ROM bookkeeping (unchanged)
                 self.data_gx_rom.extend(sample[3] for sample in samples)
-                if self.do_closed_loop is True:
-                    self.data_gy_rom.extend(sample[4] for sample in samples)
-                else:
-                    self.data_gy_rom.extend(-sample[4] for sample in samples)
+                self.data_gy_rom.extend(-sample[4] for sample in samples)
                 self.data_gz_rom.extend(sample[5] for sample in samples)
                 self.data_accx_rom.extend(sample[0] for sample in samples)
                 self.data_accy_rom.extend(sample[1] for sample in samples)
@@ -1237,20 +1227,14 @@ class IMUGaitFSM_2(QObject):
         if start_idx >= ts.size:
             return
 
-        # Aminian-style HS/TO detection (Salarian 2004; Sabatini 2005):
-        # Mid-swing peaks on Butter-filtered gyrY, then HS = first local min
-        # 50-200 ms AFTER MS, TO = last local min 100-300 ms BEFORE MS.
-        # Replaces the previous gyro-norm threshold which mis-aligned events
-        # with the gait cycle (validated HS at 24% / TO at 89% of cycle).
-        _ms_idx, hs_idx, to_idx = self._aminian_pipeline(gy, fs=60.0)
-        hs_set = set(int(x) for x in hs_idx)
-        to_set = set(int(x) for x in to_idx)
+        g_norm = np.sqrt(gx*gx + gy*gy + gz*gz)
 
         for i in range(start_idx, ts.size):
             t = ts[i]
+            norm_gyro = g_norm[i]
 
             # --- TO detection ---
-            if i in to_set:
+            if norm_gyro > self.TO_threshold:
                 if not self._swing_active and not self._to_gate_open:
                     last_to_ts = self.toe_off_peaks_timestamps[-1] if self.toe_off_peaks_timestamps.size else None
                     if (last_to_ts is None) or ((t - last_to_ts) >= self.min_event_distance):
@@ -1268,9 +1252,8 @@ class IMUGaitFSM_2(QObject):
                             self._last_toe_off_ts = t
 
                         if self.heel_strike_peaks_timestamps.size == 0 or self.toe_off_peaks_timestamps.size == 0:
-                        # not enough data yet to compute stance_time
-                           pass
-                    
+                            # not enough data yet to compute stance_time
+                            pass
                         else:
                             dt = float(self.toe_off_peaks_timestamps[-1] - self.heel_strike_peaks_timestamps[-1])
                             self.stance_durations = np.append(self.stance_durations, dt)
@@ -1278,7 +1261,7 @@ class IMUGaitFSM_2(QObject):
                             if self.stance_time == 0:
                                 self.stance_time = dt
                             else:
-                            # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new 
+                                # smoother update (alpha controls responsiveness)
                                 alpha = 0.2
                                 self.stance_time = alpha * dt + (1.0 - alpha) * self.stance_time
                                 
@@ -1289,7 +1272,7 @@ class IMUGaitFSM_2(QObject):
                 pass
 
             # --- HS detection (only after a TO has occurred) ---
-            if (i in hs_set) and self._to_gate_open:
+            if (norm_gyro < self.HS_threshold) and self._to_gate_open:
                 last_hs_ts = self.heel_strike_peaks_timestamps[-1] if self.heel_strike_peaks_timestamps.size else None
                 last_to_ts = self.toe_off_peaks_timestamps[-1]      if self.toe_off_peaks_timestamps.size else None
 
@@ -1307,7 +1290,6 @@ class IMUGaitFSM_2(QObject):
                             QTimer.singleShot(100, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
                             QTimer.singleShot(300, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
                             QTimer.singleShot(500, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-
                         else:
                             LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0))
                             self.loading_response_durations = np.append(self.loading_response_durations, LR_time_ms)
@@ -1338,7 +1320,6 @@ class IMUGaitFSM_2(QObject):
             if self.FES and self._awaiting_terminal_swing:
                 try:
                     gy_arr = np.asarray(self.data_gy)
-                    #print(f"[{self.stream_name}] Awaiting TS, t={t:.3f}, gy={gy_arr[i]:.2f}")
                     ts_arr = np.asarray(self.timestamps, dtype=float)
 
                     if self._last_toe_off_ts is not None:
@@ -1369,8 +1350,6 @@ class IMUGaitFSM_2(QObject):
                             self.valleys = np.append(self.valleys, global_idx)
                             self.valleys_timestamps = np.append(self.valleys_timestamps, valley_ts)
 
-                            #print(f"[{self.stream_name}] Valley candidate at t={valley_ts:.3f}, gy={gy_arr[global_idx]:.2f}")
-
                             if (
                                 self._last_toe_off_ts is not None
                                 and valley_ts > self._last_toe_off_ts
@@ -1378,7 +1357,6 @@ class IMUGaitFSM_2(QObject):
                             ):
                                 self._awaiting_terminal_swing = False
                                 self.__transition_to(Phase.TERMINAL_SWING)
-                                #print(f"[{self.stream_name}] → TERMINAL_SWING at t={valley_ts:.3f}")
                 except Exception:
                     pass
 
