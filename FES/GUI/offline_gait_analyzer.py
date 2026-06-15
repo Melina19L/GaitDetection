@@ -11,50 +11,86 @@ try:
 except ImportError:
     ROM = None
 
-def _compute_angle_offline(data_dict, proxy_1_key, proxy_2_key):
-    """Calcola l'angolo in batch tra due sensori (es: shank e foot) usando i quaternioni salvati."""
+# Tolleranza di matching tra i timestamp dei due sensori (50 ms ~ 3 campioni @60Hz)
+_OFFLINE_TIME_TOLERANCE = 0.05
+
+
+def _build_quat_array(block):
+    """Costruisci un array [timestamp, qw, qx, qy, qz] da un blocco rom_data."""
+    ts = np.asarray(block["timestamps"], dtype=float)
+    qw = np.asarray(block["qw"], dtype=float)
+    qx = np.asarray(block["qx"], dtype=float)
+    qy = np.asarray(block["qy"], dtype=float)
+    qz = np.asarray(block["qz"], dtype=float)
+    n = min(len(ts), len(qw), len(qx), len(qy), len(qz))
+    if n == 0:
+        return np.empty((0, 5), dtype=float)
+    return np.column_stack([ts[:n], qw[:n], qx[:n], qy[:n], qz[:n]])
+
+
+def _compute_angle_offline(data_dict, proxy_1_key, proxy_2_key, is_ankle=False, offset=0.0,
+                           q_shank_ref=None, q_foot_ref=None, hinge_axis=None,
+                           foot_axis='X', shank_axis='X'):
+    """Calcola l'angolo in batch tra due sensori usando i quaternioni salvati.
+
+    proxy_1 = segmento prossimale (thigh/pelvis/shank), proxy_2 = distale
+    (shank/thigh/foot). I due sensori sono campionati su clock separati ma
+    quasi-sincroni: ogni campione prossimale viene appaiato col campione
+    distale col timestamp più vicino entro ``_OFFLINE_TIME_TOLERANCE``.
+
+    Per la caviglia (``is_ankle=True``) si usa ``ROM.calculate_ankle_angle``
+    (dorsi/plantarflessione con segno), NON la formula generica del ginocchio.
+    Se i riferimenti della calibrazione funzionale (``q_shank_ref``,
+    ``q_foot_ref``, ``hinge_axis``) sono disponibili usa il metodo SVD/cerniera
+    — identico al live, decoupla la flessione del ginocchio. Altrimenti ricade
+    sull'algoritmo ankle legacy con l'offset salvato.
+
+    :return: ``(timestamps, angles, used_functional)`` — ``used_functional`` è
+        True se è stato usato il metodo SVD/cerniera della calibrazione.
+    """
     if ROM is None or "rom_data" not in data_dict:
-        return None, None
+        return None, None, False
     rom_data = data_dict["rom_data"]
     if proxy_1_key not in rom_data or proxy_2_key not in rom_data:
-        return None, None
-    
-    # Prendi il numero minimo di campioni tra i due sensori
-    p1 = rom_data[proxy_1_key]
-    p2 = rom_data[proxy_2_key]
-    n = min(len(p1["timestamps"]), len(p2["timestamps"]))
-    if n == 0:
-        return None, None
-        
-    timestamps = p1["timestamps"][:n]
-    
-    # Ricostruisci i sample come si aspetta ROM
-    # format: [[0, 0, 0, 0, qw, qx, qy, qz], ...] 
-    # l'indice 4,5,6,7 sono i quaternioni in __compute_angles_from_data
-    fake_samples_1 = []
-    fake_samples_2 = []
-    for i in range(n):
-        s1 = [0]*8
-        s1[4] = p1["qw"][i]
-        s1[5] = p1["qx"][i]
-        s1[6] = p1["qy"][i]
-        s1[7] = p1["qz"][i]
-        fake_samples_1.append(s1)
-        
-        s2 = [0]*8
-        s2[4] = p2["qw"][i]
-        s2[5] = p2["qx"][i]
-        s2[6] = p2["qy"][i]
-        s2[7] = p2["qz"][i]
-        fake_samples_2.append(s2)
-        
-    temp_rom = ROM()
-    angles = []
-    for i in range(n):
-        ang = temp_rom.calculate_joint_angle(False, [fake_samples_1[i]], [fake_samples_2[i]])
-        angles.append(ang[0] if ang.size else 0.0)
-    
-    return np.array(timestamps), np.array(angles)
+        return None, None, False
+
+    a1 = _build_quat_array(rom_data[proxy_1_key])
+    a2 = _build_quat_array(rom_data[proxy_2_key])
+    if a1.shape[0] == 0 or a2.shape[0] == 0:
+        return None, None, False
+
+    used_functional = bool(
+        is_ankle and q_shank_ref is not None and q_foot_ref is not None
+        and hinge_axis is not None
+    )
+
+    ts2 = a2[:, 0]
+    out_ts, out_ang = [], []
+    for i in range(a1.shape[0]):
+        t = a1[i, 0]
+        j = int(np.argmin(np.abs(ts2 - t)))
+        if abs(ts2[j] - t) > _OFFLINE_TIME_TOLERANCE:
+            continue
+        q1 = a1[i, 1:5]   # prossimale (shank per la caviglia)
+        q2 = a2[j, 1:5]   # distale    (foot  per la caviglia)
+        try:
+            if is_ankle:
+                ang = ROM.calculate_ankle_angle(
+                    q1, q2, offset,
+                    foot_axis=foot_axis, shank_axis=shank_axis,
+                    q_shank_ref=q_shank_ref, q_foot_ref=q_foot_ref,
+                    hinge_axis=hinge_axis,
+                )
+            else:
+                ang = ROM.calculate_joint_angle(q1, q2, offset)
+        except Exception:
+            continue
+        out_ts.append(t)
+        out_ang.append(float(ang))
+
+    if not out_ts:
+        return None, None, used_functional
+    return np.array(out_ts), np.array(out_ang), used_functional
 
 def load_data(file_path):
     print(f"\nCaricamento file: {file_path}")
@@ -72,22 +108,67 @@ def load_data(file_path):
     print(f" - Angoli Anca pre-calcolati: {'SI' if has_hip else 'NO'}")
     print(f" - Makers Fasi del Passo: {'SI' if has_events else 'NO'}")
     
+    # Estrai i quaternioni raw e i timestamp del foot da rom_data per popolare raw_right_foot_quat / raw_left_foot_quat se necessario
+    if "rom_data" in data:
+        rom_data = data["rom_data"]
+        for s in ("right", "left"):
+            q_key = f"raw_{s}_foot_quat"
+            ts_key = f"raw_{s}_foot_timestamps"
+            if q_key not in data or ts_key not in data:
+                # Cerca in rom_data per un sensore del foot (supporta fsm1/fsm2/dummy/etc)
+                foot_fsm_key = next((k for k in rom_data.keys() if f"{s}_foot" in k), None)
+                if foot_fsm_key:
+                    fsm_block = rom_data[foot_fsm_key]
+                    if "qw" in fsm_block and "timestamps" in fsm_block:
+                        qw = fsm_block["qw"]
+                        qx = fsm_block["qx"]
+                        qy = fsm_block["qy"]
+                        qz = fsm_block["qz"]
+                        quat_arr = np.column_stack([qw, qx, qy, qz])
+                        data[q_key] = quat_arr
+                        data[ts_key] = np.array(fsm_block["timestamps"])
+                        print(f"   -> Estratti quaternioni grezzi del foot da rom_data ({foot_fsm_key})")
+
     # Se mancano le caviglie ma abbiamo i dati RAW (Salvataggio della finestra principale)
     if not has_ankle and "rom_data" in data:
         print(" - Ricostruzione angoli caviglia offline dai quaternioni raw...")
+        rom_data = data.get("rom_data", {})
+        
         # Prova a sinistra (shank + foot)
-        ts_l, ang_l = _compute_angle_offline(data, "left_shank_fsm1", "left_foot_fsm1")
-        if ts_l is not None:
-            data["left_ankle_timestamps"] = ts_l
-            data["left_ankle_angles"] = ang_l
-            print("   -> Ricostruita Caviglia Sinistra")
+        left_shank_key = next((k for k in rom_data.keys() if "left_shank" in k), None)
+        left_foot_key = next((k for k in rom_data.keys() if "left_foot" in k), None)
+        if left_shank_key and left_foot_key:
+            ts_l, ang_l, fn_l = _compute_angle_offline(
+                data, left_shank_key, left_foot_key,
+                is_ankle=True, offset=float(data.get("left_ankle_offset", 0.0)),
+                q_shank_ref=data.get("left_ankle_qshank_ref"),
+                q_foot_ref=data.get("left_ankle_qfoot_ref"),
+                hinge_axis=data.get("left_ankle_hinge_axis"),
+                foot_axis=data.get("left_ankle_foot_axis", 'X'),
+                shank_axis=data.get("left_ankle_shank_axis", 'X'))
+            if ts_l is not None:
+                data["left_ankle_timestamps"] = ts_l
+                data["left_ankle_angles"] = ang_l
+                method = "SVD/cerniera (funzionale)" if fn_l else "legacy"
+                print(f"   -> Ricostruita Caviglia Sinistra [{method}] (shank={left_shank_key}, foot={left_foot_key})")
 
         # Prova a destra (shank + foot)
-        ts_r, ang_r = _compute_angle_offline(data, "right_shank_fsm1", "right_foot_fsm1")
-        if ts_r is not None:
-            data["right_ankle_timestamps"] = ts_r
-            data["right_ankle_angles"] = ang_r
-            print("   -> Ricostruita Caviglia Destra")
+        right_shank_key = next((k for k in rom_data.keys() if "right_shank" in k), None)
+        right_foot_key = next((k for k in rom_data.keys() if "right_foot" in k), None)
+        if right_shank_key and right_foot_key:
+            ts_r, ang_r, fn_r = _compute_angle_offline(
+                data, right_shank_key, right_foot_key,
+                is_ankle=True, offset=float(data.get("right_ankle_offset", 0.0)),
+                q_shank_ref=data.get("right_ankle_qshank_ref"),
+                q_foot_ref=data.get("right_ankle_qfoot_ref"),
+                hinge_axis=data.get("right_ankle_hinge_axis"),
+                foot_axis=data.get("right_ankle_foot_axis", 'X'),
+                shank_axis=data.get("right_ankle_shank_axis", 'X'))
+            if ts_r is not None:
+                data["right_ankle_timestamps"] = ts_r
+                data["right_ankle_angles"] = ang_r
+                method = "SVD/cerniera (funzionale)" if fn_r else "legacy"
+                print(f"   -> Ricostruita Caviglia Destra [{method}] (shank={right_shank_key}, foot={right_foot_key})")
 
     # Se mancano gli hip ma abbiamo i dati RAW di pelvis + thigh, li ricostruiamo offline.
     # Per i .pkl più vecchi che usavano left_trunk/right_trunk separati, facciamo fallback
@@ -97,47 +178,71 @@ def load_data(file_path):
         rom_data = data.get("rom_data", {})
 
         def _pick_pelvis_key():
-            for candidate in ("pelvis_fsm1", "pelvis_fsm2", "Pelvis_fsm1", "Pelvis_fsm2"):
+            for candidate in ("pelvis_fsm1", "pelvis_fsm2", "Pelvis_fsm1", "Pelvis_fsm2", "pelvis"):
                 if candidate in rom_data:
                     return candidate
+            for k in rom_data.keys():
+                if "pelvis" in k.lower():
+                    return k
             return None
 
         pelvis_key = _pick_pelvis_key()
 
         # LEFT hip
-        prox_left = pelvis_key or ("left_trunk_fsm1" if "left_trunk_fsm1" in rom_data else None)
-        if prox_left and "left_thigh_fsm1" in rom_data:
-            ts_l, ang_l = _compute_angle_offline(data, prox_left, "left_thigh_fsm1")
+        left_thigh_key = next((k for k in rom_data.keys() if "left_thigh" in k), None)
+        prox_left = pelvis_key or next((k for k in rom_data.keys() if "left_trunk" in k), None)
+        if prox_left and left_thigh_key:
+            ts_l, ang_l, _ = _compute_angle_offline(data, prox_left, left_thigh_key)
             if ts_l is not None:
                 data["left_hip_timestamps"] = ts_l
                 data["left_hip_angles"] = ang_l
-                print(f"   -> Ricostruita Anca Sinistra (proximal={prox_left})")
+                print(f"   -> Ricostruita Anca Sinistra (proximal={prox_left}, thigh={left_thigh_key})")
 
         # RIGHT hip
-        prox_right = pelvis_key or ("right_trunk_fsm1" if "right_trunk_fsm1" in rom_data else None)
-        if prox_right and "right_thigh_fsm1" in rom_data:
-            ts_r, ang_r = _compute_angle_offline(data, prox_right, "right_thigh_fsm1")
+        right_thigh_key = next((k for k in rom_data.keys() if "right_thigh" in k), None)
+        prox_right = pelvis_key or next((k for k in rom_data.keys() if "right_trunk" in k), None)
+        if prox_right and right_thigh_key:
+            ts_r, ang_r, _ = _compute_angle_offline(data, prox_right, right_thigh_key)
             if ts_r is not None:
                 data["right_hip_timestamps"] = ts_r
                 data["right_hip_angles"] = ang_r
-                print(f"   -> Ricostruita Anca Destra (proximal={prox_right})")
+                print(f"   -> Ricostruita Anca Destra (proximal={prox_right}, thigh={right_thigh_key})")
             
-    # Normalizza i timestamp per farli partire da 0
-    print(" - Normalizzazione timestamps (partenza da t=0s)...")
-    min_time = float('inf')
-    
-    # Primo passaggio: Trova il tempo minimo assoluto
-    for key, value in data.items():
-        if ("timestamps" in key or "peaks" in key or "valleys" in key) and isinstance(value, (list, np.ndarray)) and len(value) > 0:
-            current_min = np.min(value)
-            if current_min < min_time:
-                min_time = current_min
-                
-    # Secondo passaggio: Sottrai il tempo minimo e converti in array numpy
-    if min_time != float('inf'):
-        for key, value in data.copy().items():
-            if ("timestamps" in key or "peaks" in key or "valleys" in key) and isinstance(value, (list, np.ndarray)) and len(value) > 0:
-                data[key] = np.array(value) - min_time
+    # Normalizza i timestamp per farli partire da 0 in modo intelligente (separando UNIX > 1e9 e LSL < 1e9)
+    print(" - Normalizzazione timestamps (partenza da t=0s, allineamento UNIX/LSL)...")
+    unix_arrays = []
+    lsl_arrays = []
+
+    def collect_arrays(d):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                collect_arrays(v)
+            elif isinstance(v, (list, np.ndarray)) and len(v) > 0:
+                if isinstance(k, str) and ("timestamps" in k or "peaks" in k or "valleys" in k):
+                    first_val = float(v[0])
+                    if first_val > 1e9:
+                        unix_arrays.append(v)
+                    else:
+                        lsl_arrays.append(v)
+
+    collect_arrays(data)
+
+    min_unix = np.min([np.min(arr) for arr in unix_arrays]) if unix_arrays else None
+    min_lsl = np.min([np.min(arr) for arr in lsl_arrays]) if lsl_arrays else None
+
+    def normalize_dict(d):
+        for k, v in d.copy().items():
+            if isinstance(v, dict):
+                normalize_dict(v)
+            elif isinstance(v, (list, np.ndarray)) and len(v) > 0:
+                if isinstance(k, str) and ("timestamps" in k or "peaks" in k or "valleys" in k):
+                    first_val = float(v[0])
+                    if first_val > 1e9:
+                        d[k] = np.array(v) - min_unix
+                    else:
+                        d[k] = np.array(v) - min_lsl
+
+    normalize_dict(data)
 
     return data
 
@@ -244,7 +349,7 @@ def _aminian_gait_events_from_pitch(pitch, timestamps,
                                     to_window_s=(0.30, 0.10),
                                     pitch_smooth_cutoff_hz=None,
                                     cycle_min_s=0.7,
-                                    cycle_max_s=1.5):
+                                    cycle_max_s=3.0):
     """Aminian-style HS/TO detection (Salarian 2004; Sabatini 2005) adapted to
     work from foot pitch (deg). Computes pitch rate by central differencing
     (functionally equivalent to gyro_Y in the sagittal plane) then applies the

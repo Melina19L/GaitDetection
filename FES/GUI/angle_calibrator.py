@@ -715,7 +715,7 @@ class AngleCalibrator(QObject):
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.left_ankle_offset, self._diag["left_shank"],
-                    is_ankle=False,
+                    is_ankle=True,
                     proximal_axis=self.left_ankle_shank_axis,
                     distal_axis=self.left_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'left_ankle_qshank_ref', None),
@@ -768,7 +768,7 @@ class AngleCalibrator(QObject):
                 ankle_angles = self.__compute_angles_from_data(
                     s_s, s_ts, f_s, f_ts,
                     self.right_ankle_offset, self._diag["right_shank"],
-                    is_ankle=False,
+                    is_ankle=True,
                     proximal_axis=self.right_ankle_shank_axis,
                     distal_axis=self.right_ankle_foot_axis,
                     q_proximal_ref=getattr(self, 'right_ankle_qshank_ref', None),
@@ -860,6 +860,20 @@ class AngleCalibrator(QObject):
             "right_ankle_offset": self.right_ankle_offset,
             "left_hip_offset":    self.left_hip_offset,
             "right_hip_offset":   self.right_hip_offset,
+            # ── Ankle functional calibration (for offline SVD/hinge method) ───
+            # Reference quaternions + hinge axis from the 5s dorsi/plantarflex
+            # calibration. None when functional calibration wasn't performed —
+            # offline analysis then falls back to the legacy ankle algorithm.
+            "left_ankle_qshank_ref":  getattr(self, 'left_ankle_qshank_ref',  None),
+            "left_ankle_qfoot_ref":   getattr(self, 'left_ankle_qfoot_ref',   None),
+            "left_ankle_hinge_axis":  self.left_ankle_hinge_axis,
+            "left_ankle_shank_axis":  self.left_ankle_shank_axis,
+            "left_ankle_foot_axis":   self.left_ankle_foot_axis,
+            "right_ankle_qshank_ref": getattr(self, 'right_ankle_qshank_ref', None),
+            "right_ankle_qfoot_ref":  getattr(self, 'right_ankle_qfoot_ref',  None),
+            "right_ankle_hinge_axis": self.right_ankle_hinge_axis,
+            "right_ankle_shank_axis": self.right_ankle_shank_axis,
+            "right_ankle_foot_axis":  self.right_ankle_foot_axis,
             # ── Session metadata ─────────────────────────────────────────────
             "session_start_unix": start,
             "session_end_unix":   now,

@@ -1450,7 +1450,21 @@ class StimulationIMUs(StimulationBasic):
             "imu_right_hip_angles": getattr(self.right_hip_rom, "angles", None)[:, 1] if hasattr(self.right_hip_rom, "angles") else None,
             "imu_left_hip_timestamps": getattr(self.left_hip_rom, "angles", None)[:, 0] if hasattr(self.left_hip_rom, "angles") else None,
             "imu_right_hip_timestamps": getattr(self.right_hip_rom, "angles", None)[:, 0] if hasattr(self.right_hip_rom, "angles") else None,
-            
+
+            # --- ankle functional-calibration refs (for offline SVD/hinge reconstruction) ---
+            "left_ankle_offset":      getattr(self.left_ankle_rom,  "offset",      0.0),
+            "right_ankle_offset":     getattr(self.right_ankle_rom, "offset",      0.0),
+            "left_ankle_qshank_ref":  getattr(self.left_ankle_rom,  "q_shank_ref", None),
+            "left_ankle_qfoot_ref":   getattr(self.left_ankle_rom,  "q_foot_ref",  None),
+            "left_ankle_hinge_axis":  getattr(self.left_ankle_rom,  "hinge_axis",  None),
+            "left_ankle_shank_axis":  getattr(self.left_ankle_rom,  "shank_axis",  'X'),
+            "left_ankle_foot_axis":   getattr(self.left_ankle_rom,  "foot_axis",   'X'),
+            "right_ankle_qshank_ref": getattr(self.right_ankle_rom, "q_shank_ref", None),
+            "right_ankle_qfoot_ref":  getattr(self.right_ankle_rom, "q_foot_ref",  None),
+            "right_ankle_hinge_axis": getattr(self.right_ankle_rom, "hinge_axis",  None),
+            "right_ankle_shank_axis": getattr(self.right_ankle_rom, "shank_axis",  'X'),
+            "right_ankle_foot_axis":  getattr(self.right_ankle_rom, "foot_axis",   'X'),
+
             "imu_left_pi_timestamps": getattr(self.left_pi_controller, "timestamps", None),
             "imu_right_pi_timestamps": getattr(self.right_pi_controller, "timestamps", None),
             "imu_left_pi_errors": getattr(self.left_pi_controller, "errors", None),
@@ -2017,6 +2031,22 @@ class StimulationFSRandIMU(StimulationIMUs):
             "imu_right_hip_angles":       _rom_angles(getattr(self,  "right_hip_rom",  None)),
             "imu_left_hip_timestamps":    _rom_timestamps(getattr(self, "left_hip_rom",   None)),
             "imu_right_hip_timestamps":   _rom_timestamps(getattr(self, "right_hip_rom",  None)),
+
+            # Ankle functional-calibration refs (for offline SVD/hinge reconstruction).
+            # Pulled from the ankle ROM instances (set via set_ankle_reference). None
+            # when functional calibration wasn't performed -> offline falls back to legacy.
+            "left_ankle_offset":      getattr(getattr(self, "left_ankle_rom",  None), "offset",      0.0),
+            "right_ankle_offset":     getattr(getattr(self, "right_ankle_rom", None), "offset",      0.0),
+            "left_ankle_qshank_ref":  getattr(getattr(self, "left_ankle_rom",  None), "q_shank_ref", None),
+            "left_ankle_qfoot_ref":   getattr(getattr(self, "left_ankle_rom",  None), "q_foot_ref",  None),
+            "left_ankle_hinge_axis":  getattr(getattr(self, "left_ankle_rom",  None), "hinge_axis",  None),
+            "left_ankle_shank_axis":  getattr(getattr(self, "left_ankle_rom",  None), "shank_axis",  'X'),
+            "left_ankle_foot_axis":   getattr(getattr(self, "left_ankle_rom",  None), "foot_axis",   'X'),
+            "right_ankle_qshank_ref": getattr(getattr(self, "right_ankle_rom", None), "q_shank_ref", None),
+            "right_ankle_qfoot_ref":  getattr(getattr(self, "right_ankle_rom", None), "q_foot_ref",  None),
+            "right_ankle_hinge_axis": getattr(getattr(self, "right_ankle_rom", None), "hinge_axis",  None),
+            "right_ankle_shank_axis": getattr(getattr(self, "right_ankle_rom", None), "shank_axis",  'X'),
+            "right_ankle_foot_axis":  getattr(getattr(self, "right_ankle_rom", None), "foot_axis",   'X'),
 
             # save walking speed used
             "walking_speed": getattr(self, "speed", None),

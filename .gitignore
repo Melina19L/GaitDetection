@@ -207,3 +207,34 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── Project data & artifacts (not source) ─────────────────────────────────
+# OS junk
+.DS_Store
+
+# Recorded experiment data / exports (.pkl already ignored above)
+*.xlsx
+*.xls
+*.npz
+*.h5
+*.hdf5
+*.mat
+*.csv
+
+# Media / documents
+*.mp4
+*.mov
+*.avi
+*.docx
+*.pdf
+
+# Generated analysis plots (GUI image assets under gui/images stay tracked)
+verify_*.png
+gait_pattern_*.png
+gui_vs_mocap*.png
+testMapp*.png
+*_plot*.png
+FES/subjects/**/*.png
+
+# Raw sensor CSV/feature dumps
+FES/GUI/raw_data/
