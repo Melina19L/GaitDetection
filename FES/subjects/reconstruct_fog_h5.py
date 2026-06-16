@@ -41,14 +41,24 @@ from stimulator.gait_detection_imu import identify_gait_phases, identify_valleys
 H5_PATH = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
            "File di Daniel Leal - Recording sessions/Group_FOG/FOG002/MAPP/"
            "Narrow Corridor_1/recording_data.h5")
-T0 = 1208209.66                  # device-clock time of "Task started" event
-WIN = (800.0, 860.0)             # analysis window, elapsed seconds (13:20-14:20)
+# Time base: cameras + sensors share an ABSOLUTE device clock (~1.208e6). The
+# `logs/events` `elapsed` column is a SEPARATE clock that drifts from absolute
+# (e.g. "Recording Started" elapsed=8.63 but ts-Task=5.10), so it must NOT be
+# used. Videos are aligned to the absolute timestamp; video t=0 = first camera
+# frame. T0 is therefore set at runtime to the first camera frame timestamp so
+# the window matches what is seen in the video. (~1208214.75 for FOG002.)
+T0 = 0.0                         # set in main() from first camera frame
+WIN = (800.0, 860.0)             # analysis window, seconds from video start (13:20-14:20)
 CALIB = (0.0, 10.0)              # standing-still calibration window
 FUSE_FROM = 0.0                  # fuse COMETA continuously from here through WIN[1]
 
 # COMETA 72 cols = 8 sensor blocks x 9 ch [acc(g) 0:3, gyro(deg/s) 3:6, mag 6:9]
-COMETA_BLOCK = {("R", "thigh"): 0, ("R", "shin"): 4,
-                ("L", "thigh"): 1, ("L", "shin"): 5}
+# NOTE: the originally-supplied map (S1/S2=thigh, S5/S6=shin) is INVERTED. The
+# ankle test (true shank paired with foot gives a physiological ~35-48 deg ROM,
+# thigh gives an absurd ~100 deg) plus distal-faster gyro-RMS show S1/S2 are the
+# shins and S5/S6 the thighs. Corrected mapping below.
+COMETA_BLOCK = {("R", "thigh"): 4, ("R", "shin"): 0,
+                ("L", "thigh"): 5, ("L", "shin"): 1}
 COMETA_FS = 2000.0
 
 # WIMU 8 cols = [counter, m1, m2, m3, q_w, q_x, q_y, q_z]
@@ -187,7 +197,11 @@ def detect_gait(gyro_y, t, fs):
 
 # ── main ───────────────────────────────────────────────────────────────────
 def main():
+    global T0
     f = h5py.File(H5_PATH, "r")
+    T0 = float(f["Cameras/camera_2/frames"][0]["timestamp"])  # video t=0 (absolute)
+    print(f"[TIME] T0 (first camera frame) = {T0:.3f}  -> window absolute "
+          f"{T0+WIN[0]:.1f}-{T0+WIN[1]:.1f}")
 
     # ---- COMETA: fuse needed blocks continuously [FUSE_FROM .. WIN[1]] ----
     d_co, t_co = load_cometa(f)
