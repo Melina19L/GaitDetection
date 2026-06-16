@@ -361,9 +361,10 @@ def main():
             print(f"[FI] {k:16s} min={v[1].min():.2f} max={v[1].max():.2f} mean={v[1].mean():.2f}")
 
     rank = rank_sensors(fi)
+    detect = fog_detector(fi, rank)
 
     f.close()
-    make_figures(angles, gait, fi)
+    make_figures(angles, gait, fi, detect)
     make_rank_figure(rank)
 
 
@@ -399,7 +400,47 @@ def rank_sensors(fi):
     return out
 
 
+def _mask_to_intervals(times, mask):
+    out, i, n = [], 0, len(mask)
+    while i < n:
+        if mask[i]:
+            j = i
+            while j + 1 < n and mask[j + 1]:
+                j += 1
+            out.append((times[i], times[j]))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def fog_detector(fi, rank):
+    """Binary FOG detection from the best-ranked sensor: threshold its RAW FI at
+    its own clean-walking baseline (mean + 2 SD). Returns sensor name, threshold
+    and detected time intervals. This is the FI 'in action' as a FOG trigger.
+    """
+    best = rank[0][0]
+    c, v, off = fi[best]
+    tt = c + off
+    walk = v[(tt >= FI_WALK_REF[0]) & (tt <= FI_WALK_REF[1])]
+    thr = walk.mean() + 2.0 * walk.std()
+    intervals = _mask_to_intervals(tt, v > thr)
+    print(f"[DETECT] best={best}  thr={thr:.2f} (walk mean+2SD)  "
+          f"{len(intervals)} detected interval(s):")
+    for a, b in intervals:
+        print(f"   {a:.1f}-{b:.1f}s")
+    return {"sensor": best, "thr": thr, "intervals": intervals}
+
+
 # ── figures ────────────────────────────────────────────────────────────────
+def _detect_shade(ax, detect, label=False):
+    """Hatched orange band where the best sensor's FI detector fires (FOG)."""
+    for i, (a, b) in enumerate(detect["intervals"]):
+        ax.axvspan(a, b, facecolor="none", edgecolor="darkorange", hatch="//",
+                   lw=0, alpha=0.9,
+                   label=f"FI detect ({detect['sensor']})" if label and i == 0 else None)
+
+
 def _fog_shade(ax, label=False):
     """Mark visually-scored FOG episodes as a red band on the axis."""
     for i, (a, b) in enumerate(FOG_EVENTS):
@@ -415,7 +456,7 @@ def _phase_shade(ax, g):
             ax.axvspan(ev[i][0], ev[i + 1][0], color="0.85", alpha=0.5, lw=0)
 
 
-def make_figures(angles, gait, fi):
+def make_figures(angles, gait, fi, detect=None):
     # (a) joint angles
     fig, axs = plt.subplots(3, 1, figsize=(13, 9), sharex=True)
     note = {"knee": "COMETA-COMETA (validated)",
@@ -427,6 +468,8 @@ def make_figures(angles, gait, fi):
             ax.plot(t, a, col, lw=1.0, label=f"{side} {joint}")
         _phase_shade(ax, gait["R"])
         _fog_shade(ax, label=(joint == "knee"))
+        if detect:
+            _detect_shade(ax, detect, label=(joint == "knee"))
         ax.set_ylabel(f"{joint}\n(deg)")
         ax.text(0.005, 0.97, note[joint], transform=ax.transAxes, fontsize=7,
                 color="0.4", va="top", ha="left")
