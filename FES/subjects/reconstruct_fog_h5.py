@@ -76,6 +76,9 @@ FI_THRESHOLD = 2.0               # plotted reference line
 OUT_DIR = _HERE                  # save PNGs next to this script
 TAG = "fog002_narrow"
 
+# Visually-scored FOG episodes (seconds from video start), marked on every plot.
+FOG_EVENTS = [(831.0, 837.0)]
+
 
 # ── loading / slicing ──────────────────────────────────────────────────────
 def load_cometa(f):
@@ -325,6 +328,13 @@ def main():
 
 
 # ── figures ────────────────────────────────────────────────────────────────
+def _fog_shade(ax, label=False):
+    """Mark visually-scored FOG episodes as a red band on the axis."""
+    for i, (a, b) in enumerate(FOG_EVENTS):
+        ax.axvspan(a, b, color="red", alpha=0.12, lw=0,
+                   label="FOG (video)" if label and i == 0 else None)
+
+
 def _phase_shade(ax, g):
     """Shade stance (HS->TO) light, swing (TO->HS) clear, using R-foot events."""
     ev = sorted([(t, "hs") for t in g["t_hs"]] + [(t, "to") for t in g["t_to"]])
@@ -344,6 +354,7 @@ def make_figures(angles, gait, fi):
             t, a = angles[(side, joint)]
             ax.plot(t, a, col, lw=1.0, label=f"{side} {joint}")
         _phase_shade(ax, gait["R"])
+        _fog_shade(ax, label=(joint == "knee"))
         ax.set_ylabel(f"{joint}\n(deg)")
         ax.text(0.005, 0.97, note[joint], transform=ax.transAxes, fontsize=7,
                 color="0.4", va="top", ha="left")
@@ -367,6 +378,7 @@ def make_figures(angles, gait, fi):
         if len(g["to"]):
             ax.plot(g["t_to"], g["gy"][g["to"]], "bv", ms=9, label="TO")
         _phase_shade(ax, g)
+        _fog_shade(ax, label=(side == "R"))
         ax.set_ylabel(f"{side} foot\ngyro-Y")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.3)
@@ -376,19 +388,20 @@ def make_figures(angles, gait, fi):
     fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
     print("saved", p)
 
-    # (c) freeze index
+    # (c) freeze index, z-scored per sensor so COMETA(acc) and WIMU(gyro) traces
+    # share a scale -- compare relative timing, not absolute FI magnitude.
     fig, ax = plt.subplots(figsize=(13, 7))
     for k, (c, v, off) in fi.items():
-        if not len(v):
+        if not len(v) or v.std() < 1e-9:
             continue
+        z = (v - v.mean()) / v.std()
         ls = "-" if k.startswith("COM") else "--"
-        ax.plot(c + off, v, ls, lw=1.0, label=k)
-    ax.axhline(FI_THRESHOLD, color="k", ls=":", lw=1.2,
-               label=f"freeze thr={FI_THRESHOLD}")
-    ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (3-8Hz / 0.5-3Hz)")
-    ax.set_ylim(0, 25)   # clip window-edge startup transient for readability
-    ax.set_title(f"{TAG}: per-sensor Freeze Index {WIN[0]:.0f}-{WIN[1]:.0f}s "
-                 "(solid=COMETA acc, dashed=WIMU; y clipped at 25)")
+        ax.plot(c + off, z, ls, lw=1.0, label=k)
+    ax.axhline(2.0, color="k", ls=":", lw=1.2, label="z = +2 SD")
+    _fog_shade(ax, label=True)
+    ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (z-score per sensor)")
+    ax.set_title(f"{TAG}: per-sensor Freeze Index (z-scored) {WIN[0]:.0f}-{WIN[1]:.0f}s "
+                 "(solid=COMETA acc, dashed=WIMU gyro)")
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
     p = os.path.join(OUT_DIR, f"{TAG}_freezeindex_{int(WIN[0])}_{int(WIN[1])}.png")
