@@ -38,18 +38,28 @@ from stimulator.closed_loop import (
 from stimulator.gait_detection_imu import identify_gait_phases, identify_valleys
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────
-H5_PATH = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
-           "File di Daniel Leal - Recording sessions/Group_FOG/FOG002/MAPP/"
-           "Narrow Corridor_1/recording_data.h5")
-# Time base: cameras + sensors share an ABSOLUTE device clock (~1.208e6). The
-# `logs/events` `elapsed` column is a SEPARATE clock that drifts from absolute
-# (e.g. "Recording Started" elapsed=8.63 but ts-Task=5.10), so it must NOT be
-# used. Videos are aligned to the absolute timestamp; video t=0 = first camera
-# frame. T0 is therefore set at runtime to the first camera frame timestamp so
-# the window matches what is seen in the video. (~1208214.75 for FOG002.)
-T0 = 0.0                         # set in main() from first camera frame
-WIN = (800.0, 860.0)             # analysis window, seconds from video start (13:20-14:20)
-CALIB = (0.0, 10.0)              # standing-still calibration window
+_BASE = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
+         "File di Daniel Leal - Recording sessions/Group_FOG/FOG002/MAPP/")
+# Per-session config: each recording analysed independently. Times are seconds
+# from video start (= first camera frame). fog_events = visually-scored FOG;
+# walk_ref = clean-walking reference for the FOG-vs-walk separability ranking.
+SESSIONS = [
+    {"tag": "fog002_narrow",
+     "path": _BASE + "Narrow Corridor_1/recording_data.h5",
+     "win": (800.0, 860.0), "calib": (0.0, 10.0),
+     "fog_events": [(831.0, 837.0)], "walk_ref": (810.0, 822.0)},
+    {"tag": "fog002_eight",
+     "path": _BASE + "8 Shape Circuit_1/recording_data.h5",
+     "win": (125.0, 195.0), "calib": (0.0, 10.0),
+     "fog_events": [(153.0, 158.0), (160.0, 163.0)], "walk_ref": (134.0, 143.0)},
+]
+# Time base: cameras + sensors share an ABSOLUTE device clock. The `logs/events`
+# `elapsed` column is a SEPARATE drifting clock and must NOT be used. Videos are
+# aligned to the absolute timestamp; video t=0 = first camera frame, so T0 is set
+# at runtime to the first camera frame timestamp.
+# Current-session globals -- set by _apply_session(), do not edit here.
+H5_PATH = ""; T0 = 0.0; WIN = (0.0, 0.0); CALIB = (0.0, 10.0)
+TAG = ""; FOG_EVENTS = []; FI_WALK_REF = (0.0, 0.0)
 FUSE_FROM = 0.0                  # fuse COMETA continuously from here through WIN[1]
 
 # COMETA 72 cols = 8 sensor blocks x 9 ch [acc(g) 0:3, gyro(deg/s) 3:6, mag 6:9]
@@ -76,12 +86,6 @@ FI_FREEZE = (3.0, 8.0)          # freeze band (Hz)
 FI_THRESHOLD = 2.0               # plotted reference line
 
 OUT_DIR = _HERE                  # save PNGs next to this script
-TAG = "fog002_narrow"
-
-# Visually-scored FOG episodes (seconds from video start), marked on every plot.
-FOG_EVENTS = [(831.0, 837.0)]
-# Clean-walking reference window for FOG-vs-walk sensor separability ranking.
-FI_WALK_REF = (810.0, 822.0)
 
 
 # ── loading / slicing ──────────────────────────────────────────────────────
@@ -182,14 +186,17 @@ def nearest_match(t_src, t_tgt):
 
 # ── Freeze Index ───────────────────────────────────────────────────────────
 def freeze_index(sig, fs):
+    """Return (centers, FI, freeze_power). freeze_power = absolute power in the
+    3-8Hz band; used to gate out 'quiet' false positives (standing/slow turns)
+    where the FI ratio is high only because the locomotor band is near zero."""
     n = int(round(FI_WIN * fs))
     step = int(round(FI_STEP * fs))
     if len(sig) < n:
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([])
     freqs = np.fft.rfftfreq(n, 1.0 / fs)
     loco_m = (freqs >= FI_LOCO[0]) & (freqs < FI_LOCO[1])
     frz_m = (freqs >= FI_FREEZE[0]) & (freqs < FI_FREEZE[1])
-    centers, fis = [], []
+    centers, fis, pwrs = [], [], []
     win = np.hanning(n)
     for s in range(0, len(sig) - n + 1, step):
         seg = sig[s:s + n]
@@ -198,8 +205,9 @@ def freeze_index(sig, fs):
         loco = p[loco_m].sum()
         frz = p[frz_m].sum()
         fis.append(frz / loco if loco > 1e-12 else 0.0)
+        pwrs.append(frz)
         centers.append((s + n / 2.0) / fs)
-    return np.asarray(centers), np.asarray(fis)
+    return np.asarray(centers), np.asarray(fis), np.asarray(pwrs)
 
 
 # ── gait detection (Method 1) ──────────────────────────────────────────────
@@ -233,7 +241,20 @@ def detect_gait(gyro_y, t, fs):
 
 
 # ── main ───────────────────────────────────────────────────────────────────
+def _apply_session(cfg):
+    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF
+    H5_PATH = cfg["path"]; WIN = cfg["win"]; CALIB = cfg["calib"]
+    TAG = cfg["tag"]; FOG_EVENTS = cfg["fog_events"]; FI_WALK_REF = cfg["walk_ref"]
+
+
 def main():
+    for cfg in SESSIONS:
+        print(f"\n===== {cfg['tag']} =====")
+        _apply_session(cfg)
+        run_session()
+
+
+def run_session():
     global T0
     f = h5py.File(H5_PATH, "r")
     T0 = float(f["Cameras/camera_2/frames"][0]["timestamp"])  # video t=0 (absolute)
@@ -345,8 +366,7 @@ def main():
         acc, _ = cometa_block(d_co, blk, c0, c1)
         norm = np.sqrt((acc[win_m] ** 2).sum(1))
         fi[f"COM_{side}_{seg}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
-    # remaining COMETA blocks (2,3,6,7) for full per-sensor FI
-    for blk in (2, 3, 6, 7):
+    for blk in (2, 3, 6, 7):       # remaining COMETA blocks for full per-sensor FI
         acc, _ = cometa_block(d_co, blk, c0, c1)
         norm = np.sqrt((acc[win_m] ** 2).sum(1))
         fi[f"COM_blk{blk}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
@@ -361,7 +381,7 @@ def main():
             print(f"[FI] {k:16s} min={v[1].min():.2f} max={v[1].max():.2f} mean={v[1].mean():.2f}")
 
     rank = rank_sensors(fi)
-    detect = fog_detector(fi, rank)
+    detect = fog_detector(fi)
 
     f.close()
     make_figures(angles, gait, fi, detect)
@@ -376,15 +396,22 @@ def rank_sensors(fi):
     sensors of different units/noise). AUC = P(FI_FOG > FI_walk). Returns a list
     sorted by d, descending.
     """
+    def in_events(c, off, events):
+        tt = c + off
+        m = np.zeros(len(tt), bool)
+        for w in events:
+            m |= (tt >= w[0]) & (tt <= w[1])
+        return m
+
     def in_win(c, off, w):
         tt = c + off
         return (tt >= w[0]) & (tt <= w[1])
 
     out = []
-    for k, (c, v, off) in fi.items():
+    for k, (c, v, pwr, off) in fi.items():
         if not len(v):
             continue
-        fog = v[in_win(c, off, FOG_EVENTS[0])]
+        fog = v[in_events(c, off, FOG_EVENTS)]
         walk = v[in_win(c, off, FI_WALK_REF)]
         if len(fog) < 2 or len(walk) < 2:
             continue
@@ -414,22 +441,37 @@ def _mask_to_intervals(times, mask):
     return out
 
 
-def fog_detector(fi, rank):
-    """Binary FOG detection from the best-ranked sensor: threshold its RAW FI at
-    its own clean-walking baseline (mean + 2 SD). Returns sensor name, threshold
-    and detected time intervals. This is the FI 'in action' as a FOG trigger.
+DET_MIN_DUR = 1.0       # s, drop detections shorter than this (blips)
+DET_SENSORS = ["COM_R_shin", "COM_L_shin", "COM_R_thigh", "COM_L_thigh"]
+DET_CONSENSUS = 3       # FOG = >= this many leg sensors elevated together
+
+
+def fog_detector(fi):
+    """Multi-sensor consensus FOG detection (robust, generalises across sessions).
+
+    A real FOG is body-wide synchronous 3-8Hz trembling -> several leg sensors'
+    FI rise together. A turn/transition or a single noisy sensor lights up one
+    sensor only. So instead of trusting one 'best' sensor + a fragile power
+    threshold (which either misses FOG or keeps turn artefacts), we require
+    >= DET_CONSENSUS of the leg sensors (COMETA shins+thighs) to exceed their own
+    clean-walking baseline (mean+2SD) at the same time. Sustained >= DET_MIN_DUR.
     """
-    best = rank[0][0]
-    c, v, off = fi[best]
-    tt = c + off
-    walk = v[(tt >= FI_WALK_REF[0]) & (tt <= FI_WALK_REF[1])]
-    thr = walk.mean() + 2.0 * walk.std()
-    intervals = _mask_to_intervals(tt, v > thr)
-    print(f"[DETECT] best={best}  thr={thr:.2f} (walk mean+2SD)  "
-          f"{len(intervals)} detected interval(s):")
+    leg = [s for s in DET_SENSORS if s in fi and len(fi[s][1])]
+    tt = fi[leg[0]][0] + fi[leg[0]][-1]          # window-center times (shared grid)
+    votes = np.zeros(len(tt), int)
+    for s in leg:
+        cc, v, _pw, o = fi[s]
+        wm = (cc + o >= FI_WALK_REF[0]) & (cc + o <= FI_WALK_REF[1])
+        thr = v[wm].mean() + 2.0 * v[wm].std()
+        votes += (v > thr).astype(int)
+    fire = votes >= DET_CONSENSUS
+    intervals = [(a, b) for a, b in _mask_to_intervals(tt, fire)
+                 if b - a >= DET_MIN_DUR]
+    print(f"[DETECT] consensus >= {DET_CONSENSUS}/{len(leg)} leg sensors  "
+          f"{len(intervals)} interval(s) (>= {DET_MIN_DUR}s):")
     for a, b in intervals:
         print(f"   {a:.1f}-{b:.1f}s")
-    return {"sensor": best, "thr": thr, "intervals": intervals}
+    return {"sensor": f"consensus {DET_CONSENSUS}/{len(leg)} legs", "intervals": intervals}
 
 
 # ── figures ────────────────────────────────────────────────────────────────
@@ -506,7 +548,7 @@ def make_figures(angles, gait, fi, detect=None):
     # (c) freeze index, z-scored per sensor so COMETA(acc) and WIMU(free-accel)
     # traces share a scale -- compare relative timing, not absolute FI magnitude.
     fig, ax = plt.subplots(figsize=(13, 7))
-    for k, (c, v, off) in fi.items():
+    for k, (c, v, pwr, off) in fi.items():
         if not len(v) or v.std() < 1e-9:
             continue
         z = (v - v.mean()) / v.std()
@@ -527,7 +569,7 @@ def make_figures(angles, gait, fi, detect=None):
     # only meaningful vs that sensor's own baseline/threshold, NOT as a ranking
     # across sensors). Log axis keeps small-scale sensors visible next to large.
     fig, ax = plt.subplots(figsize=(13, 7))
-    for k, (c, v, off) in fi.items():
+    for k, (c, v, pwr, off) in fi.items():
         if not len(v):
             continue
         ls = "-" if k.startswith("COM") else "--"
@@ -564,7 +606,7 @@ def make_rank_figure(rank):
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=8)
     ax.set_ylabel("Cohen's d  (FI: FOG vs walk)")
     ax.set_title(f"{TAG}: which sensor detects FOG best  "
-                 f"(FOG {FOG_EVENTS[0]} vs walk {FI_WALK_REF}; AUC labelled; "
+                 f"(FOG {FOG_EVENTS} vs walk {FI_WALK_REF}; AUC labelled; "
                  "blue=COMETA acc, orange=WIMU free-accel)")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3, axis="y")
