@@ -61,10 +61,12 @@ COMETA_BLOCK = {("R", "thigh"): 4, ("R", "shin"): 0,
                 ("L", "thigh"): 5, ("L", "shin"): 1}
 COMETA_FS = 2000.0
 
-# WIMU 8 cols = [counter, m1, m2, m3, q_w, q_x, q_y, q_z]
+# WIMU 8 cols = [counter, free_accel_xyz (m/s^2, gravity-removed), quat_wxyz].
+# Verified: cols 1-3 read ~0 at rest and peak ~6g at foot strike -> free
+# acceleration, NOT gyroscope (WIMU exports no raw gyro). Sagittal angular
+# velocity for gait is reconstructed from the quaternion (quat_angular_velocity).
 WIMU_DEV = {"R_foot": "dev5", "L_foot": "dev2",
             "wrist": "dev3", "cervical": "dev6", "pelvis": "dev7"}
-WIMU_GYRO_Y_COL = 2              # which of cols 1..3 is gyro-Y (verified at runtime)
 
 # Freeze Index
 FI_WIN = 4.0                     # s
@@ -136,6 +138,35 @@ def long_axis_pitch(q, axis_vec):
     return np.degrees(np.arcsin(np.clip(g[2], -1.0, 1.0)))
 
 
+def _qmul_arr(a, b):
+    w1, x1, y1, z1 = a.T
+    w2, x2, y2, z2 = b.T
+    return np.stack([w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                     w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                     w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                     w1*z2 + x1*y2 - y1*x2 + z1*w2], axis=1)
+
+
+def quat_angular_velocity(q, t):
+    """Body-frame angular velocity (deg/s, shape (N,3)) from a quaternion stream.
+
+    The WIMU exports orientation (quaternion) + free-acceleration but NO raw
+    gyroscope. Method-1 gait detection needs the sagittal angular velocity, so
+    we reconstruct it: omega_body = 2 * conj(q) (x) dq/dt. Central-difference
+    derivative is noisy, so low-pass at min(8Hz, ~Nyquist).
+    """
+    from scipy.signal import butter, filtfilt
+    q = q / np.linalg.norm(q, axis=1, keepdims=True)
+    qdot = np.gradient(q, t, axis=0)
+    qconj = q * np.array([1.0, -1.0, -1.0, -1.0])
+    w = 2.0 * _qmul_arr(qconj, qdot)[:, 1:]          # rad/s, body frame
+    wdeg = np.degrees(w)
+    fs = 1.0 / np.median(np.diff(t))
+    fc = min(8.0, 0.45 * fs)
+    b, a = butter(2, fc / (fs / 2.0), "low")
+    return filtfilt(b, a, wdeg, axis=0)
+
+
 # ── joint angles ───────────────────────────────────────────────────────────
 def nearest_match(t_src, t_tgt):
     """For each t_tgt, index into t_src of nearest sample."""
@@ -171,7 +202,8 @@ def freeze_index(sig, fs):
 
 # ── gait detection (Method 1) ──────────────────────────────────────────────
 def detect_gait(gyro_y, t, fs):
-    """Method-1 style: mid-swing positive peaks + valleys on foot gyro-Y.
+    """Method-1 style: mid-swing positive peaks + valleys on foot sagittal
+    angular velocity (gyro-Y reconstructed from the quaternion).
 
     Heel-strike = first valley after a peak; toe-off = valley before a peak,
     following the IMUGaitFSM Method-1 valley/peak distance rule. Returns
@@ -291,7 +323,10 @@ def main():
         t = twi[foot]
         fm = (t >= WIN[0]) & (t <= WIN[1])
         fs = 1.0 / np.median(np.diff(t[fm]))
-        gy = dwi[foot][fm, WIMU_GYRO_Y_COL].astype(float)
+        # reconstruct foot angular velocity from quaternion; sagittal (ML) axis
+        # = body axis carrying the swing rotation (largest variance)
+        w = quat_angular_velocity(qwi[foot][fm], t[fm])
+        gy = w[:, int(np.argmax(w.std(axis=0)))]
         # orient so mid-swing is a positive peak (Method-1 convention)
         if abs(gy.min()) > abs(gy.max()):
             gy = -gy
@@ -317,7 +352,7 @@ def main():
         t = twi[name]
         m = (t >= WIN[0]) & (t <= WIN[1])
         fs = 1.0 / np.median(np.diff(t[m]))
-        norm = np.sqrt((dwi[name][m, 1:4].astype(float) ** 2).sum(1))
+        norm = np.sqrt((dwi[name][m, 1:4].astype(float) ** 2).sum(1))  # free-accel norm
         fi[f"WIMU_{name}"] = freeze_index(norm, fs) + (WIN[0],)
     for k, v in fi.items():
         if len(v[1]):
@@ -379,7 +414,7 @@ def make_figures(angles, gait, fi):
             ax.plot(g["t_to"], g["gy"][g["to"]], "bv", ms=9, label="TO")
         _phase_shade(ax, g)
         _fog_shade(ax, label=(side == "R"))
-        ax.set_ylabel(f"{side} foot\ngyro-Y")
+        ax.set_ylabel(f"{side} foot\nang.vel (deg/s)\nfrom quat")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.3)
     axs[-1].set_xlabel("time (s)")
@@ -388,8 +423,8 @@ def make_figures(angles, gait, fi):
     fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
     print("saved", p)
 
-    # (c) freeze index, z-scored per sensor so COMETA(acc) and WIMU(gyro) traces
-    # share a scale -- compare relative timing, not absolute FI magnitude.
+    # (c) freeze index, z-scored per sensor so COMETA(acc) and WIMU(free-accel)
+    # traces share a scale -- compare relative timing, not absolute FI magnitude.
     fig, ax = plt.subplots(figsize=(13, 7))
     for k, (c, v, off) in fi.items():
         if not len(v) or v.std() < 1e-9:
@@ -401,7 +436,7 @@ def make_figures(angles, gait, fi):
     _fog_shade(ax, label=True)
     ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (z-score per sensor)")
     ax.set_title(f"{TAG}: per-sensor Freeze Index (z-scored) {WIN[0]:.0f}-{WIN[1]:.0f}s "
-                 "(solid=COMETA acc, dashed=WIMU gyro)")
+                 "(solid=COMETA acc, dashed=WIMU free-accel)")
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
     p = os.path.join(OUT_DIR, f"{TAG}_freezeindex_{int(WIN[0])}_{int(WIN[1])}.png")
