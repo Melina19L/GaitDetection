@@ -80,6 +80,8 @@ TAG = "fog002_narrow"
 
 # Visually-scored FOG episodes (seconds from video start), marked on every plot.
 FOG_EVENTS = [(831.0, 837.0)]
+# Clean-walking reference window for FOG-vs-walk sensor separability ranking.
+FI_WALK_REF = (810.0, 822.0)
 
 
 # ── loading / slicing ──────────────────────────────────────────────────────
@@ -358,8 +360,43 @@ def main():
         if len(v[1]):
             print(f"[FI] {k:16s} min={v[1].min():.2f} max={v[1].max():.2f} mean={v[1].mean():.2f}")
 
+    rank = rank_sensors(fi)
+
     f.close()
     make_figures(angles, gait, fi)
+    make_rank_figure(rank)
+
+
+# ── FOG-vs-walk sensor separability ─────────────────────────────────────────
+def rank_sensors(fi):
+    """Per sensor, how well its raw FI separates FOG from clean walking.
+
+    Cohen's d = (mean_FOG - mean_walk) / pooled_std (effect size, fair across
+    sensors of different units/noise). AUC = P(FI_FOG > FI_walk). Returns a list
+    sorted by d, descending.
+    """
+    def in_win(c, off, w):
+        tt = c + off
+        return (tt >= w[0]) & (tt <= w[1])
+
+    out = []
+    for k, (c, v, off) in fi.items():
+        if not len(v):
+            continue
+        fog = v[in_win(c, off, FOG_EVENTS[0])]
+        walk = v[in_win(c, off, FI_WALK_REF)]
+        if len(fog) < 2 or len(walk) < 2:
+            continue
+        sp = np.sqrt((fog.var(ddof=1) + walk.var(ddof=1)) / 2.0)
+        d = (fog.mean() - walk.mean()) / sp if sp > 1e-9 else 0.0
+        auc = (np.greater.outer(fog, walk).mean()
+               + 0.5 * np.equal.outer(fog, walk).mean())
+        out.append((k, d, auc))
+    out.sort(key=lambda r: r[1], reverse=True)
+    print(f"[RANK] FOG {FOG_EVENTS[0]} vs walk {FI_WALK_REF} (by Cohen's d)")
+    for k, d, auc in out:
+        print(f"   {k:16s} d={d:+.2f}  AUC={auc:.2f}")
+    return out
 
 
 # ── figures ────────────────────────────────────────────────────────────────
@@ -440,6 +477,33 @@ def make_figures(angles, gait, fi):
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(alpha=0.3)
     p = os.path.join(OUT_DIR, f"{TAG}_freezeindex_{int(WIN[0])}_{int(WIN[1])}.png")
+    fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
+    print("saved", p)
+
+
+def make_rank_figure(rank):
+    """Bar plot of which sensor best separates FOG from walking (Cohen's d), AUC on top."""
+    if not rank:
+        return
+    names = [r[0] for r in rank]
+    ds = [r[1] for r in rank]
+    aucs = [r[2] for r in rank]
+    cols = ["C0" if n.startswith("COM") else "C1" for n in names]
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(range(len(names)), ds, color=cols)
+    for i, (d, a) in enumerate(zip(ds, aucs)):
+        ax.text(i, d + (0.05 if d >= 0 else -0.12), f"{a:.2f}",
+                ha="center", fontsize=7, color="0.3")
+    ax.axhline(0.8, color="k", ls=":", lw=1, label="d=0.8 (large effect)")
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=8)
+    ax.set_ylabel("Cohen's d  (FI: FOG vs walk)")
+    ax.set_title(f"{TAG}: which sensor detects FOG best  "
+                 f"(FOG {FOG_EVENTS[0]} vs walk {FI_WALK_REF}; AUC labelled; "
+                 "blue=COMETA acc, orange=WIMU free-accel)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(alpha=0.3, axis="y")
+    p = os.path.join(OUT_DIR, f"{TAG}_fog_sensor_ranking.png")
     fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
     print("saved", p)
 
