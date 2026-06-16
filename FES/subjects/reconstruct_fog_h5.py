@@ -282,16 +282,6 @@ def main():
         print(f"[ANKLE {side}] sh_axis/ft_axis pitch  off={off:.1f}  ROM={np.ptp(ankle):.1f}  "
               f"min={ankle.min():.1f} max={ankle.max():.1f}")
 
-    # ============ verify COMETA mapping ============
-    print("[VERIFY mapping]")
-    for side in ("R", "L"):
-        _, gth = cometa_block(d_co, COMETA_BLOCK[(side, "thigh")], c0, c1)
-        _, gsh = cometa_block(d_co, COMETA_BLOCK[(side, "shin")], c0, c1)
-        rms_t = np.sqrt((gth[win_m] ** 2).sum(1)).mean()
-        rms_s = np.sqrt((gsh[win_m] ** 2).sum(1)).mean()
-        ok = "PASS" if rms_s > rms_t else "WARN shin<=thigh"
-        print(f"  {side}: thigh gyroRMS={rms_t:.1f}  shin={rms_s:.1f}  -> {ok}")
-
     # ============ gait (Method 1, both feet) ============
     gait = {}
     for side, foot in (("R", "R_foot"), ("L", "L_foot")):
