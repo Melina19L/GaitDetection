@@ -480,6 +480,28 @@ def make_figures(angles, gait, fi):
     fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
     print("saved", p)
 
+    # (d) RAW freeze index, log-y -- shows true magnitudes (a high absolute FI is
+    # only meaningful vs that sensor's own baseline/threshold, NOT as a ranking
+    # across sensors). Log axis keeps small-scale sensors visible next to large.
+    fig, ax = plt.subplots(figsize=(13, 7))
+    for k, (c, v, off) in fi.items():
+        if not len(v):
+            continue
+        ls = "-" if k.startswith("COM") else "--"
+        ax.plot(c + off, np.clip(v, 1e-2, None), ls, lw=1.0, label=k)
+    ax.axhline(2.0, color="k", ls=":", lw=1.2, label="Bachlin FI=2")
+    _fog_shade(ax, label=True)
+    ax.set_yscale("log")
+    ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (raw, log scale)")
+    ax.set_title(f"{TAG}: per-sensor RAW Freeze Index {WIN[0]:.0f}-{WIN[1]:.0f}s "
+                 "(solid=COMETA acc, dashed=WIMU free-accel; abs. scale NOT "
+                 "comparable across sensors)")
+    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.grid(alpha=0.3, which="both")
+    p = os.path.join(OUT_DIR, f"{TAG}_freezeindex_raw_log_{int(WIN[0])}_{int(WIN[1])}.png")
+    fig.tight_layout(); fig.savefig(p, dpi=120); plt.close(fig)
+    print("saved", p)
+
 
 def make_rank_figure(rank):
     """Bar plot of which sensor best separates FOG from walking (Cohen's d), AUC on top."""
