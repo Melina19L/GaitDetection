@@ -115,7 +115,9 @@ def parse_reps(f, T0):
     return reps
 
 
-def run(sid, cfg):
+def compute_angles(sid, cfg):
+    """Full-recording bilateral knee/hip/ankle (decimated to PLOT_FS).
+    Returns (angles{(side,joint):(t,a)}, reps, annots, qwi, twi)."""
     path = R._ROOT + f"{sid}/MAPP/Narrow Corridor_1/recording_data.h5"
     f = h5py.File(path, "r")
     T0 = float(f["Cameras/camera_2/frames"][0]["timestamp"])
@@ -180,7 +182,11 @@ def run(sid, cfg):
                         - R.long_axis_pitch(qs[sidx[k]], sax)
                         for k, j in enumerate(fidx)]) - off
         angles[(side, "ankle")] = (tf[fidx], ank)
+    return angles, reps, annots, qwi, twi
 
+
+def run(sid, cfg):
+    angles, reps, annots, qwi, twi = compute_angles(sid, cfg)
     joints = ("knee", "hip", "ankle")
     nr = len(reps)
     fig, axs = plt.subplots(nr, 3, figsize=(15, 2.0 * nr), squeeze=False)

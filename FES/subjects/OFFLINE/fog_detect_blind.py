@@ -21,7 +21,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import reconstruct_fog_h5 as R
-from narrow_full_angles import parse_eaf, parse_reps, EAF_PATH, SUBJ, band_style, BAND_STYLE
+from narrow_full_angles import (parse_eaf, parse_reps, EAF_PATH, SUBJ,
+                                 band_style, BAND_STYLE, compute_angles)
 from fog_ranking_eaf import fi_full, spans_mask
 
 TARGETS = [("FOG002", 8), ("FOG006", 4)]
@@ -69,35 +70,41 @@ def run(sid, rep_idx):
             if fb >= ta and fa <= tb:
                 ax.axvspan(max(fa, ta) - ta, min(fb, tb) - ta, color="red", alpha=0.30, lw=0)
 
-    def detected(ax, ivs):
+    def det_lines(ax, ivs):                # dashed verticals at detected-FOG edges
         for a, b in ivs:
-            ax.axvspan(a - ta, b - ta, facecolor="none", edgecolor="magenta", hatch="//", lw=0)
+            ax.axvline(a - ta, color="magenta", ls="--", lw=1.3)
+            ax.axvline(b - ta, color="magenta", ls="--", lw=1.3)
 
-    fig, axs = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
-    # (A) all sensors combined - how many sensors exceed their normal-activity p97.5
-    ax = axs[0]; bands(ax); true_fog(ax); detected(ax, det_all)
-    ax.plot(grid - ta, votes, "k-", lw=1.2)
-    ax.axhline(VOTE, color="purple", ls=":", lw=1.2, label=f"vote >= {VOTE}")
-    ax.set_ylabel(f"# sensors above\np{PCT:g} (/{len(fis)})")
-    ax.set_title(f"{sid} {lab} - blind FOG detection (red=true FOG, magenta=detected)\n"
-                 f"(A) ALL {len(fis)} sensors fused (count above normal-activity p{PCT:g})", fontsize=10)
-    ax.legend(loc="upper right", fontsize=8); ax.grid(alpha=0.3)
-
-    # (B) R_shin only
-    ax = axs[1]; bands(ax); true_fog(ax); detected(ax, det_rs)
-    ax.plot(grid - ta, fi_g["COM_R_shin"], "C0-", lw=1.0)
-    ax.axhline(thr["COM_R_shin"], color="purple", ls=":", lw=1.2,
-               label=f"R_shin p{PCT:g} of normal activity")
-    ax.set_ylabel("R_shin FI")
-    ax.set_title("(B) R_shin only", fontsize=10)
-    ax.set_xlabel("time in repetition (s)")
-    ax.legend(loc="upper right", fontsize=8); ax.grid(alpha=0.3)
-
+    # joint angles for this repetition (background "pattern"), with the blind
+    # FOG detection drawn as dashed vertical lines: left col = all-sensors
+    # consensus, right col = R_shin only.
+    angles, _, _, _, _ = compute_angles(sid, cfg)
+    joints = ("knee", "hip", "ankle")
+    cols = [("all sensors consensus", det_all), ("R_shin only", det_rs)]
+    fig, axs = plt.subplots(3, 2, figsize=(15, 9), sharex=True, squeeze=False)
+    for ri, joint in enumerate(joints):
+        for ci, (cname, ivs) in enumerate(cols):
+            ax = axs[ri][ci]
+            bands(ax); true_fog(ax)
+            for side, c in (("R", "C0"), ("L", "C3")):
+                t, a = angles[(side, joint)]
+                m = (t >= ta) & (t <= tb)
+                ax.plot(t[m] - ta, a[m], c, lw=0.8)
+            det_lines(ax, ivs)
+            ax.grid(alpha=0.3); ax.tick_params(labelsize=7)
+            if ri == 0:
+                ax.set_title(f"detection: {cname}", fontsize=10)
+            if ci == 0:
+                ax.set_ylabel(f"{joint}\n(deg)")
+            if ri == 2:
+                ax.set_xlabel("time in repetition (s)")
     handles = [Patch(facecolor=c, alpha=al, label=lb) for k, c, al, lb in BAND_STYLE if k != "fog"]
     handles += [Patch(facecolor="red", alpha=0.3, label="true FOG"),
-                Patch(facecolor="none", edgecolor="magenta", hatch="//", label="detected")]
+                plt.Line2D([], [], color="magenta", ls="--", label="detected FOG")]
     fig.legend(handles=handles, loc="lower center", ncol=7, fontsize=8)
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.suptitle(f"{sid} {lab} - blind FOG detection on joint angles "
+                 "(dashed = FOG detected from FI)", y=0.998)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.99))
     p = os.path.join(_HERE, f"{sid.lower()}_rep{rep_idx}_blind_fog_detection.png")
     fig.savefig(p, dpi=120); plt.close(fig)
     print(f"[{sid} {lab}] det_all={[(round(a,1),round(b,1)) for a,b in det_all]} "
