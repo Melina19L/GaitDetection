@@ -70,10 +70,10 @@ def run(sid, rep_idx):
             if fb >= ta and fa <= tb:
                 ax.axvspan(max(fa, ta) - ta, min(fb, tb) - ta, color="red", alpha=0.30, lw=0)
 
-    def det_lines(ax, ivs):                # detected-FOG span (duration, dashed edge)
+    def det_lines(ax, ivs):                # detected-FOG span, diagonal hatching
         for a, b in ivs:
-            ax.axvspan(a - ta, b - ta, facecolor="magenta", alpha=0.25,
-                       edgecolor="magenta", ls="--", lw=1.3)
+            ax.axvspan(a - ta, b - ta, facecolor="none", edgecolor="magenta",
+                       hatch="///", lw=0.0)
 
     # joint angles for this repetition (background "pattern"), with the blind
     # FOG detection drawn as dashed vertical lines: left col = all-sensors
@@ -100,8 +100,8 @@ def run(sid, rep_idx):
                 ax.set_xlabel("time in repetition (s)")
     handles = [Patch(facecolor=c, alpha=al, label=lb) for k, c, al, lb in BAND_STYLE if k != "fog"]
     handles += [Patch(facecolor="red", alpha=0.3, label="true FOG"),
-                Patch(facecolor="magenta", alpha=0.25, edgecolor="magenta",
-                      ls="--", label="detected FOG")]
+                Patch(facecolor="none", edgecolor="magenta", hatch="///",
+                      label="detected FOG")]
     fig.legend(handles=handles, loc="lower center", ncol=7, fontsize=8)
     fig.suptitle(f"{sid} {lab} - blind FOG detection on joint angles "
                  "(dashed = FOG detected from FI)", y=0.998)
