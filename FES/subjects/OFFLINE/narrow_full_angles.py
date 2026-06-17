@@ -1,7 +1,8 @@
-"""Full-recording joint angles for the Narrow Corridor task (FOG002/004/006).
+"""Per-repetition joint angles for the Narrow Corridor task (FOG002/004/006).
 
-Plots bilateral knee/hip/ankle over the WHOLE recording (not just a window),
-with the visually-scored FOG episodes highlighted as red bands.
+One figure per subject: one ROW per repetition (START..STOP markers from
+logs/events) x 3 columns (knee/hip/ankle), bilateral, with the visually-scored
+FOG episodes shaded red where they fall inside a repetition.
 
 Calibration = first 10 s standing (neutral-pose offset), same as reconstruct_fog_h5.
 COMETA mapping per subject (FOG002 resolved; FOG004/006 = muscle montage RF/TA).
@@ -50,10 +51,32 @@ SUBJ = {
 }
 
 
+def parse_reps(f, T0):
+    """Repetition windows from logs/events: pair MARKER START..STOP, label from
+    the following REPETITION row. Returns [(label, t_start, t_stop), ...]."""
+    starts, stops, labels = [], [], []
+    for r in f["logs/events"][:]:
+        ty, ta = str(r["type"]), str(r["task"])
+        t = float(r["timestamp"]) - T0
+        if "MARKER" in ty and "START" in ta:
+            starts.append(t)
+        elif "MARKER" in ty and "STOP" in ta:
+            stops.append(t)
+        elif "REPETITION" in ty:
+            labels.append(ta.strip("b'\" ").replace("Repetition", "Rep"))
+    reps = []
+    for i, (a, b) in enumerate(zip(starts, stops)):
+        lab = labels[i] if i < len(labels) else f"Rep {i+1}"
+        reps.append((lab, a, b))
+    return reps
+
+
 def run(sid, cfg):
     path = R._ROOT + f"{sid}/MAPP/Narrow Corridor_1/recording_data.h5"
     f = h5py.File(path, "r")
     T0 = float(f["Cameras/camera_2/frames"][0]["timestamp"])
+    reps = parse_reps(f, T0)
+    print(f"[{sid}] {len(reps)} repetitions")
     t_co = f["Cometa/WaveX_IMU/timestamps"][:] - T0
     d_co = f["Cometa/WaveX_IMU/data"]
     n = len(t_co)
@@ -113,21 +136,31 @@ def run(sid, cfg):
                         for k, j in enumerate(fidx)]) - off
         angles[(side, "ankle")] = (tf[fidx], ank)
 
-    fig, axs = plt.subplots(3, 1, figsize=(16, 9), sharex=True)
-    for ax, joint in zip(axs, ("knee", "hip", "ankle")):
-        for side, col in (("R", "C0"), ("L", "C3")):
-            t, a = angles[(side, joint)]
-            ax.plot(t, a, col, lw=0.7, label=f"{side} {joint}")
-        for i, (a, b) in enumerate(cfg["fog"]):
-            ax.axvspan(a, b, color="red", alpha=0.35, lw=0,
-                       label="FOG" if i == 0 else None)
-        ax.set_ylabel(f"{joint}\n(deg)")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(alpha=0.3)
-    axs[-1].set_xlabel("time (s) from recording start")
-    axs[0].set_title(f"{sid} Narrow Corridor - full-recording joint angles "
-                     "(red = scored FOG; angles unreliable during turns)")
-    p = os.path.join(_HERE, f"{sid.lower()}_narrow_FULL_angles.png")
+    joints = ("knee", "hip", "ankle")
+    nr = len(reps)
+    fig, axs = plt.subplots(nr, 3, figsize=(15, 2.0 * nr), squeeze=False)
+    for ri, (lab, ta, tb) in enumerate(reps):
+        for ci, joint in enumerate(joints):
+            ax = axs[ri][ci]
+            for side, col in (("R", "C0"), ("L", "C3")):
+                t, a = angles[(side, joint)]
+                m = (t >= ta) & (t <= tb)
+                ax.plot(t[m] - ta, a[m], col, lw=0.8, label=side)
+            for fa, fb in cfg["fog"]:           # FOG band if it overlaps this rep
+                if fb >= ta and fa <= tb:
+                    ax.axvspan(max(fa, ta) - ta, min(fb, tb) - ta,
+                               color="red", alpha=0.35, lw=0)
+            ax.grid(alpha=0.3); ax.tick_params(labelsize=6)
+            if ri == 0:
+                ax.set_title(joint, fontsize=10)
+            if ci == 0:
+                ax.set_ylabel(f"{lab}\n(deg)", fontsize=6.5)
+            if ri == nr - 1:
+                ax.set_xlabel("time in rep (s)", fontsize=7)
+    axs[0][2].legend(loc="upper right", fontsize=7)
+    fig.suptitle(f"{sid} Narrow Corridor - joint angles per repetition "
+                 "(red = scored FOG; angles unreliable during turns)", y=0.997)
+    p = os.path.join(_HERE, f"{sid.lower()}_narrow_byrep_angles.png")
     fig.tight_layout(); fig.savefig(p, dpi=110); plt.close(fig)
     print("saved", p)
 
