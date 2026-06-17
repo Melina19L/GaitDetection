@@ -59,10 +59,35 @@ SUBJECTS = {
         "sessions": [
             {"tag": "narrow", "folder": "Narrow Corridor_1",
              "win": (800.0, 860.0), "fog_events": [(831.0, 837.0)],
-             "walk_ref": (810.0, 822.0)},
+             "walk_ref": (810.0, 822.0),
+             # clean turn (turn-R 12:13.2-12:24.21 + turn-L 12:24.75-12:34.0):
+             # matched-activity negative (FOG occurred during a turn)
+             "turn_ref": (733.2, 754.0)},
             {"tag": "eight", "folder": "8 Shape Circuit_1",
              "win": (125.0, 195.0), "fog_events": [(153.0, 158.0), (160.0, 163.0)],
              "walk_ref": (134.0, 143.0)},
+        ],
+    },
+    "FOG004": {                                  # COMETA same scheme as FOG002
+        "base": _ROOT + "FOG004/MAPP/",
+        "wimu_map": {"R_foot": "dev7", "L_foot": "dev2",
+                     "pelvis": "dev5", "cervical": "dev3", "wrist": "dev6"},
+        "leg_blocks": {"R": (0, 4), "L": (1, 5)},   # unordered; auto-resolved
+        "calib": (0.0, 10.0),
+        "sessions": [
+            # Narrow Corridor 5:05-6:00 ; FOG 5:24-5:26 ; straight walk 5:08-5:15
+            {"tag": "narrow", "folder": "Narrow Corridor_1",
+             "win": (305.0, 360.0), "fog_events": [(324.0, 326.0)],
+             "walk_ref": (308.0, 315.0)},
+            # 8 Shape 1:30-3:00 ; FOG 1:57.7-2:05, 2:11.2-2:12 ; walk 1:41-1:49.4
+            {"tag": "eight_a", "folder": "8 Shape Circuit_1",
+             "win": (90.0, 180.0), "fog_events": [(117.7, 125.0), (131.2, 132.0)],
+             "walk_ref": (101.0, 109.4)},
+            # 8 Shape 3:00-4:30 ; FOG 3:09.1-3:11.3, 3:17-3:19, 4:11-4:13 ; walk 3:54.3-4:04.3
+            {"tag": "eight_b", "folder": "8 Shape Circuit_1",
+             "win": (180.0, 270.0),
+             "fog_events": [(189.1, 191.3), (197.0, 199.0), (251.0, 253.0)],
+             "walk_ref": (234.3, 244.3)},
         ],
     },
 }
@@ -76,6 +101,7 @@ def _build_sessions():
                         "path": s["base"] + ses["folder"] + "/recording_data.h5",
                         "win": ses["win"], "calib": s["calib"],
                         "fog_events": ses["fog_events"], "walk_ref": ses["walk_ref"],
+                        "turn_ref": ses.get("turn_ref"),
                         "wimu_map": s["wimu_map"], "leg_blocks": s["leg_blocks"]})
     return out
 
@@ -87,7 +113,7 @@ SESSIONS = _build_sessions()
 # at runtime to the first camera frame timestamp.
 # Current-session globals -- set by _apply_session(), do not edit here.
 H5_PATH = ""; T0 = 0.0; WIN = (0.0, 0.0); CALIB = (0.0, 10.0)
-TAG = ""; FOG_EVENTS = []; FI_WALK_REF = (0.0, 0.0)
+TAG = ""; FOG_EVENTS = []; FI_WALK_REF = (0.0, 0.0); TURN_REF = None
 WIMU_DEV = {}; LEG_BLOCKS = {}    # from subject config
 COMETA_BLOCK = {}                 # resolved per session by resolve_leg_map()
 FUSE_FROM = 0.0                   # fuse COMETA continuously from here through WIN[1]
@@ -264,9 +290,11 @@ def detect_gait(gyro_y, t, fs):
             "t_to": t[to] if len(to) else np.array([])}
 
 
-def ankle_series(qsh, foot_name, qwi, twi, t_co_run, calib_m):
-    """Sagittal ankle angle (deg) over WIN for a shin-quaternion + foot WIMU pair.
-    Gravity-referenced long-axis pitch difference (yaw-drift-immune)."""
+def ankle_series(qsh, foot_name, qwi, twi, t_co_run, calib_m, win=None):
+    """Sagittal ankle angle (deg) for a shin-quaternion + foot WIMU pair over
+    `win` (default WIN). Gravity-referenced long-axis pitch difference
+    (yaw-drift-immune)."""
+    win = WIN if win is None else win
     shin_ref = avg_quat(qsh[calib_m])
     fcm = (twi[foot_name] >= CALIB[0]) & (twi[foot_name] <= CALIB[1])
     foot_ref = avg_quat(qwi[foot_name][fcm])
@@ -274,7 +302,7 @@ def ankle_series(qsh, foot_name, qwi, twi, t_co_run, calib_m):
     ft_axis = AXIS_VECTORS[detect_most_horizontal_axis(foot_ref)]
     off = long_axis_pitch(foot_ref, ft_axis) - long_axis_pitch(shin_ref, sh_axis)
     tf = twi[foot_name]
-    fm = (tf >= WIN[0]) & (tf <= WIN[1])
+    fm = (tf >= win[0]) & (tf <= win[1])
     sidx = nearest_match(t_co_run, tf[fm])
     qsh_win, qf_win = qsh[sidx], qwi[foot_name][fm]
     ank = np.array([long_axis_pitch(qf_win[k], ft_axis)
@@ -286,31 +314,32 @@ def ankle_series(qsh, foot_name, qwi, twi, t_co_run, calib_m):
 def resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m):
     """Auto-resolve thigh vs shin per side from the unordered LEG_BLOCKS pair.
 
-    The true shank paired with the foot gives a physiological ankle ROM (~30-50
-    deg); the thigh paired with the foot gives an absurd one (~100 deg). So for
-    each side we test both candidates as 'shin' and pick the one whose ankle ROM
-    is closest to a physiological target; the other becomes thigh.
+    The shank sits just above the foot so it moves WITH the foot -> small ankle
+    (shank<->foot) pitch ROM; the thigh swings more relative to the foot -> larger
+    ROM. So shin = the candidate with the SMALLER ankle ROM. Evaluated over the
+    CLEAN-WALKING window (FI_WALK_REF), not the full WIN -- turns inflate the
+    pitch difference for every block and destroy the separation.
     """
-    TARGET = 40.0
     cmap = {}
     for side, (a, b) in LEG_BLOCKS.items():
         foot = "R_foot" if side == "R" else "L_foot"
-        _, ank_a = ankle_series(blk_quat[a], foot, qwi, twi, t_co_run, calib_m)
-        _, ank_b = ankle_series(blk_quat[b], foot, qwi, twi, t_co_run, calib_m)
+        _, ank_a = ankle_series(blk_quat[a], foot, qwi, twi, t_co_run, calib_m, FI_WALK_REF)
+        _, ank_b = ankle_series(blk_quat[b], foot, qwi, twi, t_co_run, calib_m, FI_WALK_REF)
         rom_a, rom_b = np.ptp(ank_a), np.ptp(ank_b)
-        shin, thigh = (a, b) if abs(rom_a - TARGET) < abs(rom_b - TARGET) else (b, a)
+        shin, thigh = (a, b) if rom_a < rom_b else (b, a)
         cmap[(side, "shin")] = shin
         cmap[(side, "thigh")] = thigh
-        print(f"[MAP {side}] ankle-ROM blk{a}={rom_a:.0f} blk{b}={rom_b:.0f}  "
+        print(f"[MAP {side}] walk-ankle-ROM blk{a}={rom_a:.0f} blk{b}={rom_b:.0f}  "
               f"-> shin=blk{shin} thigh=blk{thigh}")
     return cmap
 
 
 # ── main ───────────────────────────────────────────────────────────────────
 def _apply_session(cfg):
-    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF, WIMU_DEV, LEG_BLOCKS
+    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF, TURN_REF, WIMU_DEV, LEG_BLOCKS
     H5_PATH = cfg["path"]; WIN = cfg["win"]; CALIB = cfg["calib"]
     TAG = cfg["tag"]; FOG_EVENTS = cfg["fog_events"]; FI_WALK_REF = cfg["walk_ref"]
+    TURN_REF = cfg.get("turn_ref")
     WIMU_DEV = cfg["wimu_map"]; LEG_BLOCKS = cfg["leg_blocks"]
 
 
@@ -318,7 +347,10 @@ def main():
     for cfg in SESSIONS:
         print(f"\n===== {cfg['tag']} =====")
         _apply_session(cfg)
-        run_session()
+        try:
+            run_session()
+        except Exception as e:
+            print(f"[SKIP {cfg['tag']}] {type(e).__name__}: {e}")
 
 
 def run_session():
@@ -420,27 +452,34 @@ def run_session():
         print(f"[GAIT {side}] fs={fs:.1f}  HS={nhs} TO={nto}  median cycle={cyc:.2f}s")
 
     # ============ Freeze Index (13 sensors) ============
-    fi = {}
-    for (side, seg), blk in COMETA_BLOCK.items():
-        acc, _ = cometa_block(d_co, blk, c0, c1)
-        norm = np.sqrt((acc[win_m] ** 2).sum(1))
-        fi[f"COM_{side}_{seg}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
+    # precompute motion-norm per sensor over the whole fused range / full WIMU,
+    # so FI can be evaluated on any sub-window (analysis WIN and turn-ref).
     other_blocks = sorted(set(range(8)) - set(COMETA_BLOCK.values()))
-    for blk in other_blocks:       # remaining COMETA blocks for full per-sensor FI
+    com_norm = {}
+    for blk in range(8):
         acc, _ = cometa_block(d_co, blk, c0, c1)
-        norm = np.sqrt((acc[win_m] ** 2).sum(1))
-        fi[f"COM_blk{blk}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
-    for name in WIMU_DEV:
-        t = twi[name]
-        m = (t >= WIN[0]) & (t <= WIN[1])
-        fs = 1.0 / np.median(np.diff(t[m]))
-        norm = np.sqrt((dwi[name][m, 1:4].astype(float) ** 2).sum(1))  # free-accel norm
-        fi[f"WIMU_{name}"] = freeze_index(norm, fs) + (WIN[0],)
+        com_norm[blk] = np.sqrt((acc ** 2).sum(1))
+    wimu_norm = {n: np.sqrt((dwi[n][:, 1:4].astype(float) ** 2).sum(1)) for n in WIMU_DEV}
+
+    def build_fi(lo, hi):
+        out, wm = {}, (t_co_run >= lo) & (t_co_run <= hi)
+        for (side, seg), blk in COMETA_BLOCK.items():
+            out[f"COM_{side}_{seg}"] = freeze_index(com_norm[blk][wm], COMETA_FS) + (lo,)
+        for blk in other_blocks:
+            out[f"COM_blk{blk}"] = freeze_index(com_norm[blk][wm], COMETA_FS) + (lo,)
+        for name in WIMU_DEV:
+            t = twi[name]; m = (t >= lo) & (t <= hi)
+            fs = 1.0 / np.median(np.diff(t[m]))
+            out[f"WIMU_{name}"] = freeze_index(wimu_norm[name][m], fs) + (lo,)
+        return out
+
+    fi = build_fi(*WIN)
+    fi_turn = build_fi(*TURN_REF) if TURN_REF else None
     for k, v in fi.items():
         if len(v[1]):
             print(f"[FI] {k:16s} min={v[1].min():.2f} max={v[1].max():.2f} mean={v[1].mean():.2f}")
 
-    rank = rank_sensors(fi)
+    rank = rank_sensors(fi, fi_turn)
     detect = fog_detector(fi)
 
     f.close()
@@ -449,41 +488,51 @@ def run_session():
 
 
 # ── FOG-vs-walk sensor separability ─────────────────────────────────────────
-def rank_sensors(fi):
-    """Per sensor, how well its raw FI separates FOG from clean walking.
+def _sep(fog, neg):
+    """Cohen's d and AUC of FOG vs a negative sample."""
+    if len(fog) < 2 or len(neg) < 2:
+        return 0.0, 0.5
+    sp = np.sqrt((fog.var(ddof=1) + neg.var(ddof=1)) / 2.0)
+    d = (fog.mean() - neg.mean()) / sp if sp > 1e-9 else 0.0
+    auc = np.greater.outer(fog, neg).mean() + 0.5 * np.equal.outer(fog, neg).mean()
+    return d, auc
 
-    Cohen's d = (mean_FOG - mean_walk) / pooled_std (effect size, fair across
-    sensors of different units/noise). AUC = P(FI_FOG > FI_walk). Returns a list
-    sorted by d, descending.
+
+def rank_sensors(fi, fi_turn=None):
+    """Per sensor, separability of its raw FI for FOG vs TWO matched negatives:
+      * walk = clean straight-walking reference (easy contrast / baseline)
+      * turn = clean turning reference, NO freeze (fi_turn) -- the matched-activity
+               control, since the FOG occurred during a turn. A sensor that only
+               separates FOG from walking but NOT from a clean turn will produce
+               turn false positives; high d/AUC vs turn = a genuine FOG detector.
+    Sorted by the turn-contrast d (the meaningful one) when available.
     """
-    def in_events(c, off, events):
+    def in_evt(c, off):
         tt = c + off
         m = np.zeros(len(tt), bool)
-        for w in events:
-            m |= (tt >= w[0]) & (tt <= w[1])
+        for a, b in FOG_EVENTS:
+            m |= (tt >= a) & (tt <= b)
         return m
-
-    def in_win(c, off, w):
-        tt = c + off
-        return (tt >= w[0]) & (tt <= w[1])
 
     out = []
     for k, (c, v, pwr, off) in fi.items():
         if not len(v):
             continue
-        fog = v[in_events(c, off, FOG_EVENTS)]
-        walk = v[in_win(c, off, FI_WALK_REF)]
-        if len(fog) < 2 or len(walk) < 2:
-            continue
-        sp = np.sqrt((fog.var(ddof=1) + walk.var(ddof=1)) / 2.0)
-        d = (fog.mean() - walk.mean()) / sp if sp > 1e-9 else 0.0
-        auc = (np.greater.outer(fog, walk).mean()
-               + 0.5 * np.equal.outer(fog, walk).mean())
-        out.append((k, d, auc))
-    out.sort(key=lambda r: r[1], reverse=True)
-    print(f"[RANK] FOG {FOG_EVENTS[0]} vs walk {FI_WALK_REF} (by Cohen's d)")
-    for k, d, auc in out:
-        print(f"   {k:16s} d={d:+.2f}  AUC={auc:.2f}")
+        tt = c + off
+        fog = v[in_evt(c, off)]
+        walk = v[(tt >= FI_WALK_REF[0]) & (tt <= FI_WALK_REF[1])]
+        d_w, auc_w = _sep(fog, walk)
+        if fi_turn is not None and k in fi_turn and len(fi_turn[k][1]):
+            d_t, auc_t = _sep(fog, fi_turn[k][1])
+        else:
+            d_t, auc_t = float("nan"), float("nan")
+        out.append((k, d_w, auc_w, d_t, auc_t))
+    key = 3 if fi_turn is not None else 1
+    out.sort(key=lambda r: (r[key] if r[key] == r[key] else -9), reverse=True)
+    print(f"[RANK] FOG {FOG_EVENTS} | neg: walk={FI_WALK_REF} vs turn={TURN_REF}")
+    print(f"   {'sensor':16s} {'d_walk':>7} {'AUC_w':>6} | {'d_turn':>7} {'AUC_turn':>8}")
+    for k, dw, aw, dt, at in out:
+        print(f"   {k:16s} {dw:+7.2f} {aw:6.2f} | {dt:+7.2f} {at:8.2f}")
     return out
 
 
@@ -649,25 +698,31 @@ def make_figures(angles, gait, fi, detect=None):
 
 
 def make_rank_figure(rank):
-    """Bar plot of which sensor best separates FOG from walking (Cohen's d), AUC on top."""
+    """Grouped bars: Cohen's d of FOG vs clean-walk (light) and vs clean-turn
+    (dark, matched-activity control). AUC labelled. The turn bar is what matters:
+    high here = the sensor separates freeze from a normal turn (won't false-fire
+    on turns); low/absent = turn false positives expected."""
     if not rank:
         return
     names = [r[0] for r in rank]
-    ds = [r[1] for r in rank]
-    aucs = [r[2] for r in rank]
-    cols = ["C0" if n.startswith("COM") else "C1" for n in names]
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.bar(range(len(names)), ds, color=cols)
-    for i, (d, a) in enumerate(zip(ds, aucs)):
-        ax.text(i, d + (0.05 if d >= 0 else -0.12), f"{a:.2f}",
-                ha="center", fontsize=7, color="0.3")
+    dw = [r[1] for r in rank]; aw = [r[2] for r in rank]
+    dt = [r[3] for r in rank]; at = [r[4] for r in rank]
+    has_turn = any(x == x for x in dt)   # not all NaN
+    x = np.arange(len(names)); w = 0.4
+    fig, ax = plt.subplots(figsize=(13, 6))
+    ax.bar(x - w/2, dw, w, color="0.7", label="vs clean walk")
+    if has_turn:
+        ax.bar(x + w/2, [0 if v != v else v for v in dt], w, color="C3",
+               label="vs clean turn (matched)")
+    for i in range(len(names)):
+        ax.text(i - w/2, (dw[i] or 0) + 0.05, f"{aw[i]:.2f}", ha="center", fontsize=6, color="0.4")
+        if has_turn and dt[i] == dt[i]:
+            ax.text(i + w/2, dt[i] + 0.05, f"{at[i]:.2f}", ha="center", fontsize=6, color="C3")
     ax.axhline(0.8, color="k", ls=":", lw=1, label="d=0.8 (large effect)")
-    ax.set_xticks(range(len(names)))
-    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=8)
-    ax.set_ylabel("Cohen's d  (FI: FOG vs walk)")
-    ax.set_title(f"{TAG}: which sensor detects FOG best  "
-                 f"(FOG {FOG_EVENTS} vs walk {FI_WALK_REF}; AUC labelled; "
-                 "blue=COMETA acc, orange=WIMU free-accel)")
+    ax.set_xticks(x); ax.set_xticklabels(names, rotation=60, ha="right", fontsize=8)
+    ax.set_ylabel("Cohen's d  (FI: FOG vs negative)")
+    ax.set_title(f"{TAG}: FOG-detection separability per sensor  "
+                 f"(FOG {FOG_EVENTS}; AUC labelled on bars)")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3, axis="y")
     p = os.path.join(OUT_DIR, f"{TAG}_fog_sensor_ranking.png")
