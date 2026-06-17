@@ -70,23 +70,33 @@ SUBJECTS = {
              "turn_ref": (63.11, 76.47)},
         ],
     },
-    "FOG004": {                                  # COMETA same scheme as FOG002
+    "FOG004": {
+        # COMETA muscle montage (from the placement sheet): RF=thigh, TA=shin,
+        # BF=thigh(post), GAS=shin(post). Block index = sensor number - 1.
+        # Explicit map (anterior muscles): R thigh=RF(blk0)/shin=TA(blk2);
+        # L thigh=RF(blk1)/shin=TA(blk3). Bypasses auto-resolve.
         "base": _ROOT + "FOG004/MAPP/",
         "wimu_map": {"R_foot": "dev7", "L_foot": "dev2",
                      "pelvis": "dev5", "cervical": "dev3", "wrist": "dev6"},
-        "leg_blocks": {"R": (0, 4), "L": (1, 5)},   # unordered; auto-resolved
+        "cometa_map": {("R", "thigh"): 0, ("R", "shin"): 2,
+                       ("L", "thigh"): 1, ("L", "shin"): 3},
         "calib": (0.0, 10.0),
         "sessions": [
             # Narrow Corridor 5:05-6:00 ; FOG 5:24-5:26 ; straight walk 5:08-5:15
             {"tag": "narrow", "folder": "Narrow Corridor_1",
              "win": (305.0, 360.0), "fog_events": [(324.0, 326.0)],
              "walk_ref": (308.0, 315.0)},
-            # 8 Shape 1:30-3:00 ; FOG 1:57.7-2:05, 2:11.2-2:12 ; walk 1:41-1:49.4
+            # 8 Shape: R_foot enumerated as dev1 here (no dev7)
+            # 1:30-3:00 ; FOG 1:57.7-2:05, 2:11.2-2:12 ; walk 1:41-1:49.4
             {"tag": "eight_a", "folder": "8 Shape Circuit_1",
+             "wimu_map": {"R_foot": "dev1", "L_foot": "dev2",
+                          "pelvis": "dev5", "cervical": "dev3", "wrist": "dev6"},
              "win": (90.0, 180.0), "fog_events": [(117.7, 125.0), (131.2, 132.0)],
              "walk_ref": (101.0, 109.4)},
             # 8 Shape 3:00-4:30 ; FOG 3:09.1-3:11.3, 3:17-3:19, 4:11-4:13 ; walk 3:54.3-4:04.3
             {"tag": "eight_b", "folder": "8 Shape Circuit_1",
+             "wimu_map": {"R_foot": "dev1", "L_foot": "dev2",
+                          "pelvis": "dev5", "cervical": "dev3", "wrist": "dev6"},
              "win": (180.0, 270.0),
              "fog_events": [(189.1, 191.3), (197.0, 199.0), (251.0, 253.0)],
              "walk_ref": (234.3, 244.3)},
@@ -104,7 +114,9 @@ def _build_sessions():
                         "win": ses["win"], "calib": s["calib"],
                         "fog_events": ses["fog_events"], "walk_ref": ses["walk_ref"],
                         "turn_ref": ses.get("turn_ref"),
-                        "wimu_map": s["wimu_map"], "leg_blocks": s["leg_blocks"]})
+                        "wimu_map": ses.get("wimu_map", s["wimu_map"]),
+                        "leg_blocks": s.get("leg_blocks"),
+                        "cometa_map": s.get("cometa_map")})
     return out
 
 
@@ -116,8 +128,8 @@ SESSIONS = _build_sessions()
 # Current-session globals -- set by _apply_session(), do not edit here.
 H5_PATH = ""; T0 = 0.0; WIN = (0.0, 0.0); CALIB = (0.0, 10.0)
 TAG = ""; FOG_EVENTS = []; FI_WALK_REF = (0.0, 0.0); TURN_REF = None
-WIMU_DEV = {}; LEG_BLOCKS = {}    # from subject config
-COMETA_BLOCK = {}                 # resolved per session by resolve_leg_map()
+WIMU_DEV = {}; LEG_BLOCKS = {}; COMETA_MAP = None    # from subject config
+COMETA_BLOCK = {}                 # explicit COMETA_MAP or resolved per session
 FUSE_FROM = 0.0                   # fuse COMETA continuously from here through WIN[1]
 
 # COMETA 72 cols = 8 sensor blocks x 9 ch [acc(g) 0:3, gyro(deg/s) 3:6, mag 6:9].
@@ -338,11 +350,12 @@ def resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m):
 
 # ── main ───────────────────────────────────────────────────────────────────
 def _apply_session(cfg):
-    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF, TURN_REF, WIMU_DEV, LEG_BLOCKS
+    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF, TURN_REF
+    global WIMU_DEV, LEG_BLOCKS, COMETA_MAP
     H5_PATH = cfg["path"]; WIN = cfg["win"]; CALIB = cfg["calib"]
     TAG = cfg["tag"]; FOG_EVENTS = cfg["fog_events"]; FI_WALK_REF = cfg["walk_ref"]
     TURN_REF = cfg.get("turn_ref")
-    WIMU_DEV = cfg["wimu_map"]; LEG_BLOCKS = cfg["leg_blocks"]
+    WIMU_DEV = cfg["wimu_map"]; LEG_BLOCKS = cfg.get("leg_blocks"); COMETA_MAP = cfg.get("cometa_map")
 
 
 def main():
@@ -374,12 +387,13 @@ def run_session():
     calib_m = (t_co_run >= CALIB[0]) & (t_co_run <= CALIB[1])
     win_m = (t_co_run >= WIN[0]) & (t_co_run <= WIN[1])
 
+    # blocks to fuse: explicit COMETA_MAP, else the unordered LEG_BLOCKS pairs
+    blocks = (set(COMETA_MAP.values()) if COMETA_MAP
+              else {b for pair in LEG_BLOCKS.values() for b in pair})
     blk_quat = {}
-    for side, pair in LEG_BLOCKS.items():
-        for blk in pair:
-            if blk not in blk_quat:
-                acc, gyr = cometa_block(d_co, blk, c0, c1)
-                blk_quat[blk] = fuse(acc, gyr, COMETA_FS)
+    for blk in blocks:
+        acc, gyr = cometa_block(d_co, blk, c0, c1)
+        blk_quat[blk] = fuse(acc, gyr, COMETA_FS)
 
     # ---- WIMU quats + times (needed before resolving the COMETA leg map) ----
     qwi, twi, dwi = {}, {}, {}
@@ -392,8 +406,12 @@ def run_session():
         m = (twi[name] >= CALIB[0]) & (twi[name] <= CALIB[1])
         return avg_quat(qwi[name][m])
 
-    # ---- auto-resolve thigh/shin per side, then build qco with the resolved map ----
-    COMETA_BLOCK = resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m)
+    # ---- COMETA leg map: explicit muscle montage, else auto-resolve thigh/shin ----
+    if COMETA_MAP:
+        COMETA_BLOCK = dict(COMETA_MAP)
+        print(f"[MAP] explicit {{ {', '.join(f'{s}.{seg}=blk{b}' for (s,seg),b in COMETA_BLOCK.items())} }}")
+    else:
+        COMETA_BLOCK = resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m)
     qco = {key: blk_quat[blk] for key, blk in COMETA_BLOCK.items()}
 
     # ============ KNEE (COMETA-COMETA, same fused frame) ============
