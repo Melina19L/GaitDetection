@@ -24,8 +24,11 @@ import matplotlib.pyplot as plt
 
 # ── reuse live-system maths ────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_GUI = os.path.normpath(os.path.join(_HERE, "..", "GUI"))
-if _GUI not in sys.path:
+# locate FES/GUI regardless of how deep this script sits under FES/
+_GUI = next((os.path.join(p, "GUI") for p in
+             (os.path.join(_HERE, *([".."] * n)) for n in range(1, 5))
+             if os.path.isdir(os.path.join(p, "GUI", "stimulator"))), None)
+if _GUI and _GUI not in sys.path:
     sys.path.insert(0, _GUI)
 import imufusion
 from stimulator.closed_loop import (
@@ -38,21 +41,46 @@ from stimulator.closed_loop import (
 from stimulator.gait_detection_imu import identify_gait_phases, identify_valleys
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────
-_BASE = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
-         "File di Daniel Leal - Recording sessions/Group_FOG/FOG002/MAPP/")
-# Per-session config: each recording analysed independently. Times are seconds
-# from video start (= first camera frame). fog_events = visually-scored FOG;
-# walk_ref = clean-walking reference for the FOG-vs-walk separability ranking.
-SESSIONS = [
-    {"tag": "fog002_narrow",
-     "path": _BASE + "Narrow Corridor_1/recording_data.h5",
-     "win": (800.0, 860.0), "calib": (0.0, 10.0),
-     "fog_events": [(831.0, 837.0)], "walk_ref": (810.0, 822.0)},
-    {"tag": "fog002_eight",
-     "path": _BASE + "8 Shape Circuit_1/recording_data.h5",
-     "win": (125.0, 195.0), "calib": (0.0, 10.0),
-     "fog_events": [(153.0, 158.0), (160.0, 163.0)], "walk_ref": (134.0, 143.0)},
-]
+_ROOT = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
+         "File di Daniel Leal - Recording sessions/Group_FOG/")
+# Per-SUBJECT config. Sensor placement can differ per subject, so each carries
+# its own WIMU device map and candidate leg blocks. `leg_blocks` gives the two
+# COMETA blocks per side as an UNORDERED pair -- which is thigh vs shin is
+# resolved automatically per session (resolve_leg_map, via physiological ankle
+# ROM), so a mislabelled/inverted mounting is corrected without manual checking.
+# Session times are seconds from video start (= first camera frame).
+SUBJECTS = {
+    "FOG002": {
+        "base": _ROOT + "FOG002/MAPP/",
+        "wimu_map": {"R_foot": "dev5", "L_foot": "dev2",
+                     "wrist": "dev3", "cervical": "dev6", "pelvis": "dev7"},
+        "leg_blocks": {"R": (0, 4), "L": (1, 5)},   # unordered; auto-resolved
+        "calib": (0.0, 10.0),
+        "sessions": [
+            {"tag": "narrow", "folder": "Narrow Corridor_1",
+             "win": (800.0, 860.0), "fog_events": [(831.0, 837.0)],
+             "walk_ref": (810.0, 822.0)},
+            {"tag": "eight", "folder": "8 Shape Circuit_1",
+             "win": (125.0, 195.0), "fog_events": [(153.0, 158.0), (160.0, 163.0)],
+             "walk_ref": (134.0, 143.0)},
+        ],
+    },
+}
+
+
+def _build_sessions():
+    out = []
+    for sid, s in SUBJECTS.items():
+        for ses in s["sessions"]:
+            out.append({"tag": f"{sid.lower()}_{ses['tag']}",
+                        "path": s["base"] + ses["folder"] + "/recording_data.h5",
+                        "win": ses["win"], "calib": s["calib"],
+                        "fog_events": ses["fog_events"], "walk_ref": ses["walk_ref"],
+                        "wimu_map": s["wimu_map"], "leg_blocks": s["leg_blocks"]})
+    return out
+
+
+SESSIONS = _build_sessions()
 # Time base: cameras + sensors share an ABSOLUTE device clock. The `logs/events`
 # `elapsed` column is a SEPARATE drifting clock and must NOT be used. Videos are
 # aligned to the absolute timestamp; video t=0 = first camera frame, so T0 is set
@@ -60,23 +88,19 @@ SESSIONS = [
 # Current-session globals -- set by _apply_session(), do not edit here.
 H5_PATH = ""; T0 = 0.0; WIN = (0.0, 0.0); CALIB = (0.0, 10.0)
 TAG = ""; FOG_EVENTS = []; FI_WALK_REF = (0.0, 0.0)
-FUSE_FROM = 0.0                  # fuse COMETA continuously from here through WIN[1]
+WIMU_DEV = {}; LEG_BLOCKS = {}    # from subject config
+COMETA_BLOCK = {}                 # resolved per session by resolve_leg_map()
+FUSE_FROM = 0.0                   # fuse COMETA continuously from here through WIN[1]
 
-# COMETA 72 cols = 8 sensor blocks x 9 ch [acc(g) 0:3, gyro(deg/s) 3:6, mag 6:9]
-# NOTE: the originally-supplied map (S1/S2=thigh, S5/S6=shin) is INVERTED. The
-# ankle test (true shank paired with foot gives a physiological ~35-48 deg ROM,
-# thigh gives an absurd ~100 deg) plus distal-faster gyro-RMS show S1/S2 are the
-# shins and S5/S6 the thighs. Corrected mapping below.
-COMETA_BLOCK = {("R", "thigh"): 4, ("R", "shin"): 0,
-                ("L", "thigh"): 5, ("L", "shin"): 1}
+# COMETA 72 cols = 8 sensor blocks x 9 ch [acc(g) 0:3, gyro(deg/s) 3:6, mag 6:9].
+# Per-side thigh/shin block assignment is resolved at runtime (S1/S2 vs S5/S6 was
+# inverted for FOG002; auto-resolution avoids hardcoding it per subject).
 COMETA_FS = 2000.0
 
 # WIMU 8 cols = [counter, free_accel_xyz (m/s^2, gravity-removed), quat_wxyz].
 # Verified: cols 1-3 read ~0 at rest and peak ~6g at foot strike -> free
 # acceleration, NOT gyroscope (WIMU exports no raw gyro). Sagittal angular
 # velocity for gait is reconstructed from the quaternion (quat_angular_velocity).
-WIMU_DEV = {"R_foot": "dev5", "L_foot": "dev2",
-            "wrist": "dev3", "cervical": "dev6", "pelvis": "dev7"}
 
 # Freeze Index
 FI_WIN = 4.0                     # s
@@ -240,11 +264,54 @@ def detect_gait(gyro_y, t, fs):
             "t_to": t[to] if len(to) else np.array([])}
 
 
+def ankle_series(qsh, foot_name, qwi, twi, t_co_run, calib_m):
+    """Sagittal ankle angle (deg) over WIN for a shin-quaternion + foot WIMU pair.
+    Gravity-referenced long-axis pitch difference (yaw-drift-immune)."""
+    shin_ref = avg_quat(qsh[calib_m])
+    fcm = (twi[foot_name] >= CALIB[0]) & (twi[foot_name] <= CALIB[1])
+    foot_ref = avg_quat(qwi[foot_name][fcm])
+    sh_axis = AXIS_VECTORS[detect_most_vertical_axis(shin_ref)]
+    ft_axis = AXIS_VECTORS[detect_most_horizontal_axis(foot_ref)]
+    off = long_axis_pitch(foot_ref, ft_axis) - long_axis_pitch(shin_ref, sh_axis)
+    tf = twi[foot_name]
+    fm = (tf >= WIN[0]) & (tf <= WIN[1])
+    sidx = nearest_match(t_co_run, tf[fm])
+    qsh_win, qf_win = qsh[sidx], qwi[foot_name][fm]
+    ank = np.array([long_axis_pitch(qf_win[k], ft_axis)
+                    - long_axis_pitch(qsh_win[k], sh_axis)
+                    for k in range(len(qf_win))]) - off
+    return tf[fm], ank
+
+
+def resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m):
+    """Auto-resolve thigh vs shin per side from the unordered LEG_BLOCKS pair.
+
+    The true shank paired with the foot gives a physiological ankle ROM (~30-50
+    deg); the thigh paired with the foot gives an absurd one (~100 deg). So for
+    each side we test both candidates as 'shin' and pick the one whose ankle ROM
+    is closest to a physiological target; the other becomes thigh.
+    """
+    TARGET = 40.0
+    cmap = {}
+    for side, (a, b) in LEG_BLOCKS.items():
+        foot = "R_foot" if side == "R" else "L_foot"
+        _, ank_a = ankle_series(blk_quat[a], foot, qwi, twi, t_co_run, calib_m)
+        _, ank_b = ankle_series(blk_quat[b], foot, qwi, twi, t_co_run, calib_m)
+        rom_a, rom_b = np.ptp(ank_a), np.ptp(ank_b)
+        shin, thigh = (a, b) if abs(rom_a - TARGET) < abs(rom_b - TARGET) else (b, a)
+        cmap[(side, "shin")] = shin
+        cmap[(side, "thigh")] = thigh
+        print(f"[MAP {side}] ankle-ROM blk{a}={rom_a:.0f} blk{b}={rom_b:.0f}  "
+              f"-> shin=blk{shin} thigh=blk{thigh}")
+    return cmap
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 def _apply_session(cfg):
-    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF
+    global H5_PATH, WIN, CALIB, TAG, FOG_EVENTS, FI_WALK_REF, WIMU_DEV, LEG_BLOCKS
     H5_PATH = cfg["path"]; WIN = cfg["win"]; CALIB = cfg["calib"]
     TAG = cfg["tag"]; FOG_EVENTS = cfg["fog_events"]; FI_WALK_REF = cfg["walk_ref"]
+    WIMU_DEV = cfg["wimu_map"]; LEG_BLOCKS = cfg["leg_blocks"]
 
 
 def main():
@@ -261,23 +328,26 @@ def run_session():
     print(f"[TIME] T0 (first camera frame) = {T0:.3f}  -> window absolute "
           f"{T0+WIN[0]:.1f}-{T0+WIN[1]:.1f}")
 
-    # ---- COMETA: fuse needed blocks continuously [FUSE_FROM .. WIN[1]] ----
+    global COMETA_BLOCK
+
+    # ---- COMETA: fuse the candidate leg blocks continuously [FUSE_FROM .. WIN[1]] ----
     d_co, t_co = load_cometa(f)
     fi0 = win_idx(t_co, FUSE_FROM, WIN[1])
     c0, c1 = fi0[0], fi0[-1] + 1
     t_co_run = t_co[c0:c1]
     print(f"[COMETA] fusing rows {c0}:{c1} ({c1-c0} samp, "
           f"{t_co_run[0]:.1f}-{t_co_run[-1]:.1f}s)")
-    qco = {}
-    for (side, seg), blk in COMETA_BLOCK.items():
-        acc, gyr = cometa_block(d_co, blk, c0, c1)
-        qco[(side, seg)] = fuse(acc, gyr, COMETA_FS)
-        print(f"  fused {side} {seg} (blk{blk}) qnorm~{np.linalg.norm(qco[(side,seg)],axis=1).mean():.3f}")
-
     calib_m = (t_co_run >= CALIB[0]) & (t_co_run <= CALIB[1])
     win_m = (t_co_run >= WIN[0]) & (t_co_run <= WIN[1])
 
-    # ---- WIMU quats + times ----
+    blk_quat = {}
+    for side, pair in LEG_BLOCKS.items():
+        for blk in pair:
+            if blk not in blk_quat:
+                acc, gyr = cometa_block(d_co, blk, c0, c1)
+                blk_quat[blk] = fuse(acc, gyr, COMETA_FS)
+
+    # ---- WIMU quats + times (needed before resolving the COMETA leg map) ----
     qwi, twi, dwi = {}, {}, {}
     for name, dev in WIMU_DEV.items():
         d, t = load_wimu(f, dev)
@@ -287,6 +357,10 @@ def run_session():
     def wimu_calib_ref(name):
         m = (twi[name] >= CALIB[0]) & (twi[name] <= CALIB[1])
         return avg_quat(qwi[name][m])
+
+    # ---- auto-resolve thigh/shin per side, then build qco with the resolved map ----
+    COMETA_BLOCK = resolve_leg_map(blk_quat, qwi, twi, t_co_run, calib_m)
+    qco = {key: blk_quat[blk] for key, blk in COMETA_BLOCK.items()}
 
     # ============ KNEE (COMETA-COMETA, same fused frame) ============
     angles = {}
@@ -316,28 +390,13 @@ def run_session():
               f"min={hip.min():.1f} max={hip.max():.1f}")
 
     # ============ ANKLE (shin COMETA <-> foot WIMU) ============
-    # Sagittal pitch difference of segment long axes. Yaw-drift-immune, so it
-    # survives the COMETA(no-mag) <-> WIMU(mag) frame mismatch that wrecks the
-    # relative-quaternion method here.
+    # Sagittal long-axis pitch difference (yaw-drift-immune); see ankle_series.
     for side in ("R", "L"):
         foot = "R_foot" if side == "R" else "L_foot"
-        qsh = qco[(side, "shin")]
-        shin_ref = avg_quat(qsh[calib_m])
-        foot_ref = wimu_calib_ref(foot)
-        sh_axis = AXIS_VECTORS[detect_most_vertical_axis(shin_ref)]      # along tibia
-        ft_axis = AXIS_VECTORS[detect_most_horizontal_axis(foot_ref)]    # along foot
-        off = long_axis_pitch(foot_ref, ft_axis) - long_axis_pitch(shin_ref, sh_axis)
-        tf = twi[foot]
-        fm = (tf >= WIN[0]) & (tf <= WIN[1])
-        tf_win = tf[fm]
-        sidx = nearest_match(t_co_run, tf_win)         # shin sample per foot sample
-        qsh_win = qsh[sidx]
-        qf_win = qwi[foot][fm]
-        ankle = np.array([long_axis_pitch(qf_win[k], ft_axis)
-                          - long_axis_pitch(qsh_win[k], sh_axis)
-                          for k in range(len(qf_win))]) - off
+        tf_win, ankle = ankle_series(qco[(side, "shin")], foot, qwi, twi,
+                                     t_co_run, calib_m)
         angles[(side, "ankle")] = (tf_win, ankle)
-        print(f"[ANKLE {side}] sh_axis/ft_axis pitch  off={off:.1f}  ROM={np.ptp(ankle):.1f}  "
+        print(f"[ANKLE {side}] ROM={np.ptp(ankle):.1f}  "
               f"min={ankle.min():.1f} max={ankle.max():.1f}")
 
     # ============ gait (Method 1, both feet) ============
@@ -366,7 +425,8 @@ def run_session():
         acc, _ = cometa_block(d_co, blk, c0, c1)
         norm = np.sqrt((acc[win_m] ** 2).sum(1))
         fi[f"COM_{side}_{seg}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
-    for blk in (2, 3, 6, 7):       # remaining COMETA blocks for full per-sensor FI
+    other_blocks = sorted(set(range(8)) - set(COMETA_BLOCK.values()))
+    for blk in other_blocks:       # remaining COMETA blocks for full per-sensor FI
         acc, _ = cometa_block(d_co, blk, c0, c1)
         norm = np.sqrt((acc[win_m] ** 2).sum(1))
         fi[f"COM_blk{blk}"] = freeze_index(norm, COMETA_FS) + (WIN[0],)
