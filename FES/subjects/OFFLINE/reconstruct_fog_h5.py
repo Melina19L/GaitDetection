@@ -85,7 +85,8 @@ SUBJECTS = {
             # Narrow Corridor 5:05-6:00 ; FOG 5:24-5:26 ; straight walk 5:08-5:15
             {"tag": "narrow", "folder": "Narrow Corridor_1",
              "win": (305.0, 360.0), "fog_events": [(324.0, 326.0)],
-             "walk_ref": (308.0, 315.0)},
+             "walk_ref": (308.0, 315.0),
+             "turn_ref": (327.0, 334.0)},   # clean turn-L after the FOG
             # 8 Shape: R_foot enumerated as dev1 here (no dev7)
             # 1:30-3:00 ; FOG 1:57.7-2:05, 2:11.2-2:12 ; walk 1:41-1:49.4
             {"tag": "eight_a", "folder": "8 Shape Circuit_1",
