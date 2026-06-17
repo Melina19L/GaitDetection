@@ -454,9 +454,10 @@ def run_session():
     # ============ Freeze Index (13 sensors) ============
     # precompute motion-norm per sensor over the whole fused range / full WIMU,
     # so FI can be evaluated on any sub-window (analysis WIN and turn-ref).
-    other_blocks = sorted(set(range(8)) - set(COMETA_BLOCK.values()))
+    # only sensors with KNOWN placement: the resolved COMETA leg blocks + WIMU.
+    # The other COMETA blocks (unknown placement) are excluded from the analysis.
     com_norm = {}
-    for blk in range(8):
+    for blk in set(COMETA_BLOCK.values()):
         acc, _ = cometa_block(d_co, blk, c0, c1)
         com_norm[blk] = np.sqrt((acc ** 2).sum(1))
     wimu_norm = {n: np.sqrt((dwi[n][:, 1:4].astype(float) ** 2).sum(1)) for n in WIMU_DEV}
@@ -465,8 +466,6 @@ def run_session():
         out, wm = {}, (t_co_run >= lo) & (t_co_run <= hi)
         for (side, seg), blk in COMETA_BLOCK.items():
             out[f"COM_{side}_{seg}"] = freeze_index(com_norm[blk][wm], COMETA_FS) + (lo,)
-        for blk in other_blocks:
-            out[f"COM_blk{blk}"] = freeze_index(com_norm[blk][wm], COMETA_FS) + (lo,)
         for name in WIMU_DEV:
             t = twi[name]; m = (t >= lo) & (t <= hi)
             fs = 1.0 / np.median(np.diff(t[m]))
