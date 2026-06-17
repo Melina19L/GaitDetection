@@ -479,7 +479,7 @@ def run_session():
             print(f"[FI] {k:16s} min={v[1].min():.2f} max={v[1].max():.2f} mean={v[1].mean():.2f}")
 
     rank = rank_sensors(fi, fi_turn)
-    detect = fog_detector(fi)
+    detect = fog_detector(fi, rank, fi_turn)
 
     f.close()
     make_figures(angles, gait, fi, detect)
@@ -550,36 +550,36 @@ def _mask_to_intervals(times, mask):
 
 
 DET_MIN_DUR = 1.0       # s, drop detections shorter than this (blips)
-DET_SENSORS = ["COM_R_shin", "COM_L_shin", "COM_R_thigh", "COM_L_thigh"]
-DET_CONSENSUS = 3       # FOG = >= this many leg sensors elevated together
 
 
-def fog_detector(fi):
-    """Multi-sensor consensus FOG detection (robust, generalises across sessions).
+def fog_detector(fi, rank, fi_turn=None):
+    """Single best-sensor FOG detection, tuned to minimise false positives.
 
-    A real FOG is body-wide synchronous 3-8Hz trembling -> several leg sensors'
-    FI rise together. A turn/transition or a single noisy sensor lights up one
-    sensor only. So instead of trusting one 'best' sensor + a fragile power
-    threshold (which either misses FOG or keeps turn artefacts), we require
-    >= DET_CONSENSUS of the leg sensors (COMETA shins+thighs) to exceed their own
-    clean-walking baseline (mean+2SD) at the same time. Sustained >= DET_MIN_DUR.
+    The barplot showed one sensor (top of the turn-contrast ranking, e.g.
+    COM_R_shin) separates FOG from BOTH clean walking and clean turning. So we
+    use that sensor alone and set its threshold ABOVE both the clean-walk AND the
+    clean-turn FI level (each mean+2SD). A normal walk or turn stays below ->
+    no false positive; only a freeze (FI above the turn level) fires.
+    Sustained >= DET_MIN_DUR.
     """
-    leg = [s for s in DET_SENSORS if s in fi and len(fi[s][1])]
-    tt = fi[leg[0]][0] + fi[leg[0]][-1]          # window-center times (shared grid)
-    votes = np.zeros(len(tt), int)
-    for s in leg:
-        cc, v, _pw, o = fi[s]
-        wm = (cc + o >= FI_WALK_REF[0]) & (cc + o <= FI_WALK_REF[1])
-        thr = v[wm].mean() + 2.0 * v[wm].std()
-        votes += (v > thr).astype(int)
-    fire = votes >= DET_CONSENSUS
-    intervals = [(a, b) for a, b in _mask_to_intervals(tt, fire)
+    best = rank[0][0]                      # ranked by FOG-vs-turn separability
+    c, v, pwr, off = fi[best]
+    tt = c + off
+    wm = (tt >= FI_WALK_REF[0]) & (tt <= FI_WALK_REF[1])
+    thr = v[wm].mean() + 2.0 * v[wm].std()
+    src = "walk+2SD"
+    if fi_turn is not None and best in fi_turn and len(fi_turn[best][1]):
+        tv = fi_turn[best][1]
+        tthr = tv.mean() + 2.0 * tv.std()
+        if tthr > thr:
+            thr, src = tthr, "turn+2SD"
+    intervals = [(a, b) for a, b in _mask_to_intervals(tt, v > thr)
                  if b - a >= DET_MIN_DUR]
-    print(f"[DETECT] consensus >= {DET_CONSENSUS}/{len(leg)} leg sensors  "
+    print(f"[DETECT] sensor={best} thr={thr:.2f} ({src})  "
           f"{len(intervals)} interval(s) (>= {DET_MIN_DUR}s):")
     for a, b in intervals:
         print(f"   {a:.1f}-{b:.1f}s")
-    return {"sensor": f"consensus {DET_CONSENSUS}/{len(leg)} legs", "intervals": intervals}
+    return {"sensor": best, "thr": thr, "intervals": intervals}
 
 
 # ── figures ────────────────────────────────────────────────────────────────
