@@ -102,6 +102,23 @@ SUBJECTS = {
              "walk_ref": (234.3, 244.3)},
         ],
     },
+    "FOG006": {
+        # COMETA same muscle montage as the placement sheet (RF=thigh, TA=shin).
+        # Only 3 WIMU present (dev2,5,6): R_foot=dev6, L_foot=dev2, pelvis=dev5
+        # (the given cervical=6 duplicated R_foot and wrist=dev3 is absent).
+        "base": _ROOT + "FOG006/MAPP/",
+        "wimu_map": {"R_foot": "dev6", "L_foot": "dev2", "pelvis": "dev5"},
+        "cometa_map": {("R", "thigh"): 0, ("R", "shin"): 2,
+                       ("L", "thigh"): 1, ("L", "shin"): 3},
+        "calib": (0.0, 10.0),
+        "sessions": [
+            # Narrow Corridor: walk 7:02-7:12.5, turn-R 7:13.5-7:21.6,
+            # turn-L 7:22.5-7:32.9, FOG 7:20-7:22.3
+            {"tag": "narrow", "folder": "Narrow Corridor_1",
+             "win": (420.0, 455.0), "fog_events": [(440.0, 442.3)],
+             "walk_ref": (422.0, 432.5), "turn_ref": (442.5, 452.9)},
+        ],
+    },
 }
 
 
