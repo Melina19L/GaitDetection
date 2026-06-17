@@ -665,6 +665,8 @@ def make_figures(angles, gait, fi, detect=None):
         ax.plot(c + off, z, ls, lw=1.0, label=k)
     ax.axhline(2.0, color="k", ls=":", lw=1.2, label="z = +2 SD")
     _fog_shade(ax, label=True)
+    if detect:
+        _detect_shade(ax, detect, label=True)
     ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (z-score per sensor)")
     ax.set_title(f"{TAG}: per-sensor Freeze Index (z-scored) {WIN[0]:.0f}-{WIN[1]:.0f}s "
                  "(solid=COMETA acc, dashed=WIMU free-accel)")
@@ -685,6 +687,8 @@ def make_figures(angles, gait, fi, detect=None):
         ax.plot(c + off, np.clip(v, 1e-2, None), ls, lw=1.0, label=k)
     ax.axhline(2.0, color="k", ls=":", lw=1.2, label="Bachlin FI=2")
     _fog_shade(ax, label=True)
+    if detect:
+        _detect_shade(ax, detect, label=True)
     ax.set_yscale("log")
     ax.set_xlabel("time (s)"); ax.set_ylabel("Freeze Index (raw, log scale)")
     ax.set_title(f"{TAG}: per-sensor RAW Freeze Index {WIN[0]:.0f}-{WIN[1]:.0f}s "
