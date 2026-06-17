@@ -65,7 +65,9 @@ SUBJECTS = {
              "turn_ref": (733.2, 754.0)},
             {"tag": "eight", "folder": "8 Shape Circuit_1",
              "win": (125.0, 195.0), "fog_events": [(153.0, 158.0), (160.0, 163.0)],
-             "walk_ref": (134.0, 143.0)},
+             "walk_ref": (134.0, 143.0),
+             # clean turn (turn-R 1:03.11-1:10.24 + turn-L 1:10.25-1:16.47), no FOG
+             "turn_ref": (63.11, 76.47)},
         ],
     },
     "FOG004": {                                  # COMETA same scheme as FOG002
