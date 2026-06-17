@@ -10,11 +10,13 @@ Reuses the maths in reconstruct_fog_h5.py.
 """
 import os
 import sys
+import xml.etree.ElementTree as ET
 import numpy as np
 import h5py
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -27,6 +29,48 @@ from stimulator.closed_loop import (
 
 CALIB = (0.0, 10.0)
 PLOT_FS = 20.0                          # Hz, decimated rate for full-duration plot
+
+# ELAN (.eaf) annotation files. Time values (ms) are aligned to the same video
+# t=0 as our T0 (verified: EAF FOG tier matches the scored FOG seconds).
+_EAF = ("/Users/chiaracazzoli/Library/CloudStorage/OneDrive-epfl.ch/"
+        "File di Daniel Leal - ")
+EAF_PATH = {
+    "FOG002": _EAF + "FOG002/task_narrowCorridor_FOG002.eaf",
+    "FOG004": _EAF + "FOG004/task_narrowCorridor_FOG004.eaf",
+    "FOG006": _EAF + "FOG006/task_narrowcorridor_FOG006.eaf",
+}
+# annotation value -> (band color, alpha, legend label)
+BAND_STYLE = [
+    ("fog", "red", 0.40, "FOG"),
+    ("straight walking", "green", 0.22, "straight walking"),
+    ("turn - left", "orange", 0.32, "turn left"),
+    ("turn - right", "gold", 0.34, "turn right"),
+    ("narrow corridor", "lightblue", 0.30, "narrow corridor"),
+]
+
+
+def parse_eaf(path):
+    """Return [(start_s, end_s, tier, value)] from an ELAN .eaf file."""
+    root = ET.parse(path).getroot()
+    ts = {s.get("TIME_SLOT_ID"): int(s.get("TIME_VALUE"))
+          for s in root.iter("TIME_SLOT") if s.get("TIME_VALUE") is not None}
+    out = []
+    for tier in root.iter("TIER"):
+        tid = tier.get("TIER_ID")
+        for aa in tier.iter("ALIGNABLE_ANNOTATION"):
+            v = (aa.find("ANNOTATION_VALUE").text or "").strip()
+            a, b = ts.get(aa.get("TIME_SLOT_REF1")), ts.get(aa.get("TIME_SLOT_REF2"))
+            if a is not None and b is not None:
+                out.append((a / 1000.0, b / 1000.0, tid, v))
+    return out
+
+
+def band_style(tier, value):
+    s = (tier + " " + value).lower()
+    for key, col, alpha, lab in BAND_STYLE:
+        if key in s:
+            return col, alpha, lab
+    return None, 0.0, None
 
 # Narrow Corridor, FOG episodes = seconds from recording start (video t=0).
 SUBJ = {
@@ -76,7 +120,8 @@ def run(sid, cfg):
     f = h5py.File(path, "r")
     T0 = float(f["Cameras/camera_2/frames"][0]["timestamp"])
     reps = parse_reps(f, T0)
-    print(f"[{sid}] {len(reps)} repetitions")
+    annots = parse_eaf(EAF_PATH[sid])     # (start_s, end_s, tier, value)
+    print(f"[{sid}] {len(reps)} repetitions, {len(annots)} EAF annotations")
     t_co = f["Cometa/WaveX_IMU/timestamps"][:] - T0
     d_co = f["Cometa/WaveX_IMU/data"]
     n = len(t_co)
@@ -142,14 +187,18 @@ def run(sid, cfg):
     for ri, (lab, ta, tb) in enumerate(reps):
         for ci, joint in enumerate(joints):
             ax = axs[ri][ci]
+            # activity / FOG bands from the EAF annotations overlapping this rep
+            for sa, sb, tier, val in annots:
+                if sb < ta or sa > tb:
+                    continue
+                col, alpha, _ = band_style(tier, val)
+                if col:
+                    ax.axvspan(max(sa, ta) - ta, min(sb, tb) - ta,
+                               color=col, alpha=alpha, lw=0)
             for side, col in (("R", "C0"), ("L", "C3")):
                 t, a = angles[(side, joint)]
                 m = (t >= ta) & (t <= tb)
-                ax.plot(t[m] - ta, a[m], col, lw=0.8, label=side)
-            for fa, fb in cfg["fog"]:           # FOG band if it overlaps this rep
-                if fb >= ta and fa <= tb:
-                    ax.axvspan(max(fa, ta) - ta, min(fb, tb) - ta,
-                               color="red", alpha=0.35, lw=0)
+                ax.plot(t[m] - ta, a[m], col, lw=0.9)
             ax.grid(alpha=0.3); ax.tick_params(labelsize=6)
             if ri == 0:
                 ax.set_title(joint, fontsize=10)
@@ -157,9 +206,11 @@ def run(sid, cfg):
                 ax.set_ylabel(f"{lab}\n(deg)", fontsize=6.5)
             if ri == nr - 1:
                 ax.set_xlabel("time in rep (s)", fontsize=7)
-    axs[0][2].legend(loc="upper right", fontsize=7)
+    handles = ([Patch(color="C0", label="R"), Patch(color="C3", label="L")]
+               + [Patch(facecolor=c, alpha=al, label=lb) for _, c, al, lb in BAND_STYLE])
+    fig.legend(handles=handles, loc="upper right", fontsize=8, ncol=7)
     fig.suptitle(f"{sid} Narrow Corridor - joint angles per repetition "
-                 "(red = scored FOG; angles unreliable during turns)", y=0.997)
+                 "(EAF activity bands; angles unreliable during turns)", y=0.998)
     p = os.path.join(_HERE, f"{sid.lower()}_narrow_byrep_angles.png")
     fig.tight_layout(); fig.savefig(p, dpi=110); plt.close(fig)
     print("saved", p)
