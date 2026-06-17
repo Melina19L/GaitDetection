@@ -215,6 +215,64 @@ def run(sid, cfg):
     fig.tight_layout(); fig.savefig(p, dpi=110); plt.close(fig)
     print("saved", p)
 
+    plot_gait_byrep(sid, reps, annots, qwi, twi)
+
+
+def plot_gait_byrep(sid, reps, annots, qwi, twi):
+    """Method-1 gait detection per repetition (both feet) with EAF activity bands.
+    Sagittal foot angular velocity reconstructed from the WIMU quaternion; HS/TO
+    via the same detector as reconstruct_fog_h5."""
+    feet = [("R", "R_foot"), ("L", "L_foot")]
+    gy_full, t_full = {}, {}
+    for side, foot in feet:
+        w = R.quat_angular_velocity(qwi[foot], twi[foot])
+        gy = w[:, int(np.argmax(w.std(axis=0)))]
+        if abs(gy.min()) > abs(gy.max()):
+            gy = -gy
+        gy_full[side], t_full[side] = gy, twi[foot]
+
+    nr = len(reps)
+    fig, axs = plt.subplots(nr, 2, figsize=(13, 2.0 * nr), squeeze=False)
+    for ri, (lab, ta, tb) in enumerate(reps):
+        for ci, (side, foot) in enumerate(feet):
+            ax = axs[ri][ci]
+            for sa, sb, tier, val in annots:
+                if sb < ta or sa > tb:
+                    continue
+                col, alpha, _ = band_style(tier, val)
+                if col:
+                    ax.axvspan(max(sa, ta) - ta, min(sb, tb) - ta,
+                               color=col, alpha=alpha, lw=0)
+            t, gy = t_full[side], gy_full[side]
+            m = (t >= ta) & (t <= tb)
+            tr, gr = t[m] - ta, gy[m]
+            if len(gr) > 20:
+                fs = 1.0 / np.median(np.diff(t[m]))
+                g = R.detect_gait(gr, tr, fs)
+                ax.plot(tr, gr, "0.4", lw=0.7)
+                ax.plot(tr[g["peaks"]], gr[g["peaks"]], "g.", ms=5)
+                if len(g["hs"]):
+                    ax.plot(tr[g["hs"]], gr[g["hs"]], "r^", ms=6)
+                if len(g["to"]):
+                    ax.plot(tr[g["to"]], gr[g["to"]], "bv", ms=6)
+            ax.grid(alpha=0.3); ax.tick_params(labelsize=6)
+            if ri == 0:
+                ax.set_title(f"{side} foot ang.vel (deg/s)", fontsize=9)
+            if ci == 0:
+                ax.set_ylabel(lab, fontsize=6.5)
+            if ri == nr - 1:
+                ax.set_xlabel("time in rep (s)", fontsize=7)
+    handles = ([plt.Line2D([], [], color="g", marker=".", ls="", label="mid-swing"),
+                plt.Line2D([], [], color="r", marker="^", ls="", label="HS"),
+                plt.Line2D([], [], color="b", marker="v", ls="", label="TO")]
+               + [Patch(facecolor=c, alpha=al, label=lb) for _, c, al, lb in BAND_STYLE])
+    fig.legend(handles=handles, loc="upper right", fontsize=8, ncol=8)
+    fig.suptitle(f"{sid} Narrow Corridor - Method-1 gait detection per repetition "
+                 "(EAF activity bands)", y=0.998)
+    p = os.path.join(_HERE, f"{sid.lower()}_narrow_byrep_gait.png")
+    fig.tight_layout(); fig.savefig(p, dpi=110); plt.close(fig)
+    print("saved", p)
+
 
 if __name__ == "__main__":
     for sid, cfg in SUBJ.items():
