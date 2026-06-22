@@ -61,6 +61,27 @@ def export_xlsx_log(save_path, data_to_save):
         except Exception:
             return []
 
+    def _clamp_ankle(arr, lo=-50.0, hi=50.0):
+        """Clamp ankle angle samples to a physiological range.
+
+        Magnetometer-induced quaternion wraparound on the foot IMU can produce
+        ±100°/±300° spikes that contaminate the saved trace. Anything outside
+        [lo, hi] is replaced with the previous valid sample (or 0.0 at the
+        start) so downstream analysis sees a clean signal.
+        """
+        out, last = [], 0.0
+        for v in (arr or []):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                out.append(v); continue
+            if lo <= x <= hi:
+                last = x
+                out.append(x)
+            else:
+                out.append(last)
+        return out
+
     def _frame_from_columns(cols: dict):
         max_len = max((len(v) for v in cols.values()), default=0)
         if max_len == 0:
@@ -77,13 +98,13 @@ def export_xlsx_log(save_path, data_to_save):
         "Timestamp_LeftKnee": _series(data_to_save.get("imu_left_knee_timestamps")),
         "Left_Knee":          _series(data_to_save.get("imu_left_knee_angles")),
         "Timestamp_LeftAnkle":_series(data_to_save.get("imu_left_ankle_timestamps")),
-        "Left_Ankle":         _series(data_to_save.get("imu_left_ankle_angles")),
+        "Left_Ankle":         _clamp_ankle(_series(data_to_save.get("imu_left_ankle_angles"))),
         "Timestamp_RightHip": _series(data_to_save.get("imu_right_hip_timestamps")),
         "Right_Hip":          _series(data_to_save.get("imu_right_hip_angles")),
         "Timestamp_RightKnee":_series(data_to_save.get("imu_right_knee_timestamps")),
         "Right_Knee":         _series(data_to_save.get("imu_right_knee_angles")),
         "Timestamp_RightAnkle":_series(data_to_save.get("imu_right_ankle_timestamps")),
-        "Right_Ankle":        _series(data_to_save.get("imu_right_ankle_angles")),
+        "Right_Ankle":        _clamp_ankle(_series(data_to_save.get("imu_right_ankle_angles"))),
     }
     df_angles = _frame_from_columns(angle_cols)
     if df_angles is not None:

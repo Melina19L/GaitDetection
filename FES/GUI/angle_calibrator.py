@@ -517,6 +517,41 @@ class AngleCalibrator(QObject):
         """
         return self.left_ankle_data, self.right_ankle_data
 
+    def get_neutral_pose_drift(self, n_samples: int = 50) -> dict:
+        """Return mean angle (degrees) of the most recent ``n_samples`` per joint.
+
+        Used by the pre-trial validation gate to check whether the live calibration
+        still holds for THIS trial: with the subject standing still, every joint
+        should read ~0° (± a few degrees of measurement noise). A drift larger than
+        ~5-7° on any joint between Start/Stop cycles indicates the IMU's onboard
+        9-DOF Kalman filter has re-oriented (magnetometer flip) or that a strap
+        has slipped — recalibration is then advisable.
+
+        Returns
+        -------
+        dict[str, float]
+            Keys: ``"L_hip"``, ``"R_hip"``, ``"L_knee"``, ``"R_knee"``,
+            ``"L_ankle"``, ``"R_ankle"``. Missing/empty streams are omitted.
+        """
+        sources = {
+            "L_hip":   self.left_hip_data,
+            "R_hip":   self.right_hip_data,
+            "L_knee":  self.left_angle_data,
+            "R_knee":  self.right_angle_data,
+            "L_ankle": self.left_ankle_data,
+            "R_ankle": self.right_ankle_data,
+        }
+        out: dict[str, float] = {}
+        for k, arr in sources.items():
+            if arr is None:
+                continue
+            a = np.asarray(arr)
+            if a.size == 0:
+                continue
+            tail = a[-min(n_samples, a.size):]
+            out[k] = float(np.mean(tail))
+        return out
+
     def get_latest_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the latest knee angle data for both legs.
 

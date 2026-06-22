@@ -635,6 +635,11 @@ class ROM:
     def get_ankle_angle(self, q_shank: np.ndarray, q_foot: np.ndarray) -> float:
         """Compute, store and return the calibrated ankle angle, using the
         per-instance ``shank_axis`` / ``foot_axis`` configured via ``set_ankle_axes``.
+
+        Robustness: clamp to physiological ±50° and reject magnetometer-induced
+        spikes (Δ > 30° vs previous sample at ~60-100Hz is non-physiological).
+        Without this, a yaw flip on the foot IMU's onboard 9-DOF Kalman can push
+        the angle to ±100°/±300° for a few samples and corrupt the saved trace.
         """
         if hasattr(self, 'q_shank_ref') and hasattr(self, 'q_foot_ref'):
             angle = ROM.calculate_ankle_angle(
@@ -647,8 +652,14 @@ class ROM:
             angle = ankle_angle_between_quaternions(
                 q_shank, q_foot, self.foot_axis, self.shank_axis,
             ) - self.offset
-            
+
         angle *= self.scale
+        ANKLE_MIN, ANKLE_MAX, SPIKE_DELTA = -50.0, 50.0, 30.0
+        angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
+        if self.angles.shape[0] > 0:
+            prev = float(self.angles[-1, 1])
+            if abs(angle - prev) > SPIKE_DELTA:
+                angle = prev
         self.angles = np.append(self.angles, [[self.timestamp, angle]], axis=0)
         return angle
 

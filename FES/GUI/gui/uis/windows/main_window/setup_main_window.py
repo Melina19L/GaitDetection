@@ -5952,6 +5952,23 @@ class SetupMainWindow:
             except Exception as _e:
                 print(f"[Warm-up gate] skipped: {_e}")
 
+            # ── Pre-trial neutral-pose validation ───────────────────────────
+            # Catches between-trial drift when the operator reuses one
+            # calibration across multiple Start/Stop cycles. Cancels Start
+            # if the operator chooses Re-calibrate.
+            try:
+                from gui.widgets.pre_trial_validation_dialog import PreTrialValidationDialog
+                cal = getattr(self, "angle_calibrator", None)
+                if cal is not None and cal.has_any_sensor():
+                    val_dlg = PreTrialValidationDialog(cal, self.themes, parent=self)
+                    if val_dlg.exec() != QDialog.DialogCode.Accepted:
+                        MainFunctions.set_page(self, self.ui.load_pages.page_11)
+                        self.ui.left_menu.top_frame.setVisible(True)
+                        self.ui.load_pages.title_label.setText(self.title_label)
+                        return
+            except Exception as _e:
+                print(f"[Pre-trial validation] skipped: {_e}")
+
             # Start the experiment
             self.start_experiment.emit(task_dict)
 
