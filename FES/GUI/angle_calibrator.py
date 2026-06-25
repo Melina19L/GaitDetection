@@ -7,7 +7,7 @@ from stimulator.closed_loop import (
     ROM, TIME_TOLERANCE, sensor_axes_diagnostic,
     detect_most_vertical_axis, detect_most_horizontal_axis,
     detect_foot_medio_lateral_axis,
-    identify_hinge_axis,
+    identify_hinge_axis, extract_functional_angle,
 )
 import time
 from typing import Optional
@@ -462,10 +462,14 @@ class AngleCalibrator(QObject):
             else:
                 self.error_signal.emit("Not enough data collected for Right Ankle.")
         
+        # Flush angle/sample buffers so recording starts fresh (no flex/extend
+        # motion in the saved data).
+        self.flush_buffers()
+
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
-        
+
         self.diagnostic_signal.emit(
             '<p style="color:#2ecc71; font-weight:bold;">'
             '&#10004; Ankle Functional Calibration Complete.</p>'
@@ -612,28 +616,45 @@ class AngleCalibrator(QObject):
         # ── Phase 2: 5 s stand-to-sit (hip + knee flexion) ──
         b2 = collect(5.0)
 
-        def hinge_pair(prox_samples, dist_samples, mirror_y=False):
+        def hinge_pair(prox_samples, dist_samples, q_prox_ref, q_dist_ref):
+            """SVD hinge + SIGN DISAMBIGUATION via motion direction.
+            The SVD axis is determined up to sign; we resolve it by checking
+            whether the END of the calibration motion (sit-down -> flexion)
+            yields a POSITIVE projected angle. If not, flip the axis so that
+            flexion is consistently positive (matches Vicon convention).
+            """
             n = min(len(prox_samples), len(dist_samples))
-            if n <= 50: return None
+            if n <= 100 or q_prox_ref is None or q_dist_ref is None:
+                return None
             qp = np.array([s[6:10] for s in prox_samples[:n]], dtype=np.float64)
             qd = np.array([s[6:10] for s in dist_samples[:n]], dtype=np.float64)
             qp = qp / np.linalg.norm(qp, axis=1, keepdims=True)
             qd = qd / np.linalg.norm(qd, axis=1, keepdims=True)
             h = identify_hinge_axis(qp, qd)
-            if mirror_y and h[1] < 0:
-                h *= -1
+            # Sign disambiguation: stand->sit = flexion. End angle must be
+            # GREATER than start angle. If not, flip hinge axis.
+            a_start = extract_functional_angle(qp[0], qd[0], q_prox_ref, q_dist_ref, h)
+            a_end   = extract_functional_angle(qp[-1], qd[-1], q_prox_ref, q_dist_ref, h)
+            if a_end - a_start < 0:
+                h = -h
             return h
 
         if self.left_checkbox.isChecked():
-            h_kn = hinge_pair(b2["L_thigh"], b2["L_shank"])
+            h_kn = hinge_pair(b2["L_thigh"], b2["L_shank"], qLT, qLS)
             if h_kn is not None: self.left_knee_hinge_axis = h_kn
-            h_hp = hinge_pair(b2["pelvis"], b2["L_thigh"])
+            h_hp = hinge_pair(b2["pelvis"], b2["L_thigh"], qP, qLT)
             if h_hp is not None: self.left_hip_hinge_axis = h_hp
         if self.right_checkbox.isChecked():
-            h_kn = hinge_pair(b2["R_thigh"], b2["R_shank"], mirror_y=True)
+            h_kn = hinge_pair(b2["R_thigh"], b2["R_shank"], qRT, qRS)
             if h_kn is not None: self.right_knee_hinge_axis = h_kn
-            h_hp = hinge_pair(b2["pelvis"], b2["R_thigh"], mirror_y=True)
+            h_hp = hinge_pair(b2["pelvis"], b2["R_thigh"], qP, qRT)
             if h_hp is not None: self.right_hip_hinge_axis = h_hp
+
+        # Flush buffers: drop the calibration motion (sit-down, neutral-pose
+        # averaging) from the angle data arrays so the recording that follows
+        # captures ONLY the walking trial. Without this, the saved hip/knee
+        # ROM would include the ~90 deg sit excursion as a real "gait" sample.
+        self.flush_buffers()
 
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
@@ -708,6 +729,7 @@ class AngleCalibrator(QObject):
         if self.right_checkbox.isChecked() and right_thigh_qs and right_shank_qs:
             _save_hinge("right", right_thigh_qs, right_shank_qs)
 
+        self.flush_buffers()
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
@@ -776,6 +798,7 @@ class AngleCalibrator(QObject):
         if self.right_checkbox.isChecked() and right_thigh_qs:
             _save_hinge("right", right_thigh_qs)
 
+        self.flush_buffers()
         self.timer.start()
         self.calibration_step = CalibrationStep.READY
         self.__set_checkboxes_enabled(True)
