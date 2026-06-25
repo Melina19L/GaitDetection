@@ -566,6 +566,41 @@ class ROM:
     def set_offset(self, offset: float) -> None:
         self.offset = offset
 
+    # ── Knee / Hip functional (sagittal hinge projection) ────────────────────
+    # Mirror del pattern ankle: dopo calibrazione funzionale (5s flex/extend),
+    # angolo calcolato via swing-twist su asse hinge identificato per SVD.
+    # Elimina la contaminazione da rotazione/adduzione presente in
+    # angle_between_quaternions (che e' la geodesica 3D cardinale).
+    def set_knee_reference(self, q_thigh_ref: np.ndarray, q_shank_ref: np.ndarray,
+                           hinge_axis: np.ndarray = None) -> None:
+        self.q_thigh_ref_knee = normalize(np.asarray(q_thigh_ref, dtype=float))
+        self.q_shank_ref_knee = normalize(np.asarray(q_shank_ref, dtype=float))
+        self.knee_hinge_axis  = hinge_axis if hinge_axis is not None else None
+        self.offset = 0.0
+
+    def set_hip_reference(self, q_pelvis_ref: np.ndarray, q_thigh_ref: np.ndarray,
+                          hinge_axis: np.ndarray = None) -> None:
+        self.q_pelvis_ref_hip = normalize(np.asarray(q_pelvis_ref, dtype=float))
+        self.q_thigh_ref_hip  = normalize(np.asarray(q_thigh_ref,  dtype=float))
+        self.hip_hinge_axis   = hinge_axis if hinge_axis is not None else None
+        self.offset = 0.0
+
+    @staticmethod
+    def calculate_knee_angle_functional(
+        q_thigh: np.ndarray, q_shank: np.ndarray,
+        q_thigh_ref: np.ndarray, q_shank_ref: np.ndarray,
+        hinge_axis: np.ndarray,
+    ) -> float:
+        return extract_functional_angle(q_thigh, q_shank, q_thigh_ref, q_shank_ref, hinge_axis)
+
+    @staticmethod
+    def calculate_hip_angle_functional(
+        q_pelvis: np.ndarray, q_thigh: np.ndarray,
+        q_pelvis_ref: np.ndarray, q_thigh_ref: np.ndarray,
+        hinge_axis: np.ndarray,
+    ) -> float:
+        return extract_functional_angle(q_pelvis, q_thigh, q_pelvis_ref, q_thigh_ref, hinge_axis)
+
     # ── Ankle methods (relative-quaternion approach) ──────────────────────────
     def set_ankle_reference(self, q_shank_ref: np.ndarray, q_foot_ref: np.ndarray, hinge_axis: np.ndarray = None) -> None:
         """Store calibration-pose quaternions for the stable relative-quaternion path.

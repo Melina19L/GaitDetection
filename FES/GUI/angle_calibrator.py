@@ -468,6 +468,145 @@ class AngleCalibrator(QObject):
         )
 
 
+    def knee_functional_calibration(self):
+        """Functional calibration for the KNEE joint. Requires user to do
+        flex/extend of the knee (sit-to-stand or repeated stand+bend) for 5s.
+        Identifies the medial-lateral hinge axis via SVD on the
+        thigh<->shank relative rotation -- mirrors ankle_functional_calibration."""
+        if not self.has_any_sensor():
+            self.error_signal.emit("Knee Calibration failed: no sensors connected.")
+            return
+        if self.calibration_step != CalibrationStep.READY:
+            self.message_signal.emit("System is busy, please wait...")
+            return
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
+        self.diagnostic_signal.emit(
+            '<p style="color:#3498db; font-weight:bold;">'
+            '&#129463; Knee Functional Calibration&hellip;<br/>'
+            'Repeatedly flex and extend the knee for 5 seconds.</p>'
+        )
+        QCoreApplication.processEvents()
+        self.timer.stop()
+        for _name, inlet, _key in self._connected_inlets():
+            try: inlet.flush()
+            except Exception: pass
+
+        import time
+        duration = 5.0
+        start_t = time.time()
+        left_thigh_qs, left_shank_qs = [], []
+        right_thigh_qs, right_shank_qs = [], []
+        while time.time() - start_t < duration:
+            if self.left_checkbox.isChecked() and self.left_thigh_inlet and self.left_shank_inlet:
+                qt, _ = self.left_thigh_inlet.pull_chunk(timeout=0.0)
+                qs, _ = self.left_shank_inlet.pull_chunk(timeout=0.0)
+                if qt: left_thigh_qs.extend(qt)
+                if qs: left_shank_qs.extend(qs)
+            if self.right_checkbox.isChecked() and self.right_thigh_inlet and self.right_shank_inlet:
+                qt, _ = self.right_thigh_inlet.pull_chunk(timeout=0.0)
+                qs, _ = self.right_shank_inlet.pull_chunk(timeout=0.0)
+                if qt: right_thigh_qs.extend(qt)
+                if qs: right_shank_qs.extend(qs)
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+
+        def _save_hinge(side, thigh_qs, shank_qs):
+            n = min(len(thigh_qs), len(shank_qs))
+            if n <= 50:
+                self.error_signal.emit(f"Not enough data for {side} knee.")
+                return
+            qt = np.array([s[6:10] for s in thigh_qs[:n]], dtype=np.float64)
+            qs = np.array([s[6:10] for s in shank_qs[:n]], dtype=np.float64)
+            qt /= np.linalg.norm(qt, axis=1, keepdims=True)
+            qs /= np.linalg.norm(qs, axis=1, keepdims=True)
+            h = identify_hinge_axis(qt, qs)
+            if side == "right" and h[1] < 0:
+                h *= -1
+            setattr(self, f"{side}_knee_hinge_axis", h)
+            self.message_signal.emit(f"{side.capitalize()} Knee Functional Calib DONE.")
+
+        if self.left_checkbox.isChecked() and left_thigh_qs and left_shank_qs:
+            _save_hinge("left", left_thigh_qs, left_shank_qs)
+        if self.right_checkbox.isChecked() and right_thigh_qs and right_shank_qs:
+            _save_hinge("right", right_thigh_qs, right_shank_qs)
+
+        self.timer.start()
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        self.diagnostic_signal.emit(
+            '<p style="color:#2ecc71; font-weight:bold;">'
+            '&#10004; Knee Functional Calibration Complete.</p>'
+        )
+
+    def hip_functional_calibration(self):
+        """Functional calibration for the HIP joint. Requires user to do
+        leg flexion (raise knee toward chest) for 5s. Identifies the
+        medial-lateral hinge axis via SVD on pelvis<->thigh relative
+        rotation -- mirrors ankle_functional_calibration."""
+        if not self.has_any_sensor() or self.pelvis_inlet is None:
+            self.error_signal.emit("Hip Calibration failed: pelvis sensor needed.")
+            return
+        if self.calibration_step != CalibrationStep.READY:
+            self.message_signal.emit("System is busy, please wait...")
+            return
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
+        self.diagnostic_signal.emit(
+            '<p style="color:#3498db; font-weight:bold;">'
+            '&#129496; Hip Functional Calibration&hellip;<br/>'
+            'Repeatedly raise and lower the leg (hip flex/extend) for 5 seconds.</p>'
+        )
+        QCoreApplication.processEvents()
+        self.timer.stop()
+        for _name, inlet, _key in self._connected_inlets():
+            try: inlet.flush()
+            except Exception: pass
+
+        import time
+        duration = 5.0
+        start_t = time.time()
+        pelvis_qs, left_thigh_qs, right_thigh_qs = [], [], []
+        while time.time() - start_t < duration:
+            qp, _ = self.pelvis_inlet.pull_chunk(timeout=0.0)
+            if qp: pelvis_qs.extend(qp)
+            if self.left_checkbox.isChecked() and self.left_thigh_inlet:
+                qt, _ = self.left_thigh_inlet.pull_chunk(timeout=0.0)
+                if qt: left_thigh_qs.extend(qt)
+            if self.right_checkbox.isChecked() and self.right_thigh_inlet:
+                qt, _ = self.right_thigh_inlet.pull_chunk(timeout=0.0)
+                if qt: right_thigh_qs.extend(qt)
+            QCoreApplication.processEvents()
+            time.sleep(0.02)
+
+        def _save_hinge(side, thigh_qs):
+            n = min(len(pelvis_qs), len(thigh_qs))
+            if n <= 50:
+                self.error_signal.emit(f"Not enough data for {side} hip.")
+                return
+            qp = np.array([s[6:10] for s in pelvis_qs[:n]], dtype=np.float64)
+            qt = np.array([s[6:10] for s in thigh_qs[:n]], dtype=np.float64)
+            qp /= np.linalg.norm(qp, axis=1, keepdims=True)
+            qt /= np.linalg.norm(qt, axis=1, keepdims=True)
+            h = identify_hinge_axis(qp, qt)
+            if side == "right" and h[1] < 0:
+                h *= -1
+            setattr(self, f"{side}_hip_hinge_axis", h)
+            self.message_signal.emit(f"{side.capitalize()} Hip Functional Calib DONE.")
+
+        if self.left_checkbox.isChecked() and left_thigh_qs:
+            _save_hinge("left", left_thigh_qs)
+        if self.right_checkbox.isChecked() and right_thigh_qs:
+            _save_hinge("right", right_thigh_qs)
+
+        self.timer.start()
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        self.diagnostic_signal.emit(
+            '<p style="color:#2ecc71; font-weight:bold;">'
+            '&#10004; Hip Functional Calibration Complete.</p>'
+        )
+
     def get_offset(self) -> tuple[float, float]:
         """Return the knee angle offsets for both legs.
 
@@ -720,6 +859,10 @@ class AngleCalibrator(QObject):
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
                     self.left_hip_offset, self._diag["pelvis"],
+                    is_hip=True,
+                    q_proximal_ref=getattr(self, 'left_hip_qpelvis_ref', None),
+                    q_distal_ref=getattr(self, 'left_hip_qthigh_ref',  None),
+                    hinge_axis=getattr(self, 'left_hip_hinge_axis', None),
                 )
                 self.left_hip_data = np.append(self.left_hip_data, hip_angles)
                 self.left_hip_timestamps = np.append(self.left_hip_timestamps, t_ts)
@@ -735,6 +878,10 @@ class AngleCalibrator(QObject):
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
                     self.left_angle_offset, self._diag["left_thigh"],
+                    is_knee=True,
+                    q_proximal_ref=getattr(self, 'left_knee_qthigh_ref', None),
+                    q_distal_ref=getattr(self, 'left_knee_qshank_ref',  None),
+                    hinge_axis=getattr(self, 'left_knee_hinge_axis', None),
                 )
                 self.left_angle_data = np.append(self.left_angle_data, angles)
                 self.left_angle_timestamps = np.append(self.left_angle_timestamps, s_ts)
@@ -773,6 +920,10 @@ class AngleCalibrator(QObject):
                 hip_angles = self.__compute_angles_from_data(
                     p_s, p_ts, t_s, t_ts,
                     self.right_hip_offset, self._diag["pelvis"],
+                    is_hip=True,
+                    q_proximal_ref=getattr(self, 'right_hip_qpelvis_ref', None),
+                    q_distal_ref=getattr(self, 'right_hip_qthigh_ref',  None),
+                    hinge_axis=getattr(self, 'right_hip_hinge_axis', None),
                 )
                 self.right_hip_data = np.append(self.right_hip_data, hip_angles)
                 self.right_hip_timestamps = np.append(self.right_hip_timestamps, t_ts)
@@ -788,6 +939,10 @@ class AngleCalibrator(QObject):
                 angles = self.__compute_angles_from_data(
                     t_s, t_ts, s_s, s_ts,
                     self.right_angle_offset, self._diag["right_thigh"],
+                    is_knee=True,
+                    q_proximal_ref=getattr(self, 'right_knee_qthigh_ref', None),
+                    q_distal_ref=getattr(self, 'right_knee_qshank_ref',  None),
+                    hinge_axis=getattr(self, 'right_knee_hinge_axis', None),
                 )
                 self.right_angle_data = np.append(self.right_angle_data, angles)
                 self.right_angle_timestamps = np.append(self.right_angle_timestamps, s_ts)
@@ -1100,12 +1255,13 @@ class AngleCalibrator(QObject):
 
         def _one_side_knee(shank_inlet, thigh_inlet, target_spinbox):
             if not (shank_inlet and thigh_inlet):
-                return None
+                return None, None, None
             q_shank = self.__get_averaged_quaternion(shank_inlet, duration_s=AVG_DURATION_S)
             q_thigh = self.__get_averaged_quaternion(thigh_inlet, duration_s=AVG_DURATION_S)
             if q_shank is None or q_thigh is None:
-                return None
-            return ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
+                return None, None, None
+            off = ROM.functional_calibration(q_thigh, q_shank) - target_spinbox.value()
+            return off, q_thigh, q_shank
 
         def _one_side_ankle(shank_inlet, foot_inlet):
             """Calibrate the ankle joint using auto-detected sensor axes.
@@ -1157,30 +1313,36 @@ class AngleCalibrator(QObject):
             relative pelvis-thigh pose.
             """
             if not (self.pelvis_inlet and thigh_inlet):
-                return None
+                return None, None, None
             q_pelvis, q_thigh = self.__get_averaged_quaternions_paired(
                 self.pelvis_inlet, thigh_inlet, duration_s=AVG_DURATION_S,
             )
             if q_pelvis is None or q_thigh is None:
-                return None
-            return ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
+                return None, None, None
+            off = ROM.functional_calibration(q_pelvis, q_thigh) - offset_val
+            return off, q_pelvis, q_thigh
 
         # Collect quaternions for combined axis diagnostic emitted once at end
         diag_sections = []
         if self.left_checkbox.isChecked():
-            # Knee calibration
-            off = _one_side_knee(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
+            # Knee calibration (also stores neutral-pose quaternions for the
+            # functional sagittal-hinge projection at runtime)
+            off, q_th_l, q_sh_kn_l = _one_side_knee(self.left_shank_inlet, self.left_thigh_inlet, self.extension_target_left)
             if off is not None:
                 self.left_angle_offset = off
+                self.left_knee_qthigh_ref = q_th_l
+                self.left_knee_qshank_ref = q_sh_kn_l
             else:
                 self.message_signal.emit("Left knee: no data yet. Try again when streams are active.")
-            
+
             # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
-                hip_off = _one_side_hip(self.left_thigh_inlet, hip_tgt)
+                hip_off, q_pe_l, q_th_hp_l = _one_side_hip(self.left_thigh_inlet, hip_tgt)
                 if hip_off is not None:
                     self.left_hip_offset = hip_off
+                    self.left_hip_qpelvis_ref = q_pe_l
+                    self.left_hip_qthigh_ref  = q_th_hp_l
                 elif self.pelvis_inlet and self.left_thigh_inlet:
                     self.message_signal.emit("Left hip: no data yet. Try again when streams are active.")
             except Exception as e:
@@ -1214,19 +1376,24 @@ class AngleCalibrator(QObject):
                 print("[CalibAnkle LEFT] left_foot_inlet is None — ankle calibration skipped.")
 
         if self.right_checkbox.isChecked():
-            # Knee calibration
-            off = _one_side_knee(self.right_shank_inlet, self.right_thigh_inlet, self.extension_target_right)
+            # Knee calibration (also stores neutral-pose quaternions for the
+            # functional sagittal-hinge projection at runtime)
+            off, q_th_r, q_sh_kn_r = _one_side_knee(self.right_shank_inlet, self.right_thigh_inlet, self.extension_target_right)
             if off is not None:
                 self.right_angle_offset = off
+                self.right_knee_qthigh_ref = q_th_r
+                self.right_knee_qshank_ref = q_sh_kn_r
             else:
                 self.message_signal.emit("Right knee: no data yet. Try again when streams are active.")
-                
+
             # Hip calibration (safe — does not block if pelvis is absent)
             try:
                 hip_tgt_r = self.hip_target_right.value() if self.hip_target_right else 0.0
-                hip_off_r = _one_side_hip(self.right_thigh_inlet, hip_tgt_r)
+                hip_off_r, q_pe_r, q_th_hp_r = _one_side_hip(self.right_thigh_inlet, hip_tgt_r)
                 if hip_off_r is not None:
                     self.right_hip_offset = hip_off_r
+                    self.right_hip_qpelvis_ref = q_pe_r
+                    self.right_hip_qthigh_ref  = q_th_hp_r
                 elif self.pelvis_inlet and self.right_thigh_inlet:
                     self.message_signal.emit("Right hip: no data yet. Try again when streams are active.")
             except Exception as e:
@@ -1506,6 +1673,8 @@ class AngleCalibrator(QObject):
         angle_offset: float,
         diag_proximal: dict,
         is_ankle: bool = False,
+        is_knee: bool = False,
+        is_hip: bool = False,
         proximal_axis: str = 'X',
         distal_axis:   str = 'X',
         q_proximal_ref: np.ndarray = None,
@@ -1554,6 +1723,19 @@ class AngleCalibrator(QObject):
                     # Use a generous window to avoid cutting real dynamic peaks.
                     ANKLE_MIN, ANKLE_MAX = -50.0, 50.0
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
+                elif is_knee and q_proximal_ref is not None and q_distal_ref is not None and hinge_axis is not None:
+                    # Sagittal hinge projection (mirror of ankle pipeline).
+                    # Estrae solo la flessione-estensione del ginocchio,
+                    # eliminando contaminazione da rotazione/adduzione
+                    # che angle_between_quaternions includerebbe.
+                    angle = ROM.calculate_knee_angle_functional(
+                        q_prox, q_dist, q_proximal_ref, q_distal_ref, hinge_axis,
+                    )
+                elif is_hip and q_proximal_ref is not None and q_distal_ref is not None and hinge_axis is not None:
+                    # Sagittal hinge projection per anca: estrae solo flex/ext.
+                    angle = ROM.calculate_hip_angle_functional(
+                        q_prox, q_dist, q_proximal_ref, q_distal_ref, hinge_axis,
+                    )
                 else:
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))
