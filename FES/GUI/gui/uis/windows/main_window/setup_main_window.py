@@ -6184,13 +6184,21 @@ class SetupMainWindow:
         self.imu_btn.setMinimumHeight(LINE_HEIGHT)
         self.imu_btn.setToolTip("Open the IMU GUI to connect to the IMU sensors.")
 
-        self.calibrate_offset_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Calibrate Offsets")
+        self.calibrate_offset_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Global Calibration (10s)")
         self.calibrate_offset_btn.setMinimumHeight(LINE_HEIGHT)
-        self.calibrate_offset_btn.setToolTip("Calibrate the angle offset of the connected legs in neutral pose.")
+        self.calibrate_offset_btn.setToolTip(
+            "10 s combined calibration:\n"
+            "  0-5 s: stand still -> offsets + neutral refs (all sensors).\n"
+            "  5-10 s: sit down -> hip + knee hinge axes (SVD)."
+        )
 
-        self.calibrate_ankle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Calibrate Ankle Axis")
+        self.calibrate_ankle_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Calibrate Ankle (5s)")
         self.calibrate_ankle_btn.setMinimumHeight(LINE_HEIGHT)
-        self.calibrate_ankle_btn.setToolTip("Perform functional calibration (dorsi/plantarflexion) to identify the ankle hinge axis.")
+        self.calibrate_ankle_btn.setToolTip(
+            "5 s ankle functional calibration. Best results: patient SEATED with "
+            "leg extended (foot free), dorsi/plantar flex. Foot pinned to the "
+            "floor (standing) contaminates the SVD with shank motion."
+        )
 
         self.start_graph_btn = SetupMainWindow.create_std_push_btn(self.themes, text="Start Graph")
         self.start_graph_btn.setMinimumHeight(LINE_HEIGHT)
@@ -6757,7 +6765,7 @@ class SetupMainWindow:
 
         # ── CONNECT BUTTONS ──
         self.imu_btn.clicked.connect(open_imu_gui)
-        self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.calibration)
+        self.calibrate_offset_btn.clicked.connect(self.angle_calibrator.global_calibration_10s)
         self.calibrate_ankle_btn.clicked.connect(self.angle_calibrator.ankle_functional_calibration)
         self.start_graph_btn.clicked.connect(open_plot_dialog)
         self.left_leg_toggle.checkStateChanged.connect(left_leg_state_changed)

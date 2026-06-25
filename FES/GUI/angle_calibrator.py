@@ -468,6 +468,165 @@ class AngleCalibrator(QObject):
         )
 
 
+    def global_calibration_10s(self):
+        """COMBINED 10 s calibration replacing the old 1 s neutral-pose offset
+        capture.
+
+        Phase 1 (0-5 s): patient STANDS STILL.
+            -> 5 s average of every connected sensor's quaternion -> sets
+               offsets (knee, hip, ankle) AND reference quaternions on every
+               side. Auto-detects ankle shank/foot axes from the neutral pose.
+
+        Phase 2 (5-10 s): patient SITS DOWN (slowly, knee + hip flexion).
+            -> SVD on thigh<->shank relative rotation -> knee_hinge_axis.
+            -> SVD on pelvis<->thigh relative rotation -> hip_hinge_axis.
+
+        Ankle hinge is NOT identified here -- press the Ankle button (Phase 3)
+        with the patient seated and leg extended (foot free) for the cleanest
+        dorsi/plantar SVD.
+        """
+        if not self.has_any_sensor():
+            self.error_signal.emit("Global calibration failed: no sensors connected.")
+            return
+        if self.calibration_step != CalibrationStep.READY:
+            self.message_signal.emit("System is busy, please wait...")
+            return
+        self.__set_checkboxes_enabled(False)
+        self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
+        self.diagnostic_signal.emit(
+            '<p style="color:#3498db; font-weight:bold;">'
+            '&#127939; Global Calibration (10 s)<br/>'
+            '<b>0-5 s:</b> STAND STILL.<br/>'
+            '<b>5-10 s:</b> SIT DOWN slowly (bend hips + knees).</p>'
+        )
+        QCoreApplication.processEvents()
+        self.timer.stop()
+        for _name, inlet, _key in self._connected_inlets():
+            try: inlet.flush()
+            except Exception: pass
+
+        import time
+        from stimulator.closed_loop import (
+            detect_most_vertical_axis, detect_most_horizontal_axis,
+        )
+
+        sensors = [
+            ("pelvis",  self.pelvis_inlet),
+            ("L_thigh", self.left_thigh_inlet),
+            ("L_shank", self.left_shank_inlet),
+            ("L_foot",  self.left_foot_inlet),
+            ("R_thigh", self.right_thigh_inlet),
+            ("R_shank", self.right_shank_inlet),
+            ("R_foot",  self.right_foot_inlet),
+        ]
+
+        def collect(duration):
+            bufs = {k: [] for k, _ in sensors}
+            t0 = time.time()
+            while time.time() - t0 < duration:
+                for k, inlet in sensors:
+                    if inlet is None: continue
+                    chunk, _ = inlet.pull_chunk(timeout=0.0)
+                    if chunk: bufs[k].extend(chunk)
+                QCoreApplication.processEvents()
+                time.sleep(0.02)
+            return bufs
+
+        def meanq(samples):
+            if not samples or len(samples) < 30: return None
+            q = np.array([s[6:10] for s in samples], dtype=np.float64)
+            q = q / np.linalg.norm(q, axis=1, keepdims=True)
+            r = q[0]
+            q = np.array([x if np.dot(x, r) > 0 else -x for x in q])
+            m = q.mean(0)
+            return m / np.linalg.norm(m)
+
+        # ── Phase 1: 5 s neutral pose ──
+        b1 = collect(5.0)
+        qP  = meanq(b1["pelvis"])
+        qLT = meanq(b1["L_thigh"]); qLS = meanq(b1["L_shank"]); qLF = meanq(b1["L_foot"])
+        qRT = meanq(b1["R_thigh"]); qRS = meanq(b1["R_shank"]); qRF = meanq(b1["R_foot"])
+
+        if self.left_checkbox.isChecked():
+            if qLT is not None and qLS is not None:
+                tgt = self.extension_target_left.value() if self.extension_target_left else 0.0
+                self.left_angle_offset = ROM.functional_calibration(qLT, qLS) - tgt
+                self.left_knee_qthigh_ref = qLT
+                self.left_knee_qshank_ref = qLS
+            if qP is not None and qLT is not None:
+                hip_tgt = self.hip_target_left.value() if self.hip_target_left else 0.0
+                self.left_hip_offset = ROM.functional_calibration(qP, qLT) - hip_tgt
+                self.left_hip_qpelvis_ref = qP
+                self.left_hip_qthigh_ref  = qLT
+            if qLS is not None and qLF is not None:
+                self.left_ankle_offset = ROM.functional_calibration(qLS, qLF)
+                self.left_ankle_qshank_ref = qLS
+                self.left_ankle_qfoot_ref  = qLF
+                self.left_ankle_shank_axis = detect_most_vertical_axis(qLS)
+                self.left_ankle_foot_axis  = detect_most_horizontal_axis(qLF, qLS)
+        if self.right_checkbox.isChecked():
+            if qRT is not None and qRS is not None:
+                tgt = self.extension_target_right.value() if self.extension_target_right else 0.0
+                self.right_angle_offset = ROM.functional_calibration(qRT, qRS) - tgt
+                self.right_knee_qthigh_ref = qRT
+                self.right_knee_qshank_ref = qRS
+            if qP is not None and qRT is not None:
+                hip_tgt = self.hip_target_right.value() if self.hip_target_right else 0.0
+                self.right_hip_offset = ROM.functional_calibration(qP, qRT) - hip_tgt
+                self.right_hip_qpelvis_ref = qP
+                self.right_hip_qthigh_ref  = qRT
+            if qRS is not None and qRF is not None:
+                self.right_ankle_offset = ROM.functional_calibration(qRS, qRF)
+                self.right_ankle_qshank_ref = qRS
+                self.right_ankle_qfoot_ref  = qRF
+                self.right_ankle_shank_axis = detect_most_vertical_axis(qRS)
+                self.right_ankle_foot_axis  = detect_most_horizontal_axis(qRF, qRS)
+
+        self.diagnostic_signal.emit(
+            '<p style="color:#e67e22; font-weight:bold;">'
+            '&#129496; SIT DOWN NOW (5 s, knee + hip flexion)&hellip;</p>'
+        )
+        QCoreApplication.processEvents()
+        for _name, inlet, _key in self._connected_inlets():
+            try: inlet.flush()
+            except Exception: pass
+
+        # ── Phase 2: 5 s stand-to-sit (hip + knee flexion) ──
+        b2 = collect(5.0)
+
+        def hinge_pair(prox_samples, dist_samples, mirror_y=False):
+            n = min(len(prox_samples), len(dist_samples))
+            if n <= 50: return None
+            qp = np.array([s[6:10] for s in prox_samples[:n]], dtype=np.float64)
+            qd = np.array([s[6:10] for s in dist_samples[:n]], dtype=np.float64)
+            qp = qp / np.linalg.norm(qp, axis=1, keepdims=True)
+            qd = qd / np.linalg.norm(qd, axis=1, keepdims=True)
+            h = identify_hinge_axis(qp, qd)
+            if mirror_y and h[1] < 0:
+                h *= -1
+            return h
+
+        if self.left_checkbox.isChecked():
+            h_kn = hinge_pair(b2["L_thigh"], b2["L_shank"])
+            if h_kn is not None: self.left_knee_hinge_axis = h_kn
+            h_hp = hinge_pair(b2["pelvis"], b2["L_thigh"])
+            if h_hp is not None: self.left_hip_hinge_axis = h_hp
+        if self.right_checkbox.isChecked():
+            h_kn = hinge_pair(b2["R_thigh"], b2["R_shank"], mirror_y=True)
+            if h_kn is not None: self.right_knee_hinge_axis = h_kn
+            h_hp = hinge_pair(b2["pelvis"], b2["R_thigh"], mirror_y=True)
+            if h_hp is not None: self.right_hip_hinge_axis = h_hp
+
+        self.timer.start()
+        self.calibration_step = CalibrationStep.READY
+        self.__set_checkboxes_enabled(True)
+        self.diagnostic_signal.emit(
+            '<p style="color:#2ecc71; font-weight:bold;">'
+            '&#10004; Global Calibration Complete.<br/>'
+            'Next: press <b>Calibrate Ankle (5 s)</b> -- seated, leg extended, '
+            'foot free, dorsi/plantar flex.</p>'
+        )
+
     def knee_functional_calibration(self):
         """Functional calibration for the KNEE joint. Requires user to do
         flex/extend of the knee (sit-to-stand or repeated stand+bend) for 5s.
