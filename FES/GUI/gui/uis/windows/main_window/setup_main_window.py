@@ -7641,8 +7641,25 @@ class SetupMainWindow:
         # Get the offset values from the angle calibrator (0 if not calibrated)
         offset_left, offset_right = main_window.angle_calibrator.get_offset()
         offset_left_ankle, offset_right_ankle = main_window.angle_calibrator.get_ankle_offset()
-        # Reference quaternions for the stable relative-quaternion ankle algorithm
-        l_qs, l_qf, r_qs, r_qf, _l_hinge, _r_hinge = main_window.angle_calibrator.get_ankle_reference()
+        # Reference quaternions + hinge axes for the functional sagittal-hinge
+        # projection (mirror of ankle pipeline). Pulled from the AngleCalibrator
+        # at "Confirm" time so the StimulationBasic ROMs start the test with the
+        # right calibration -- without this plumbing the hinge axes never reach
+        # the stimulation-side ROM and the saved .pkl shows None.
+        l_qs, l_qf, r_qs, r_qf, l_ank_hinge, r_ank_hinge = main_window.angle_calibrator.get_ankle_reference()
+        _cal = main_window.angle_calibrator
+        l_knee_qth = getattr(_cal, "left_knee_qthigh_ref",  None)
+        l_knee_qsh = getattr(_cal, "left_knee_qshank_ref",  None)
+        l_knee_hg  = getattr(_cal, "left_knee_hinge_axis",  None)
+        r_knee_qth = getattr(_cal, "right_knee_qthigh_ref", None)
+        r_knee_qsh = getattr(_cal, "right_knee_qshank_ref", None)
+        r_knee_hg  = getattr(_cal, "right_knee_hinge_axis", None)
+        l_hip_qpe  = getattr(_cal, "left_hip_qpelvis_ref",  None)
+        l_hip_qth  = getattr(_cal, "left_hip_qthigh_ref",   None)
+        l_hip_hg   = getattr(_cal, "left_hip_hinge_axis",   None)
+        r_hip_qpe  = getattr(_cal, "right_hip_qpelvis_ref", None)
+        r_hip_qth  = getattr(_cal, "right_hip_qthigh_ref",  None)
+        r_hip_hg   = getattr(_cal, "right_hip_hinge_axis",  None)
         # Per-side ankle longitudinal axes auto-detected at calibration so the
         # stimulator-side ROM (whose data feeds the saved .pkl/.xlsx) uses the
         # same axes as the live calibrator-side computation that drives the plots.
@@ -7753,8 +7770,15 @@ class SetupMainWindow:
             "offset_right_ankle": offset_right_ankle,
             "ankle_left_qshank_ref":  l_qs,
             "ankle_left_qfoot_ref":   l_qf,
+            "ankle_left_hinge_axis":  l_ank_hinge,
             "ankle_right_qshank_ref": r_qs,
             "ankle_right_qfoot_ref":  r_qf,
+            "ankle_right_hinge_axis": r_ank_hinge,
+            # Knee / Hip functional sagittal-hinge calibration (new)
+            "knee_left_qthigh_ref":  l_knee_qth, "knee_left_qshank_ref":  l_knee_qsh, "knee_left_hinge_axis":  l_knee_hg,
+            "knee_right_qthigh_ref": r_knee_qth, "knee_right_qshank_ref": r_knee_qsh, "knee_right_hinge_axis": r_knee_hg,
+            "hip_left_qpelvis_ref":  l_hip_qpe,  "hip_left_qthigh_ref":   l_hip_qth,  "hip_left_hinge_axis":   l_hip_hg,
+            "hip_right_qpelvis_ref": r_hip_qpe,  "hip_right_qthigh_ref":  r_hip_qth,  "hip_right_hinge_axis":  r_hip_hg,
             # Auto-detected longitudinal axes for the per-side ankle algorithm.
             "ankle_left_shank_axis":  ankle_axes_left_shank,
             "ankle_left_foot_axis":   ankle_axes_left_foot,

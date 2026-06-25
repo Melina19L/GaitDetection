@@ -1221,15 +1221,33 @@ class StimulationIMUs(StimulationBasic):
             kwargs.get("ankle_right_foot_axis",  'X'),
         )
 
-        # Set ankle reference quaternions for the stable relative-quaternion algorithm.
-        # When present, the ROM ignores the numeric offset and directly computes
-        # the change in relative shank-foot orientation since the calibration pose.
-        l_qs = kwargs.get("ankle_left_qshank_ref");  l_qf = kwargs.get("ankle_left_qfoot_ref")
-        r_qs = kwargs.get("ankle_right_qshank_ref"); r_qf = kwargs.get("ankle_right_qfoot_ref")
+        # Set ankle reference quaternions + hinge axis for the SVD/swing-twist
+        # algorithm. Previously the hinge axis was dropped on the floor here
+        # -> ROM saved hinge_axis=None -> the saved .pkl appeared uncalibrated
+        # even when the user had pressed both calibration buttons.
+        l_qs   = kwargs.get("ankle_left_qshank_ref");  l_qf   = kwargs.get("ankle_left_qfoot_ref")
+        r_qs   = kwargs.get("ankle_right_qshank_ref"); r_qf   = kwargs.get("ankle_right_qfoot_ref")
+        l_ahg  = kwargs.get("ankle_left_hinge_axis");  r_ahg  = kwargs.get("ankle_right_hinge_axis")
         if l_qs is not None and l_qf is not None:
-            self.left_ankle_rom.set_ankle_reference(l_qs, l_qf)
+            self.left_ankle_rom.set_ankle_reference(l_qs, l_qf, l_ahg)
         if r_qs is not None and r_qf is not None:
-            self.right_ankle_rom.set_ankle_reference(r_qs, r_qf)
+            self.right_ankle_rom.set_ankle_reference(r_qs, r_qf, r_ahg)
+
+        # Knee functional sagittal-hinge calibration (mirror of ankle).
+        l_kth = kwargs.get("knee_left_qthigh_ref");  l_ksh = kwargs.get("knee_left_qshank_ref");  l_khg = kwargs.get("knee_left_hinge_axis")
+        r_kth = kwargs.get("knee_right_qthigh_ref"); r_ksh = kwargs.get("knee_right_qshank_ref"); r_khg = kwargs.get("knee_right_hinge_axis")
+        if l_kth is not None and l_ksh is not None:
+            self.left_knee_rom.set_knee_reference(l_kth, l_ksh, l_khg)
+        if r_kth is not None and r_ksh is not None:
+            self.right_knee_rom.set_knee_reference(r_kth, r_ksh, r_khg)
+
+        # Hip functional sagittal-hinge calibration.
+        l_hpe = kwargs.get("hip_left_qpelvis_ref");  l_hth = kwargs.get("hip_left_qthigh_ref");  l_hhg = kwargs.get("hip_left_hinge_axis")
+        r_hpe = kwargs.get("hip_right_qpelvis_ref"); r_hth = kwargs.get("hip_right_qthigh_ref"); r_hhg = kwargs.get("hip_right_hinge_axis")
+        if l_hpe is not None and l_hth is not None:
+            self.left_hip_rom.set_hip_reference(l_hpe, l_hth, l_hhg)
+        if r_hpe is not None and r_hth is not None:
+            self.right_hip_rom.set_hip_reference(r_hpe, r_hth, r_hhg)
 
         dt = self.timer.interval() / 1000.0  # Convert milliseconds to seconds
 
@@ -1485,6 +1503,19 @@ class StimulationIMUs(StimulationBasic):
             "right_ankle_hinge_axis": getattr(self.right_ankle_rom, "hinge_axis",  None),
             "right_ankle_shank_axis": getattr(self.right_ankle_rom, "shank_axis",  'X'),
             "right_ankle_foot_axis":  getattr(self.right_ankle_rom, "foot_axis",   'X'),
+            # --- knee / hip functional-calibration refs (mirror of ankle) ---
+            "left_knee_qthigh_ref":   getattr(self.left_knee_rom,   "q_thigh_ref_knee", None),
+            "left_knee_qshank_ref":   getattr(self.left_knee_rom,   "q_shank_ref_knee", None),
+            "left_knee_hinge_axis":   getattr(self.left_knee_rom,   "knee_hinge_axis",  None),
+            "right_knee_qthigh_ref":  getattr(self.right_knee_rom,  "q_thigh_ref_knee", None),
+            "right_knee_qshank_ref":  getattr(self.right_knee_rom,  "q_shank_ref_knee", None),
+            "right_knee_hinge_axis":  getattr(self.right_knee_rom,  "knee_hinge_axis",  None),
+            "left_hip_qpelvis_ref":   getattr(self.left_hip_rom,    "q_pelvis_ref_hip", None),
+            "left_hip_qthigh_ref":    getattr(self.left_hip_rom,    "q_thigh_ref_hip",  None),
+            "left_hip_hinge_axis":    getattr(self.left_hip_rom,    "hip_hinge_axis",   None),
+            "right_hip_qpelvis_ref":  getattr(self.right_hip_rom,   "q_pelvis_ref_hip", None),
+            "right_hip_qthigh_ref":   getattr(self.right_hip_rom,   "q_thigh_ref_hip",  None),
+            "right_hip_hinge_axis":   getattr(self.right_hip_rom,   "hip_hinge_axis",   None),
 
             "imu_left_pi_timestamps": getattr(self.left_pi_controller, "timestamps", None),
             "imu_right_pi_timestamps": getattr(self.right_pi_controller, "timestamps", None),
@@ -2068,6 +2099,19 @@ class StimulationFSRandIMU(StimulationIMUs):
             "right_ankle_hinge_axis": getattr(getattr(self, "right_ankle_rom", None), "hinge_axis",  None),
             "right_ankle_shank_axis": getattr(getattr(self, "right_ankle_rom", None), "shank_axis",  'X'),
             "right_ankle_foot_axis":  getattr(getattr(self, "right_ankle_rom", None), "foot_axis",   'X'),
+            # Knee / hip functional refs (mirror of ankle).
+            "left_knee_qthigh_ref":  getattr(getattr(self, "left_knee_rom",  None), "q_thigh_ref_knee", None),
+            "left_knee_qshank_ref":  getattr(getattr(self, "left_knee_rom",  None), "q_shank_ref_knee", None),
+            "left_knee_hinge_axis":  getattr(getattr(self, "left_knee_rom",  None), "knee_hinge_axis",  None),
+            "right_knee_qthigh_ref": getattr(getattr(self, "right_knee_rom", None), "q_thigh_ref_knee", None),
+            "right_knee_qshank_ref": getattr(getattr(self, "right_knee_rom", None), "q_shank_ref_knee", None),
+            "right_knee_hinge_axis": getattr(getattr(self, "right_knee_rom", None), "knee_hinge_axis",  None),
+            "left_hip_qpelvis_ref":  getattr(getattr(self, "left_hip_rom",   None), "q_pelvis_ref_hip", None),
+            "left_hip_qthigh_ref":   getattr(getattr(self, "left_hip_rom",   None), "q_thigh_ref_hip",  None),
+            "left_hip_hinge_axis":   getattr(getattr(self, "left_hip_rom",   None), "hip_hinge_axis",   None),
+            "right_hip_qpelvis_ref": getattr(getattr(self, "right_hip_rom",  None), "q_pelvis_ref_hip", None),
+            "right_hip_qthigh_ref":  getattr(getattr(self, "right_hip_rom",  None), "q_thigh_ref_hip",  None),
+            "right_hip_hinge_axis":  getattr(getattr(self, "right_hip_rom",  None), "hip_hinge_axis",   None),
 
             # save walking speed used
             "walking_speed": getattr(self, "speed", None),

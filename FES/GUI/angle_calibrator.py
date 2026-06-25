@@ -378,6 +378,10 @@ class AngleCalibrator(QObject):
         if not self.has_any_sensor():
             self.error_signal.emit("Ankle Calibration failed: no sensors connected.")
             return
+        print("[AnkleCal5s] inlet status at start:")
+        print(f"  left_shank   = {self.left_shank_inlet  is not None}  left_foot   = {self.left_foot_inlet  is not None}")
+        print(f"  right_shank  = {self.right_shank_inlet is not None}  right_foot  = {self.right_foot_inlet is not None}")
+        print(f"  left_toggle  = {self.left_checkbox.isChecked()}  right_toggle = {self.right_checkbox.isChecked()}")
 
         if self.calibration_step != CalibrationStep.READY:
             self.message_signal.emit("System is busy, please wait...")
@@ -491,6 +495,20 @@ class AngleCalibrator(QObject):
         if self.calibration_step != CalibrationStep.READY:
             self.message_signal.emit("System is busy, please wait...")
             return
+        # ── Inlet sanity check log (console) -- so the operator can see which
+        # sensors will participate before the 10s collect window starts. If a
+        # toggle was checked but the inlet is None, the corresponding offset/
+        # hinge will silently default to None below; this log makes that visible.
+        print("[GlobalCal10s] inlet status at start:")
+        print(f"  pelvis        = {self.pelvis_inlet is not None}")
+        print(f"  left_thigh    = {self.left_thigh_inlet is not None}")
+        print(f"  left_shank    = {self.left_shank_inlet is not None}")
+        print(f"  left_foot     = {self.left_foot_inlet  is not None}")
+        print(f"  right_thigh   = {self.right_thigh_inlet is not None}")
+        print(f"  right_shank   = {self.right_shank_inlet is not None}")
+        print(f"  right_foot    = {self.right_foot_inlet  is not None}")
+        print(f"  left_toggle   = {self.left_checkbox.isChecked()}")
+        print(f"  right_toggle  = {self.right_checkbox.isChecked()}")
         self.__set_checkboxes_enabled(False)
         self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
         self.diagnostic_signal.emit(
@@ -916,7 +934,7 @@ class AngleCalibrator(QObject):
             if not self.left_checkbox.isChecked():
                 self.timer.stop()
 
-    def _match_snapshots(self, snap_prox: list, snap_dist: list, tolerance: float = 0.05) -> tuple:
+    def _match_snapshots(self, snap_prox: list, snap_dist: list, tolerance: float = 0.10) -> tuple:
         """Match two lists of (timestamp, sample) tuples by timestamp.
         Returns:
             matched_prox (list): matched proximal samples
