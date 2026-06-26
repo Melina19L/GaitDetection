@@ -1013,6 +1013,53 @@ class AngleCalibrator(QObject):
             out[k] = float(np.mean(tail))
         return out
 
+    def get_method_per_joint(self) -> dict:
+        """Report which compute path each joint is wired to right now.
+
+        Returns ``"SVD"`` when refs + hinge_axis are all set (the sagittal
+        hinge projection runs at runtime), ``"CARD"`` when at least one is
+        missing (falls back to cardinal 3D ``angle_between_quaternions`` --
+        the path that polluted walking 2-5), or ``"N/A"`` for a side that
+        is not enabled / not streaming.
+
+        Keys mirror ``get_neutral_pose_drift``: ``L_hip``, ``L_knee``,
+        ``L_ankle``, ``R_hip``, ``R_knee``, ``R_ankle``.
+        """
+        def _method(refs: tuple, side_active: bool) -> str:
+            if not side_active:
+                return "N/A"
+            return "SVD" if all(r is not None for r in refs) else "CARD"
+
+        left_on  = self.left_checkbox.isChecked()  if self.left_checkbox  else False
+        right_on = self.right_checkbox.isChecked() if self.right_checkbox else False
+
+        return {
+            "L_hip":   _method((getattr(self, "left_hip_qpelvis_ref",  None),
+                                getattr(self, "left_hip_qthigh_ref",   None),
+                                getattr(self, "left_hip_hinge_axis",   None)),
+                               left_on),
+            "L_knee":  _method((getattr(self, "left_knee_qthigh_ref",  None),
+                                getattr(self, "left_knee_qshank_ref",  None),
+                                getattr(self, "left_knee_hinge_axis",  None)),
+                               left_on),
+            "L_ankle": _method((getattr(self, "left_ankle_qshank_ref", None),
+                                getattr(self, "left_ankle_qfoot_ref",  None),
+                                getattr(self, "left_ankle_hinge_axis", None)),
+                               left_on),
+            "R_hip":   _method((getattr(self, "right_hip_qpelvis_ref", None),
+                                getattr(self, "right_hip_qthigh_ref",  None),
+                                getattr(self, "right_hip_hinge_axis",  None)),
+                               right_on),
+            "R_knee":  _method((getattr(self, "right_knee_qthigh_ref", None),
+                                getattr(self, "right_knee_qshank_ref", None),
+                                getattr(self, "right_knee_hinge_axis", None)),
+                               right_on),
+            "R_ankle": _method((getattr(self, "right_ankle_qshank_ref",None),
+                                getattr(self, "right_ankle_qfoot_ref", None),
+                                getattr(self, "right_ankle_hinge_axis",None)),
+                               right_on),
+        }
+
     def get_latest_data(self) -> tuple[np.ndarray, np.ndarray]:
         """Return the latest knee angle data for both legs.
 

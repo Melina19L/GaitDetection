@@ -70,20 +70,30 @@ class PreTrialValidationDialog(QDialog):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        # Per-joint drift readout grid
+        # Per-joint drift readout grid.
+        # Column 0: joint name.
+        # Column 1: mean angle at neutral pose (drift vs calibration zero).
+        # Column 2: compute-path tag ("SVD" or "CARD") so the operator can
+        # tell at a glance whether the sagittal hinge projection is engaged
+        # or whether the joint silently fell back to cardinal 3D math --
+        # which the drift number alone cannot reveal (both methods read ~0
+        # at neutral pose by construction).
         self.grid = QGridLayout()
         self.grid.setHorizontalSpacing(14)
         self.grid.setVerticalSpacing(4)
-        self._row_widgets: dict[str, tuple[QLabel, QLabel]] = {}
+        self._row_widgets: dict[str, tuple[QLabel, QLabel, QLabel]] = {}
         for row, key in enumerate(("L_hip", "L_knee", "L_ankle",
                                    "R_hip", "R_knee", "R_ankle")):
             name = QLabel(key.replace("_", " "))
             name.setStyleSheet("font-size: 11pt;")
             val = QLabel("—")
             val.setStyleSheet("font-size: 11pt; font-family: monospace; color: #888;")
-            self.grid.addWidget(name, row, 0)
-            self.grid.addWidget(val,  row, 1)
-            self._row_widgets[key] = (name, val)
+            method = QLabel("…")
+            method.setStyleSheet("font-size: 10pt; font-family: monospace; color: #888;")
+            self.grid.addWidget(name,   row, 0)
+            self.grid.addWidget(val,    row, 1)
+            self.grid.addWidget(method, row, 2)
+            self._row_widgets[key] = (name, val, method)
         layout.addLayout(self.grid)
 
         self.status_label = QLabel("Sampling…")
@@ -124,18 +134,40 @@ class PreTrialValidationDialog(QDialog):
             self._latest = self.calibrator.get_neutral_pose_drift(n_samples=50)
         except Exception:
             self._latest = {}
+        try:
+            methods = self.calibrator.get_method_per_joint()
+        except Exception:
+            methods = {}
 
         worst = 0.0
-        for key, (_, val_lbl) in self._row_widgets.items():
+        any_cardinal = False
+        for key, (_, val_lbl, method_lbl) in self._row_widgets.items():
             v = self._latest.get(key)
             if v is None:
                 val_lbl.setText("—")
                 val_lbl.setStyleSheet("font-size: 11pt; font-family: monospace; color: #666;")
-                continue
-            color = "#2ecc71" if abs(v) <= self.tolerance_deg else "#e74c3c"
-            val_lbl.setText(f"{v:+.1f}°")
-            val_lbl.setStyleSheet(f"font-size: 11pt; font-family: monospace; color: {color};")
-            worst = max(worst, abs(v))
+            else:
+                color = "#2ecc71" if abs(v) <= self.tolerance_deg else "#e74c3c"
+                val_lbl.setText(f"{v:+.1f}°")
+                val_lbl.setStyleSheet(f"font-size: 11pt; font-family: monospace; color: {color};")
+                worst = max(worst, abs(v))
+
+            # Method tag: SVD = sagittal hinge engaged (good), CARD = cardinal
+            # 3D fallback (yaw-contaminated), N/A = side disabled.
+            m = methods.get(key, "?")
+            if m == "SVD":
+                m_color, m_text = "#2ecc71", "SVD"
+            elif m == "CARD":
+                m_color, m_text = "#e74c3c", "CARD"
+                any_cardinal = True
+            elif m == "N/A":
+                m_color, m_text = "#666",    "N/A"
+            else:
+                m_color, m_text = "#888",    "?"
+            method_lbl.setText(m_text)
+            method_lbl.setStyleSheet(
+                f"font-size: 10pt; font-family: monospace; color: {m_color}; font-weight: 600;"
+            )
 
         if self._elapsed_ms >= self.SAMPLE_WINDOW_MS:
             self._timer.stop()
@@ -143,8 +175,21 @@ class PreTrialValidationDialog(QDialog):
             if not self._latest:
                 self.status_label.setText("No live samples received — check sensors.")
                 self.status_label.setStyleSheet("font-size: 10pt; color: #e74c3c;")
+            elif any_cardinal:
+                # Cardinal fallback wins over drift verdict: drift can look
+                # green while the joint is silently on cardinal math (bug
+                # behind walking 2-5). Make the operator confront it.
+                self.status_label.setText(
+                    "⚠ At least one joint is on CARDINAL fallback — "
+                    "SVD hinge calibration missing. Re-run Global Calibration "
+                    "with a deeper sit-down (~5 s)."
+                )
+                self.status_label.setStyleSheet("font-size: 10pt; color: #e74c3c;")
+                self.recal_btn.setDefault(True)
             elif worst <= self.tolerance_deg:
-                self.status_label.setText(f"✓ All joints within ±{self.tolerance_deg:.0f}°.")
+                self.status_label.setText(
+                    f"✓ All joints within ±{self.tolerance_deg:.0f}° and on SVD hinge."
+                )
                 self.status_label.setStyleSheet("font-size: 10pt; color: #2ecc71;")
                 self.continue_btn.setDefault(True)
             else:
