@@ -5923,49 +5923,42 @@ class SetupMainWindow:
             # Change label
             self.ui.load_pages.title_label.setText("Running...")
 
-            # ── Sensor warm-up gate ────────────────────────────────────────
-            # Before the recording actually starts, wait for every connected
-            # Movella DOT to push fresh samples (BLE warm-up can take 3-5 s).
-            # Once all are streaming, drop any backlog and reset the live plots
-            # so the test (and the saved .pkl/.xlsx) begin from a clean baseline.
-            try:
-                from gui.widgets.sensor_readiness_dialog import SensorReadinessDialog
-                cal = getattr(self, "angle_calibrator", None)
-                if cal is not None and cal.has_any_sensor():
-                    dlg = SensorReadinessDialog(cal, self.themes, parent=self)
-                    if dlg.exec() != QDialog.DialogCode.Accepted:
-                        # User cancelled → revert UI to the Pre-Test page and abort.
-                        MainFunctions.set_page(self, self.ui.load_pages.page_11)
-                        self.ui.left_menu.top_frame.setVisible(True)
-                        self.ui.load_pages.title_label.setText(self.title_label)
-                        return
-                    # Drain stale samples / reset angle buffers / refresh diag.
-                    cal.flush_buffers()
-                    # Reset the live Page-10 plots so the curves repaint from t=0.
-                    for _attr in ("page10_knee_plot", "page10_ankle_plot", "page10_hip_plot"):
-                        _w = getattr(self, _attr, None)
-                        if _w is not None:
-                            try:
-                                _w.reset_plot()
-                            except Exception:
-                                pass
-            except Exception as _e:
-                print(f"[Warm-up gate] skipped: {_e}")
+            # ── Single pre-trial gate: neutral-pose drift + sensor readiness ──
+            # Replaces the previous SensorReadinessDialog + PreTrialValidationDialog
+            # sequence (which made the operator see two consecutive dialogs and
+            # confused which one was the offsets check). PreTrialValidationDialog
+            # already covers the warm-up case: if no live samples arrive during
+            # the 2s sampling window it reports "No live samples received --
+            # check sensors", which is the same signal SensorReadinessDialog
+            # provided. Keeping both was redundant.
+            def _abort_to_setup_imu():
+                """Restore every widget hidden by confirm_clicked and navigate
+                to the Setup IMU page (page_09) so the operator can immediately
+                press Calibrate Offsets / Calibrate Ankle without restarting
+                the app. Without this restore page_09 looked empty because
+                selection_btn_widget / stimulator_frame stay hidden."""
+                self.ui.load_pages.selection_btn_widget.setVisible(True)
+                self.ui.load_pages.stimulator_frame.setVisible(True)
+                self.ui.left_menu.top_frame.setVisible(True)
+                self.ui.load_pages.title_label.setText(self.title_label)
+                self.ui.left_menu.select_only_one("none")
+                MainFunctions.set_page(self, self.ui.load_pages.page_09)
 
-            # ── Pre-trial neutral-pose validation ───────────────────────────
-            # Catches between-trial drift when the operator reuses one
-            # calibration across multiple Start/Stop cycles. Cancels Start
-            # if the operator chooses Re-calibrate.
             try:
                 from gui.widgets.pre_trial_validation_dialog import PreTrialValidationDialog
                 cal = getattr(self, "angle_calibrator", None)
                 if cal is not None and cal.has_any_sensor():
                     val_dlg = PreTrialValidationDialog(cal, self.themes, parent=self)
                     if val_dlg.exec() != QDialog.DialogCode.Accepted:
-                        MainFunctions.set_page(self, self.ui.load_pages.page_11)
-                        self.ui.left_menu.top_frame.setVisible(True)
-                        self.ui.load_pages.title_label.setText(self.title_label)
+                        _abort_to_setup_imu()
                         return
+                    # Drain backlog so the test starts from a clean baseline.
+                    cal.flush_buffers()
+                    for _attr in ("page10_knee_plot", "page10_ankle_plot", "page10_hip_plot"):
+                        _w = getattr(self, _attr, None)
+                        if _w is not None:
+                            try: _w.reset_plot()
+                            except Exception: pass
             except Exception as _e:
                 print(f"[Pre-trial validation] skipped: {_e}")
 
