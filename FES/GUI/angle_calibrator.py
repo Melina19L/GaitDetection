@@ -93,6 +93,13 @@ class AngleCalibrator(QObject):
 
         self.left_ankle_hinge_axis = None
         self.right_ankle_hinge_axis = None
+
+        # One-shot fallback-warning set. When __compute_angles_from_data has to
+        # use cardinal 3D math for knee/hip/ankle because the SVD hinge refs
+        # were not set (or were rejected by the quality gate), it pushes a
+        # banner into diagnostic_signal exactly once per joint so the operator
+        # cannot miss it mid-trial. Cleared on calibrator reset (start_session).
+        self._fallback_warned: set[str] = set()
         
         # Raw data logging for debugging time-sync issues
         # Raw per-sample IMU log (timestamp + 10 sensor channels per inlet).
@@ -253,6 +260,10 @@ class AngleCalibrator(QObject):
 
         # 5. Mark a new session start for offline saving / plot pkl naming.
         self._session_start = time.time()
+
+        # 6. Re-arm the one-shot fallback warnings so each new trial reports
+        # again whether knee/hip/ankle SVD hinge is engaged or fallback is on.
+        self._fallback_warned.clear()
 
     def stop(self):
         """Stop the angle calibration and disconnect from all streams."""
@@ -432,6 +443,10 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(0.02)
             
+        # Same quality threshold the global 10 s calibration uses (S0/S1 ratio).
+        ANKLE_SVD_QUALITY_MIN = 2.0
+        ankle_failures: list[str] = []
+
         if self.left_checkbox.isChecked() and left_shank_qs and left_foot_qs:
             n_min = min(len(left_shank_qs), len(left_foot_qs))
             if n_min > 50:
@@ -439,13 +454,21 @@ class AngleCalibrator(QObject):
                 qf_arr = np.array([s[6:10] for s in left_foot_qs[:n_min]], dtype=np.float64)
                 qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
                 qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
-                
-                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
-                self.left_ankle_hinge_axis = hinge_axis
-                self.message_signal.emit(f"Left Ankle Functional Calib DONE.")
+
+                hinge_axis, q = identify_hinge_axis(qs_arr, qf_arr, return_quality=True)
+                if np.isfinite(q) and q < ANKLE_SVD_QUALITY_MIN:
+                    msg = (f"L_ankle: SVD FAIL ratio={q:.2f} (<{ANKLE_SVD_QUALITY_MIN}). "
+                           f"Hinge axis REJECTED -> ankle cardinal fallback active.")
+                    print(f"[AnkleCal] {msg}")
+                    ankle_failures.append(msg)
+                else:
+                    self.left_ankle_hinge_axis = hinge_axis
+                    qtag = "inf" if not np.isfinite(q) else f"{q:.2f}"
+                    print(f"[AnkleCal] L_ankle: SVD OK ratio={qtag}, axis={hinge_axis}")
+                    self.message_signal.emit(f"Left Ankle Functional Calib DONE (SVD ratio={qtag}).")
             else:
                 self.error_signal.emit("Not enough data collected for Left Ankle.")
-                
+
         if self.right_checkbox.isChecked() and right_shank_qs and right_foot_qs:
             n_min = min(len(right_shank_qs), len(right_foot_qs))
             if n_min > 50:
@@ -453,14 +476,31 @@ class AngleCalibrator(QObject):
                 qf_arr = np.array([s[6:10] for s in right_foot_qs[:n_min]], dtype=np.float64)
                 qs_arr = qs_arr / np.linalg.norm(qs_arr, axis=1, keepdims=True)
                 qf_arr = qf_arr / np.linalg.norm(qf_arr, axis=1, keepdims=True)
-                
-                hinge_axis = identify_hinge_axis(qs_arr, qf_arr)
-                if hinge_axis[1] < 0: # Ensure consistent Y direction for right leg
-                    hinge_axis *= -1
-                self.right_ankle_hinge_axis = hinge_axis
-                self.message_signal.emit(f"Right Ankle Functional Calib DONE.")
+
+                hinge_axis, q = identify_hinge_axis(qs_arr, qf_arr, return_quality=True)
+                if np.isfinite(q) and q < ANKLE_SVD_QUALITY_MIN:
+                    msg = (f"R_ankle: SVD FAIL ratio={q:.2f} (<{ANKLE_SVD_QUALITY_MIN}). "
+                           f"Hinge axis REJECTED -> ankle cardinal fallback active.")
+                    print(f"[AnkleCal] {msg}")
+                    ankle_failures.append(msg)
+                else:
+                    if hinge_axis[1] < 0:  # Ensure consistent Y direction for right leg
+                        hinge_axis *= -1
+                    self.right_ankle_hinge_axis = hinge_axis
+                    qtag = "inf" if not np.isfinite(q) else f"{q:.2f}"
+                    print(f"[AnkleCal] R_ankle: SVD OK ratio={qtag}, axis={hinge_axis}")
+                    self.message_signal.emit(f"Right Ankle Functional Calib DONE (SVD ratio={qtag}).")
             else:
                 self.error_signal.emit("Not enough data collected for Right Ankle.")
+
+        if ankle_failures:
+            self.error_signal.emit(
+                "Ankle SVD hinge calibration FAILED:\n  - "
+                + "\n  - ".join(ankle_failures)
+                + "\n\nThe ankle will use legacy cardinal math (noisier, "
+                  "drifts with yaw). Recalibrate with a fuller dorsi/plantar "
+                  "range of motion."
+            )
         
         # Flush angle/sample buffers so recording starts fresh (no flex/extend
         # motion in the saved data).
@@ -616,39 +656,101 @@ class AngleCalibrator(QObject):
         # ── Phase 2: 5 s stand-to-sit (hip + knee flexion) ──
         b2 = collect(5.0)
 
+        # SVD quality threshold: ratio of dominant to second singular value.
+        # >=2.0 -> motion well-concentrated on one axis (clean hinge). Below
+        # this we refuse the axis (operator gets a blocking warning so the
+        # session does not silently fall back to cardinal 3D math).
+        SVD_QUALITY_MIN = 2.0
+
         def hinge_pair(prox_samples, dist_samples, q_prox_ref, q_dist_ref):
             """SVD hinge + SIGN DISAMBIGUATION via motion direction.
-            The SVD axis is determined up to sign; we resolve it by checking
-            whether the END of the calibration motion (sit-down -> flexion)
-            yields a POSITIVE projected angle. If not, flip the axis so that
-            flexion is consistently positive (matches Vicon convention).
+            Returns ``(hinge_axis, quality, n_samples)`` or ``(None, 0.0, 0)``
+            when not enough samples / missing refs. Quality is the S0/S1
+            singular-value ratio (see ``identify_hinge_axis``).
             """
             n = min(len(prox_samples), len(dist_samples))
             if n <= 100 or q_prox_ref is None or q_dist_ref is None:
-                return None
+                return None, 0.0, n
             qp = np.array([s[6:10] for s in prox_samples[:n]], dtype=np.float64)
             qd = np.array([s[6:10] for s in dist_samples[:n]], dtype=np.float64)
             qp = qp / np.linalg.norm(qp, axis=1, keepdims=True)
             qd = qd / np.linalg.norm(qd, axis=1, keepdims=True)
-            h = identify_hinge_axis(qp, qd)
+            h, q = identify_hinge_axis(qp, qd, return_quality=True)
             # Sign disambiguation: stand->sit = flexion. End angle must be
             # GREATER than start angle. If not, flip hinge axis.
             a_start = extract_functional_angle(qp[0], qd[0], q_prox_ref, q_dist_ref, h)
             a_end   = extract_functional_angle(qp[-1], qd[-1], q_prox_ref, q_dist_ref, h)
             if a_end - a_start < 0:
                 h = -h
+            return h, q, n
+
+        # Per-joint quality gate. Collects PASS/FAIL log entries so the
+        # operator (and the offline analyst) can tell whether the SVD hinge
+        # math actually engaged or whether the joint silently fell back to
+        # cardinal 3D (the bug that hid behind walking 2-5).
+        failures: list[str] = []
+        passes:   list[str] = []
+
+        def _gate(label, result):
+            h, q, n = result
+            if h is None:
+                msg = f"{label}: SVD SKIPPED (n={n} samples, refs missing)"
+                print(f"[GlobalCal10s] {msg}")
+                failures.append(msg)
+                return None
+            if not np.isfinite(q):
+                tag = "OK (S1~0, pure 1-axis motion)"
+                print(f"[GlobalCal10s] {label}: SVD {tag}, axis={h}")
+                passes.append(f"{label}: ratio=inf")
+                return h
+            if q < SVD_QUALITY_MIN:
+                msg = (f"{label}: SVD FAIL ratio={q:.2f} (<{SVD_QUALITY_MIN}). "
+                       f"Hinge axis REJECTED -> cardinal 3D fallback active.")
+                print(f"[GlobalCal10s] {msg}")
+                failures.append(msg)
+                return None
+            print(f"[GlobalCal10s] {label}: SVD OK ratio={q:.2f}, axis={h}")
+            passes.append(f"{label}: ratio={q:.2f}")
             return h
 
         if self.left_checkbox.isChecked():
-            h_kn = hinge_pair(b2["L_thigh"], b2["L_shank"], qLT, qLS)
+            h_kn = _gate("L_knee", hinge_pair(b2["L_thigh"], b2["L_shank"], qLT, qLS))
             if h_kn is not None: self.left_knee_hinge_axis = h_kn
-            h_hp = hinge_pair(b2["pelvis"], b2["L_thigh"], qP, qLT)
+            h_hp = _gate("L_hip",  hinge_pair(b2["pelvis"],  b2["L_thigh"], qP,  qLT))
             if h_hp is not None: self.left_hip_hinge_axis = h_hp
         if self.right_checkbox.isChecked():
-            h_kn = hinge_pair(b2["R_thigh"], b2["R_shank"], qRT, qRS)
+            h_kn = _gate("R_knee", hinge_pair(b2["R_thigh"], b2["R_shank"], qRT, qRS))
             if h_kn is not None: self.right_knee_hinge_axis = h_kn
-            h_hp = hinge_pair(b2["pelvis"], b2["R_thigh"], qP, qRT)
+            h_hp = _gate("R_hip",  hinge_pair(b2["pelvis"],  b2["R_thigh"], qP,  qRT))
             if h_hp is not None: self.right_hip_hinge_axis = h_hp
+
+        # Surface the quality verdict so the operator cannot miss it.
+        if failures:
+            html_fail = "<br/>".join("&#9888; " + f for f in failures)
+            html_pass = "<br/>".join("&#10004; " + p for p in passes) if passes else ""
+            self.diagnostic_signal.emit(
+                '<p style="color:#e74c3c; font-weight:bold;">'
+                'SVD HINGE QUALITY FAIL &mdash; cardinal 3D fallback active for '
+                'the joints below. Re-run Global Calibration with a deeper, '
+                'slower sit-down (~5 s, full hip+knee flexion).<br/>'
+                + html_fail
+                + (("<br/>" + html_pass) if html_pass else "")
+                + '</p>'
+            )
+            self.error_signal.emit(
+                "SVD hinge calibration FAILED:\n  - "
+                + "\n  - ".join(failures)
+                + "\n\nThese joints will use cardinal 3D math (less accurate, "
+                  "drifts with magnetometer yaw). Recalibrate with a deeper "
+                  "sit-down motion."
+            )
+        else:
+            self.diagnostic_signal.emit(
+                '<p style="color:#2ecc71; font-weight:bold;">'
+                '&#10004; SVD hinge calibration OK for all joints<br/>'
+                + "<br/>".join("&#10004; " + p for p in passes)
+                + '</p>'
+            )
 
         # Flush buffers: drop the calibration motion (sit-down, neutral-pose
         # averaging) from the angle data arrays so the recording that follows
@@ -709,6 +811,8 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(0.02)
 
+        KNEE_SVD_QUALITY_MIN = 2.0
+
         def _save_hinge(side, thigh_qs, shank_qs):
             n = min(len(thigh_qs), len(shank_qs))
             if n <= 50:
@@ -718,11 +822,19 @@ class AngleCalibrator(QObject):
             qs = np.array([s[6:10] for s in shank_qs[:n]], dtype=np.float64)
             qt /= np.linalg.norm(qt, axis=1, keepdims=True)
             qs /= np.linalg.norm(qs, axis=1, keepdims=True)
-            h = identify_hinge_axis(qt, qs)
+            h, q = identify_hinge_axis(qt, qs, return_quality=True)
+            if np.isfinite(q) and q < KNEE_SVD_QUALITY_MIN:
+                msg = (f"{side.capitalize()} knee: SVD FAIL ratio={q:.2f} "
+                       f"(<{KNEE_SVD_QUALITY_MIN}). Hinge REJECTED -> cardinal fallback.")
+                print(f"[KneeCal] {msg}")
+                self.error_signal.emit(msg)
+                return
             if side == "right" and h[1] < 0:
                 h *= -1
             setattr(self, f"{side}_knee_hinge_axis", h)
-            self.message_signal.emit(f"{side.capitalize()} Knee Functional Calib DONE.")
+            qtag = "inf" if not np.isfinite(q) else f"{q:.2f}"
+            print(f"[KneeCal] {side.capitalize()} knee: SVD OK ratio={qtag}, axis={h}")
+            self.message_signal.emit(f"{side.capitalize()} Knee Functional Calib DONE (SVD ratio={qtag}).")
 
         if self.left_checkbox.isChecked() and left_thigh_qs and left_shank_qs:
             _save_hinge("left", left_thigh_qs, left_shank_qs)
@@ -778,6 +890,8 @@ class AngleCalibrator(QObject):
             QCoreApplication.processEvents()
             time.sleep(0.02)
 
+        HIP_SVD_QUALITY_MIN = 2.0
+
         def _save_hinge(side, thigh_qs):
             n = min(len(pelvis_qs), len(thigh_qs))
             if n <= 50:
@@ -787,11 +901,19 @@ class AngleCalibrator(QObject):
             qt = np.array([s[6:10] for s in thigh_qs[:n]], dtype=np.float64)
             qp /= np.linalg.norm(qp, axis=1, keepdims=True)
             qt /= np.linalg.norm(qt, axis=1, keepdims=True)
-            h = identify_hinge_axis(qp, qt)
+            h, q = identify_hinge_axis(qp, qt, return_quality=True)
+            if np.isfinite(q) and q < HIP_SVD_QUALITY_MIN:
+                msg = (f"{side.capitalize()} hip: SVD FAIL ratio={q:.2f} "
+                       f"(<{HIP_SVD_QUALITY_MIN}). Hinge REJECTED -> cardinal fallback.")
+                print(f"[HipCal] {msg}")
+                self.error_signal.emit(msg)
+                return
             if side == "right" and h[1] < 0:
                 h *= -1
             setattr(self, f"{side}_hip_hinge_axis", h)
-            self.message_signal.emit(f"{side.capitalize()} Hip Functional Calib DONE.")
+            qtag = "inf" if not np.isfinite(q) else f"{q:.2f}"
+            print(f"[HipCal] {side.capitalize()} hip: SVD OK ratio={qtag}, axis={h}")
+            self.message_signal.emit(f"{side.capitalize()} Hip Functional Calib DONE (SVD ratio={qtag}).")
 
         if self.left_checkbox.isChecked() and left_thigh_qs:
             _save_hinge("left", left_thigh_qs)
@@ -1264,6 +1386,22 @@ class AngleCalibrator(QObject):
             "right_ankle_hinge_axis": self.right_ankle_hinge_axis,
             "right_ankle_shank_axis": self.right_ankle_shank_axis,
             "right_ankle_foot_axis":  self.right_ankle_foot_axis,
+            # ── Knee functional calibration (SVD hinge + neutral-pose refs) ──
+            # None when global_calibration_10s wasn't run or SVD quality failed
+            # the gate -> offline analysis then knows runtime used cardinal 3D.
+            "left_knee_qthigh_ref":   getattr(self, 'left_knee_qthigh_ref',   None),
+            "left_knee_qshank_ref":   getattr(self, 'left_knee_qshank_ref',   None),
+            "left_knee_hinge_axis":   getattr(self, 'left_knee_hinge_axis',   None),
+            "right_knee_qthigh_ref":  getattr(self, 'right_knee_qthigh_ref',  None),
+            "right_knee_qshank_ref":  getattr(self, 'right_knee_qshank_ref',  None),
+            "right_knee_hinge_axis":  getattr(self, 'right_knee_hinge_axis',  None),
+            # ── Hip functional calibration (SVD hinge + neutral-pose refs) ───
+            "left_hip_qpelvis_ref":   getattr(self, 'left_hip_qpelvis_ref',   None),
+            "left_hip_qthigh_ref":    getattr(self, 'left_hip_qthigh_ref',    None),
+            "left_hip_hinge_axis":    getattr(self, 'left_hip_hinge_axis',    None),
+            "right_hip_qpelvis_ref":  getattr(self, 'right_hip_qpelvis_ref',  None),
+            "right_hip_qthigh_ref":   getattr(self, 'right_hip_qthigh_ref',   None),
+            "right_hip_hinge_axis":   getattr(self, 'right_hip_hinge_axis',   None),
             # ── Session metadata ─────────────────────────────────────────────
             "session_start_unix": start,
             "session_end_unix":   now,
@@ -1912,6 +2050,23 @@ class AngleCalibrator(QObject):
                     # available. This isolates pure dorsi/plantarflexion,
                     # filtering out knee flexion and yaw contamination.
                     # Falls back to legacy unsigned algorithm if refs are None.
+                    if (q_proximal_ref is None or q_distal_ref is None
+                            or hinge_axis is None):
+                        if "ankle" not in self._fallback_warned:
+                            self._fallback_warned.add("ankle")
+                            warn = ("[Compute] WARNING: ANKLE hinge calibration "
+                                    "MISSING -- using legacy unsigned ankle "
+                                    "algorithm (less accurate).")
+                            print(warn)
+                            try:
+                                self.diagnostic_signal.emit(
+                                    '<p style="color:#e74c3c; font-weight:bold;">'
+                                    '&#9888; ANKLE: SVD hinge missing &mdash; '
+                                    'legacy fallback active. Run Ankle Calibration.'
+                                    '</p>'
+                                )
+                            except Exception:
+                                pass
                     angle = ROM.calculate_ankle_angle(
                         q_prox, q_dist, angle_offset,
                         foot_axis=distal_axis, shank_axis=proximal_axis,
@@ -1925,18 +2080,39 @@ class AngleCalibrator(QObject):
                     angle = max(ANKLE_MIN, min(ANKLE_MAX, angle))
                 elif is_knee and q_proximal_ref is not None and q_distal_ref is not None and hinge_axis is not None:
                     # Sagittal hinge projection (mirror of ankle pipeline).
-                    # Estrae solo la flessione-estensione del ginocchio,
-                    # eliminando contaminazione da rotazione/adduzione
-                    # che angle_between_quaternions includerebbe.
+                    # Isolates flexion/extension, drops the rotation/adduction
+                    # contamination that angle_between_quaternions includes.
                     angle = ROM.calculate_knee_angle_functional(
                         q_prox, q_dist, q_proximal_ref, q_distal_ref, hinge_axis,
                     )
                 elif is_hip and q_proximal_ref is not None and q_distal_ref is not None and hinge_axis is not None:
-                    # Sagittal hinge projection per anca: estrae solo flex/ext.
+                    # Sagittal hinge projection for hip: isolates flex/ext.
                     angle = ROM.calculate_hip_angle_functional(
                         q_prox, q_dist, q_proximal_ref, q_distal_ref, hinge_axis,
                     )
                 else:
+                    # CARDINAL 3D FALLBACK -- this is the path that hid behind
+                    # the walking 2-5 bug. Warn once per joint type so the
+                    # operator knows the SVD hinge math is NOT engaged.
+                    if is_knee or is_hip:
+                        label = "knee" if is_knee else "hip"
+                        if label not in self._fallback_warned:
+                            self._fallback_warned.add(label)
+                            warn = (f"[Compute] WARNING: {label.upper()} hinge "
+                                    f"calibration MISSING/REJECTED -- using "
+                                    f"cardinal 3D fallback (less accurate, "
+                                    f"drifts with magnetometer yaw).")
+                            print(warn)
+                            try:
+                                self.diagnostic_signal.emit(
+                                    '<p style="color:#e74c3c; font-weight:bold;">'
+                                    f'&#9888; {label.upper()}: SVD hinge missing '
+                                    f'&mdash; cardinal 3D fallback active. Run '
+                                    f'Global Calibration with a deeper sit-down.'
+                                    '</p>'
+                                )
+                            except Exception:
+                                pass
                     angle = ROM.calculate_joint_angle(q_prox, q_dist, angle_offset)
                 angles.append(float(angle))
             except Exception:

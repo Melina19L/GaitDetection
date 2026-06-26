@@ -457,10 +457,16 @@ def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = Non
     return best_name
 
 
-def identify_hinge_axis(q_prox_array: np.ndarray, q_dist_array: np.ndarray) -> np.ndarray:
+def identify_hinge_axis(q_prox_array: np.ndarray, q_dist_array: np.ndarray,
+                        return_quality: bool = False):
     """
     Identifies the hinge axis for a joint given synchronized arrays of quaternions.
     Based on the SVD of the relative rotation vectors.
+
+    When ``return_quality=True`` returns ``(hinge_axis, quality)`` where quality
+    is the S0/S1 singular-value ratio: large ratio (>>1) means the motion was
+    well-confined to a single axis (clean hinge); a ratio near 1 means the
+    motion was multi-axial / noisy and the returned axis is unreliable.
     """
     def quat_mul(q1, q2):
         w1,x1,y1,z1 = q1; w2,x2,y2,z2 = q2
@@ -472,31 +478,41 @@ def identify_hinge_axis(q_prox_array: np.ndarray, q_dist_array: np.ndarray) -> n
         ])
     def quat_conj(q):
         return np.array([q[0], -q[1], -q[2], -q[3]])
-        
+
     diff_rotvecs = []
     q_rel_ref = quat_mul(quat_conj(q_prox_array[0]), q_dist_array[0])
-    
+
     for i in range(len(q_prox_array)):
         q_rel = quat_mul(quat_conj(q_prox_array[i]), q_dist_array[i])
         q_diff = quat_mul(quat_conj(q_rel_ref), q_rel)
         if q_diff[0] < 0:
             q_diff *= -1
-            
+
         norm_v = np.linalg.norm(q_diff[1:])
         if norm_v > 1e-8:
             angle_rad = 2 * np.arctan2(norm_v, q_diff[0])
             rotvec = (q_diff[1:] / norm_v) * angle_rad
             diff_rotvecs.append(rotvec)
-            
+
     diff_rotvecs = np.array(diff_rotvecs)
     if len(diff_rotvecs) == 0:
+        if return_quality:
+            return np.array([0, 1.0, 0]), 0.0
         return np.array([0, 1.0, 0])
-        
+
     magnitudes = np.linalg.norm(diff_rotvecs, axis=1, keepdims=True)
     weighted_rotvecs = diff_rotvecs * magnitudes
-    
+
     U, S, Vt = np.linalg.svd(weighted_rotvecs, full_matrices=False)
     hinge_axis = Vt[0]
+    if return_quality:
+        # Quality = ratio of dominant to second singular value.
+        # >>1 -> motion concentrated on one axis (good hinge).
+        # ~1  -> multi-axial / noisy / insufficient motion (bad hinge).
+        s0 = float(S[0]) if S.size >= 1 else 0.0
+        s1 = float(S[1]) if S.size >= 2 else 0.0
+        quality = (s0 / s1) if s1 > 1e-9 else float("inf")
+        return hinge_axis, quality
     return hinge_axis
 
 def extract_functional_angle(qs: np.ndarray, qf: np.ndarray, qs_ref: np.ndarray, qf_ref: np.ndarray, hinge_axis: np.ndarray) -> float:
