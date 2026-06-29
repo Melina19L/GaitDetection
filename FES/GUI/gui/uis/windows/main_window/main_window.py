@@ -571,10 +571,14 @@ class MainWindow(QMainWindow):
     # -------------------- POST-TEST PLOT SAVE --------------------
     @Slot(tuple)
     def _save_plot_pkl_after_test(self, _results=None):
-        """Dump the AngleCalibrator buffers next to the master .pkl.
-
-        Replaces the old ``Save Data...`` button on the Setup IMU dialog so
-        every test run produces ``<base>_plot.pkl`` automatically.
+        """Dump the AngleCalibrator buffers next to the master .pkl, and
+        write a companion ``<base>_plot.xlsx`` with the dense (60 Hz) joint
+        angles. The stim-side ``<base>.xlsx`` pulls angles from the ROM
+        objects which are only updated when the gait state machine needs
+        them -- hip gets refreshed rarely, so its column in the stim xlsx
+        is mostly empty. The plot xlsx fixes that by pulling from the
+        AngleCalibrator buffers, where every joint is sampled at 60 Hz on
+        a shared timer.
         """
         try:
             base_path = getattr(self, "_last_experiment_save_path", None)
@@ -584,14 +588,148 @@ class MainWindow(QMainWindow):
             import os
             base_dir = os.path.dirname(base_path)
             base_name = os.path.splitext(os.path.basename(base_path))[0]
-            plot_path = os.path.join(base_dir, f"{base_name}_plot.pkl")
+            plot_path  = os.path.join(base_dir, f"{base_name}_plot.pkl")
+            xlsx_path  = os.path.join(base_dir, f"{base_name}_plot.xlsx")
             ok = calibrator.save_data(plot_path)
             if ok:
                 print(f"Calibrator plot data saved to {plot_path}")
             else:
                 print("Calibrator plot data NOT saved (see previous errors).")
+
+            try:
+                self._export_plot_xlsx(plot_path, xlsx_path)
+                print(f"Dense joint-angle xlsx saved to {xlsx_path}")
+            except Exception as ee:
+                print(f"Failed to export plot xlsx: {ee}")
         except Exception as e:
             print(f"Failed to save calibrator plot pkl: {e}")
+
+    @staticmethod
+    def _export_plot_xlsx(plot_pkl_path: str, xlsx_path: str) -> None:
+        """Read the calibrator plot pkl and write a 60 Hz joint-angle xlsx.
+
+        Output sheets:
+          - ``Joint_Angles_Native``: each joint at its native sample rate,
+            with one timestamp column per joint (sparse columns padded with
+            blanks).
+          - ``Joint_Angles_Resampled``: every joint interpolated onto a
+            single 60 Hz grid spanning the trial window; one row per
+            timestamp; identical column lengths.
+          - ``Raw_<segment>``: raw quaternion + accel + gyro logs.
+          - ``Calibration``: offsets, SVD hinge axes, reference quaternions.
+        """
+        import pickle
+        import numpy as np
+        import pandas as pd
+
+        with open(plot_pkl_path, "rb") as f:
+            d = pickle.load(f)
+
+        sheets: dict[str, pd.DataFrame] = {}
+
+        # Native (per-joint) angle columns -- same shape as the historical
+        # stim xlsx but populated from dense AngleCalibrator buffers.
+        joint_keys = [
+            ("LeftHip",    "left_hip_angles",    "left_hip_timestamps"),
+            ("LeftKnee",   "left_knee_angles",   "left_knee_timestamps"),
+            ("LeftAnkle",  "left_ankle_angles",  "left_ankle_timestamps"),
+            ("RightHip",   "right_hip_angles",   "right_hip_timestamps"),
+            ("RightKnee",  "right_knee_angles",  "right_knee_timestamps"),
+            ("RightAnkle", "right_ankle_angles", "right_ankle_timestamps"),
+        ]
+        native_cols: dict[str, list] = {}
+        max_len = 0
+        for label, ang_k, ts_k in joint_keys:
+            ang = np.asarray(d.get(ang_k, np.array([])))
+            ts  = np.asarray(d.get(ts_k,  np.array([])))
+            n   = min(ang.size, ts.size)
+            native_cols[f"Timestamp_{label}"] = ts[:n].tolist()
+            native_cols[f"{label}"]           = ang[:n].tolist()
+            max_len = max(max_len, n)
+        if max_len > 0:
+            padded = {k: list(v) + [None] * (max_len - len(v))
+                      for k, v in native_cols.items()}
+            sheets["Joint_Angles_Native"] = pd.DataFrame(padded)
+
+        # Resampled (uniform 60 Hz) angle columns -- one row per tick, every
+        # joint interpolated to that tick. Solves the "hip column ends
+        # early" complaint by giving every joint identical length.
+        all_ts = []
+        for _, _, ts_k in joint_keys:
+            ts = np.asarray(d.get(ts_k, np.array([])))
+            if ts.size > 0:
+                all_ts.append(ts)
+        if all_ts:
+            t_lo = min(float(a.min()) for a in all_ts)
+            t_hi = max(float(a.max()) for a in all_ts)
+            grid = np.arange(t_lo, t_hi, 1.0 / 60.0)
+            resampled: dict[str, list] = {"Timestamp": grid.tolist()}
+            for label, ang_k, ts_k in joint_keys:
+                ang = np.asarray(d.get(ang_k, np.array([])))
+                ts  = np.asarray(d.get(ts_k,  np.array([])))
+                n   = min(ang.size, ts.size)
+                if n < 2 or (ts[:n].max() - ts[:n].min()) <= 0:
+                    resampled[label] = [None] * grid.size
+                    continue
+                # Mask grid points outside the joint's recorded window so we
+                # don't fabricate extrapolated angles.
+                in_window = (grid >= ts[:n].min()) & (grid <= ts[:n].max())
+                col = np.full(grid.size, np.nan)
+                col[in_window] = np.interp(grid[in_window], ts[:n], ang[:n])
+                resampled[label] = [None if np.isnan(v) else float(v) for v in col]
+            sheets["Joint_Angles_Resampled"] = pd.DataFrame(resampled)
+
+        # Raw per-segment IMU logs.
+        for seg in ("pelvis", "left_thigh", "left_shank", "left_foot",
+                    "right_thigh", "right_shank", "right_foot"):
+            q  = np.asarray(d.get(f"raw_{seg}_quat",       np.empty((0, 4))))
+            ts = np.asarray(d.get(f"raw_{seg}_timestamps", np.empty((0,))))
+            if q.size == 0 or ts.size == 0:
+                continue
+            n = min(q.shape[0], ts.size)
+            cols = {
+                "Timestamp": ts[:n].tolist(),
+                "QuatW": q[:n, 0].tolist(),
+                "QuatX": q[:n, 1].tolist(),
+                "QuatY": q[:n, 2].tolist(),
+                "QuatZ": q[:n, 3].tolist(),
+            }
+            sheets[f"Raw_{seg}"[:31]] = pd.DataFrame(cols)
+
+        # Calibration metadata so the offline analyst knows whether each
+        # joint actually used the SVD hinge path or fell back to cardinal.
+        calib_rows = []
+        for j in ("left_hip", "right_hip", "left_knee", "right_knee",
+                  "left_ankle", "right_ankle"):
+            off  = d.get(f"{j}_offset", None)
+            hinge = d.get(f"{j}_hinge_axis", None)
+            if "knee" in j:
+                ref_p = d.get(f"{j.split('_')[0]}_knee_qthigh_ref")
+                ref_d = d.get(f"{j.split('_')[0]}_knee_qshank_ref")
+            elif "hip" in j:
+                ref_p = d.get(f"{j.split('_')[0]}_hip_qpelvis_ref")
+                ref_d = d.get(f"{j.split('_')[0]}_hip_qthigh_ref")
+            else:  # ankle
+                ref_p = d.get(f"{j.split('_')[0]}_ankle_qshank_ref")
+                ref_d = d.get(f"{j.split('_')[0]}_ankle_qfoot_ref")
+            method = "SVD" if (ref_p is not None and ref_d is not None
+                               and hinge is not None) else "CARD"
+            calib_rows.append({
+                "joint": j,
+                "method": method,
+                "offset_deg": float(off) if off is not None else None,
+                "hinge_axis": (np.array(hinge).tolist()
+                               if hinge is not None else None),
+                "qref_proximal": (np.array(ref_p).tolist()
+                                  if ref_p is not None else None),
+                "qref_distal":   (np.array(ref_d).tolist()
+                                  if ref_d is not None else None),
+            })
+        sheets["Calibration"] = pd.DataFrame(calib_rows)
+
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            for name, df in sheets.items():
+                df.to_excel(writer, sheet_name=name[:31], index=False)
 
     # -------------------- EXPERIMENT RESULTS --------------------
     @Slot(tuple)
