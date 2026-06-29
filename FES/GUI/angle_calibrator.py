@@ -1463,15 +1463,96 @@ class AngleCalibrator(QObject):
         # Each entry is shape (N, 4) for the quaternion and (N,) for the
         # matching timestamps; empty arrays are written when an inlet
         # wasn't connected during the session.
+        # Also keep the raw gyro track per shank in a separate buffer so the
+        # walk-window detector below can use the cleanest motion signal
+        # (shank gyro magnitude spikes at heel-strike + toe-off).
+        shank_gyro_tracks: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for seg, rows in self._raw_log.items():
             if rows:
                 arr = np.asarray(rows, dtype=np.float64)
                 # cols: [lsl_ts, accX, accY, accZ, gyrX, gyrY, gyrZ, qW, qX, qY, qZ]
                 data[f"raw_{seg}_quat"]       = arr[:, 7:11].copy()
                 data[f"raw_{seg}_timestamps"] = arr[:, 0].copy()
+                if seg.endswith("_shank"):
+                    shank_gyro_tracks[seg] = (arr[:, 0].copy(),
+                                              np.linalg.norm(arr[:, 4:7], axis=1))
             else:
                 data[f"raw_{seg}_quat"]       = np.empty((0, 4), dtype=np.float64)
                 data[f"raw_{seg}_timestamps"] = np.empty((0,),    dtype=np.float64)
+
+        # ── Walk-window detection (motion-on / motion-off markers) ──────────
+        # The recording window between Start and Stop typically includes
+        # several seconds of pre-walk standing (operator says "Go" after a
+        # delay) and post-walk standing (operator takes time to press Stop).
+        # We do NOT trim those samples (per user choice: keep everything)
+        # but we mark when the actual walking began and ended so the offline
+        # analyst can filter to the walking-only window without manual
+        # inspection. Markers are in the same clock domain as raw_*_timestamps.
+        MOTION_THR_DPS = 30.0   # gyro magnitude threshold = clearly walking
+        MOTION_HOLD_S  = 0.4    # must stay above threshold this long to count
+        SMOOTH_S       = 0.2    # boxcar smoothing window
+
+        def _walk_window(side_seg: str):
+            """Find first/last time the side's shank moves above threshold.
+            Returns (walk_start_ts, walk_end_ts) or (None, None) if no motion.
+            """
+            track = shank_gyro_tracks.get(side_seg)
+            if track is None or track[0].size < 30:
+                return None, None
+            ts, gyro = track
+            # Convert rad/s -> deg/s (Movella DOT publishes gyro in rad/s)
+            rate_dps = np.degrees(gyro)
+            # Smoothing
+            dt = np.median(np.diff(ts))
+            if not np.isfinite(dt) or dt <= 0:
+                return None, None
+            fs = 1.0 / dt
+            win = max(3, int(round(SMOOTH_S * fs)))
+            if rate_dps.size > win:
+                kernel = np.ones(win) / win
+                rate_dps = np.convolve(rate_dps, kernel, mode="same")
+            moving = rate_dps > MOTION_THR_DPS
+            if not moving.any():
+                return None, None
+            hold_samples = max(1, int(round(MOTION_HOLD_S * fs)))
+            # First run of `hold_samples` consecutive moving samples.
+            start_idx = None
+            for i in range(moving.size - hold_samples):
+                if moving[i:i + hold_samples].all():
+                    start_idx = i; break
+            if start_idx is None:
+                return None, None
+            # Last sample above threshold (no hold requirement on end).
+            end_idx = int(np.argmax(moving[::-1] == False) == 0) or 0
+            end_idx = moving.size - 1 - int(np.argmax(moving[::-1]))
+            return float(ts[start_idx]), float(ts[end_idx])
+
+        for side_seg in ("right_shank", "left_shank"):
+            ws, we = _walk_window(side_seg)
+            side = side_seg.split("_", 1)[0]
+            data[f"walk_start_ts_{side}"] = ws
+            data[f"walk_end_ts_{side}"]   = we
+            if ws is not None and we is not None:
+                data[f"walk_duration_s_{side}"] = float(we - ws)
+            else:
+                data[f"walk_duration_s_{side}"] = None
+
+        # Global walk window = union across sides that detected motion.
+        starts = [data[f"walk_start_ts_{s}"] for s in ("right", "left")
+                  if data[f"walk_start_ts_{s}"] is not None]
+        ends   = [data[f"walk_end_ts_{s}"] for s in ("right", "left")
+                  if data[f"walk_end_ts_{s}"] is not None]
+        data["walk_start_ts"]    = float(min(starts)) if starts else None
+        data["walk_end_ts"]      = float(max(ends))   if ends   else None
+        data["walk_duration_s"]  = (data["walk_end_ts"] - data["walk_start_ts"]
+                                    if (starts and ends) else None)
+        # Detection params for reproducibility / offline re-detection.
+        data["walk_detect_params"] = {
+            "threshold_deg_per_s": MOTION_THR_DPS,
+            "hold_seconds":        MOTION_HOLD_S,
+            "smoothing_seconds":   SMOOTH_S,
+            "signal":              "shank_gyro_magnitude",
+        }
         try:
             with open(path, "wb") as f:
                 pickle.dump(data, f)

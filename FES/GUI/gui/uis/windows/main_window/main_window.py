@@ -677,6 +677,15 @@ class MainWindow(QMainWindow):
                 col = np.full(grid.size, np.nan)
                 col[in_window] = np.interp(grid[in_window], ts[:n], ang[:n])
                 resampled[label] = [None if np.isnan(v) else float(v) for v in col]
+            # ``is_walking`` flag = 1 inside the detected walk window (between
+            # shank-gyro motion-on and motion-off), 0 during pre-walk standing
+            # / post-walk standing. Lets the analyst filter the resampled rows
+            # to the walking-only window without touching the timestamps.
+            ws = d.get("walk_start_ts"); we = d.get("walk_end_ts")
+            if ws is not None and we is not None:
+                resampled["is_walking"] = ((grid >= ws) & (grid <= we)).astype(int).tolist()
+            else:
+                resampled["is_walking"] = [0] * grid.size
             sheets["Joint_Angles_Resampled"] = pd.DataFrame(resampled)
 
         # Raw per-segment IMU logs.
@@ -726,6 +735,30 @@ class MainWindow(QMainWindow):
                                   if ref_d is not None else None),
             })
         sheets["Calibration"] = pd.DataFrame(calib_rows)
+
+        # ``Walk_Window`` sheet: motion-on / motion-off markers detected by
+        # the AngleCalibrator (shank gyro magnitude > 30 deg/s, held 0.4 s).
+        # All recorded samples are still in the workbook -- this sheet just
+        # tells the analyst which time range was actual walking vs pre/post
+        # standing.
+        walk_rows = [{
+            "side":            "global",
+            "walk_start_ts":   d.get("walk_start_ts"),
+            "walk_end_ts":     d.get("walk_end_ts"),
+            "walk_duration_s": d.get("walk_duration_s"),
+        }]
+        for side in ("right", "left"):
+            walk_rows.append({
+                "side":            side,
+                "walk_start_ts":   d.get(f"walk_start_ts_{side}"),
+                "walk_end_ts":     d.get(f"walk_end_ts_{side}"),
+                "walk_duration_s": d.get(f"walk_duration_s_{side}"),
+            })
+        params = d.get("walk_detect_params") or {}
+        for k, v in params.items():
+            walk_rows.append({"side": f"param:{k}", "walk_start_ts": v,
+                              "walk_end_ts": None, "walk_duration_s": None})
+        sheets["Walk_Window"] = pd.DataFrame(walk_rows)
 
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             for name, df in sheets.items():
