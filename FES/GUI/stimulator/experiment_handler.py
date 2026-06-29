@@ -131,6 +131,19 @@ class ExperimentHandler(QObject):
 
     @Slot(dict)
     def start_experiment_safe(self, kwargs: dict):
+        # Fire the visual "recording" signal IMMEDIATELY so the operator
+        # gets instant feedback (red border + timer start on page 10) the
+        # moment Continue is pressed. Without this, the signal only fires
+        # after the heavy Stimulation* constructor returns (1-5 s: serial
+        # port handshake, LSL inlet resolution, ROM build, FSR controller
+        # attach) -- during which the operator stares at an unchanged GUI
+        # and waits, adding 1-5 s of standing-still samples to the trial.
+        # start_timer is idempotent so the duplicate emit later in
+        # start_experiment() is harmless.
+        try:
+            self.starting_experiment.emit()
+        except Exception:
+            pass
         try:
             self.start_experiment(kwargs)
         except Exception as e:
