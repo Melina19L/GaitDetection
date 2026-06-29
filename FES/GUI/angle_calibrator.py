@@ -644,6 +644,63 @@ class AngleCalibrator(QObject):
                 self.right_ankle_shank_axis = detect_most_vertical_axis(qRS)
                 self.right_ankle_foot_axis  = detect_most_horizontal_axis(qRF, qRS)
 
+        # ── Operator gate between Phase 1 and Phase 2 ────────────────────
+        # Without an explicit pause, the 5 s sit-down window starts the
+        # moment Phase 1 ends. Reaction time (subject hears "sit", processes,
+        # begins moving) eats the first ~1 s of Phase 2 -- the cleanest part
+        # of the sit-down motion is then truncated and SVD quality drops.
+        # Block here until the operator explicitly confirms the subject is
+        # ready to sit on cue. A short 3-s visible countdown follows, then
+        # the 5 s collect window starts with the subject already moving.
+        self.diagnostic_signal.emit(
+            '<p style="color:#e67e22; font-weight:bold;">'
+            '&#9989; Standing reference captured.<br/>'
+            'Subject stays standing &mdash; press OK when ready to sit down '
+            '(unhurried). A 3 s countdown will follow, then a 5 s sit-down '
+            'recording window.</p>'
+        )
+        QCoreApplication.processEvents()
+        parent_widget = self.parent() if hasattr(self, "parent") else None
+        try:
+            btn = QMessageBox.question(
+                parent_widget if isinstance(parent_widget, QWidget) else None,
+                "Sit-Down Calibration",
+                "Standing reference captured.\n\n"
+                "Subject MUST remain standing. Press OK when ready to begin "
+                "the sit-down motion.\n\n"
+                "After OK there is a 3 s countdown. Then the subject starts "
+                "the sit-down within a 5 s recording window for SVD hinge "
+                "identification on knee + hip.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Ok,
+            )
+        except Exception:
+            btn = QMessageBox.StandardButton.Ok
+        if btn != QMessageBox.StandardButton.Ok:
+            self.diagnostic_signal.emit(
+                '<p style="color:#888;">Sit-down phase cancelled. '
+                'Standing references kept (offsets + neutral quats). '
+                'Knee + hip will fall back to cardinal 3D unless you '
+                'run Knee / Hip Functional Calibration separately.</p>'
+            )
+            self.timer.start()
+            self.calibration_step = CalibrationStep.READY
+            self.__set_checkboxes_enabled(True)
+            return
+
+        # 3-second visible countdown so the subject sees the cue
+        for k in (3, 2, 1):
+            self.diagnostic_signal.emit(
+                f'<p style="color:#3498db; font-weight:bold; font-size:14pt;">'
+                f'Sit-down in {k}&hellip;</p>'
+            )
+            QCoreApplication.processEvents()
+            t_end = time.time() + 1.0
+            while time.time() < t_end:
+                # keep Qt event loop responsive during countdown
+                QCoreApplication.processEvents()
+                time.sleep(0.02)
+
         self.diagnostic_signal.emit(
             '<p style="color:#e67e22; font-weight:bold;">'
             '&#129496; SIT DOWN NOW (5 s, knee + hip flexion)&hellip;</p>'
