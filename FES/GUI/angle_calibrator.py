@@ -112,6 +112,9 @@ class AngleCalibrator(QObject):
             'right_thigh': [], 'right_shank': [], 'right_foot': [],
             'pelvis':      [],
         }
+        # Per-segment length of _raw_log at the current trial's start; set by
+        # flush_buffers so save_data's walk-window only scans this trial.
+        self._raw_log_trial_start: dict[str, int] = {}
 
         # Setup timer — 20 ms (50 Hz) so the buffer fills fast enough
         # for the 50 ms plot refresh to always have fresh data.
@@ -260,6 +263,15 @@ class AngleCalibrator(QObject):
 
         # 5. Mark a new session start for offline saving / plot pkl naming.
         self._session_start = time.time()
+
+        # 5b. Snapshot where each raw-log segment stands right now. _raw_log is
+        #     append-only from app start (kept whole for offline), so the
+        #     walk-window detector in save_data would otherwise pin walk_start
+        #     to the very first sample of the session on EVERY trial. Recording
+        #     the per-segment length here lets save_data scan only this trial's
+        #     samples for the motion-on marker.
+        self._raw_log_trial_start = {seg: len(rows)
+                                     for seg, rows in self._raw_log.items()}
 
         # 6. Re-arm the one-shot fallback warnings so each new trial reports
         # again whether knee/hip/ankle SVD hinge is engaged or fallback is on.
@@ -1531,8 +1543,12 @@ class AngleCalibrator(QObject):
                 data[f"raw_{seg}_quat"]       = arr[:, 7:11].copy()
                 data[f"raw_{seg}_timestamps"] = arr[:, 0].copy()
                 if seg.endswith("_shank"):
-                    shank_gyro_tracks[seg] = (arr[:, 0].copy(),
-                                              np.linalg.norm(arr[:, 4:7], axis=1))
+                    # Only scan THIS trial's samples for the walk-window, not
+                    # the full since-app-start history (see flush_buffers 5b).
+                    off = getattr(self, "_raw_log_trial_start", {}).get(seg, 0)
+                    off = min(off, arr.shape[0])
+                    shank_gyro_tracks[seg] = (arr[off:, 0].copy(),
+                                              np.linalg.norm(arr[off:, 4:7], axis=1))
             else:
                 data[f"raw_{seg}_quat"]       = np.empty((0, 4), dtype=np.float64)
                 data[f"raw_{seg}_timestamps"] = np.empty((0,),    dtype=np.float64)
