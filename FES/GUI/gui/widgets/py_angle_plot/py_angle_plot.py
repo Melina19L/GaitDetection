@@ -14,6 +14,12 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Live knee-angle plot widget (pyqtgraph) for the Test page.
+
+``PyAnglePlot`` polls the ``AngleCalibrator`` on a timer and draws a scrolling
+left/right knee-angle trace with optional target flexion/extension lines. Sister
+widgets ``PyAnklePlot`` / ``PyHipPlot`` mirror this for ankle and hip.
+"""
 # IMPORT QT CORE
 # ///////////////////////////////////////////////////////////////
 from qt_core import *
@@ -34,10 +40,16 @@ MAX_ANGLE = 100
 FLEXION_ANGLE = 60
 EXTENSION_ANGLE = 10
 
-
 # PY ANGLE PLOT
 # ///////////////////////////////////////////////////////////////
 class PyAnglePlot(pg.PlotWidget):
+    """Scrolling live knee-angle plot for left and right legs.
+
+    Reads the latest knee angles from the ``AngleCalibrator`` each
+    ``update_plot`` call, keeps a fixed-length rolling window, and draws both
+    legs with per-leg target flexion/extension lines. Supports per-leg scale
+    factor / inversion and an optional fixed physiological Y range.
+    """
     def __init__(
         self,
         calibrator: AngleCalibrator,
@@ -47,6 +59,7 @@ class PyAnglePlot(pg.PlotWidget):
         line_color_right="#ff5555",
         max_points=200,
         fix_y_range=False,
+        y_range=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -70,7 +83,12 @@ class PyAnglePlot(pg.PlotWidget):
         # SET STYLE
         # Fix ranges
         self.setXRange(0, self.max_points, padding=0)
-        if fix_y_range:
+        # A fixed physiological Y band keeps the axis from re-scaling every frame
+        # (autorange jitter reads as lag) and zooms the trace so single-degree
+        # changes are visible. y_range wins over the legacy fix_y_range flag.
+        if y_range is not None:
+            self.setYRange(y_range[0], y_range[1], padding=0)
+        elif fix_y_range:
             self.setYRange(-MAX_ANGLE, MAX_ANGLE, padding=0)
 
         # Set background color
@@ -138,14 +156,14 @@ class PyAnglePlot(pg.PlotWidget):
                 self.scale_factor_right = -scale_factor
             else:
                 self.scale_factor_right = scale_factor
-                
+
     def set_target_extension_angle(self, angle: float, left: bool):
         # Set the target extension angle for the specified knee
         if left:
             self.lower_line_left.setPos(angle)
         else:
             self.lower_line_right.setPos(angle)
-            
+
     def set_target_flexion_angle(self, angle: float, left: bool):
         # Set the target bend angle for the specified knee
         if left:

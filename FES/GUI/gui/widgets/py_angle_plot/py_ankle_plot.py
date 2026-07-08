@@ -6,6 +6,12 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Live ankle-angle plot widget (pyqtgraph) for the Test page.
+
+``PyAnklePlot`` mirrors ``PyAnglePlot`` for the ankle: it polls the
+``AngleCalibrator`` and draws a scrolling left/right ankle dorsi-/plantarflexion
+trace with optional target lines.
+"""
 # IMPORT QT CORE
 # ///////////////////////////////////////////////////////////////
 from qt_core import *
@@ -25,10 +31,15 @@ MAX_ANKLE_ANGLE = 60
 DORSIFLEXION_ANGLE = -10
 PLANTARFLEXION_ANGLE = 20
 
-
 # PY ANKLE PLOT
 # ///////////////////////////////////////////////////////////////
 class PyAnklePlot(pg.PlotWidget):
+    """Scrolling live ankle-angle plot for left and right legs.
+
+    Same design as ``PyAnglePlot`` but for ankle dorsi-/plantarflexion: rolling
+    window fed from the ``AngleCalibrator``, per-leg target lines, scale/invert
+    and optional fixed Y range.
+    """
     def __init__(
         self,
         calibrator: AngleCalibrator,
@@ -38,6 +49,7 @@ class PyAnklePlot(pg.PlotWidget):
         line_color_right="#bd93f9",
         max_points=200,
         fix_y_range=False,
+        y_range=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -61,7 +73,12 @@ class PyAnklePlot(pg.PlotWidget):
         # SET STYLE
         # Fix ranges
         self.setXRange(0, self.max_points, padding=0)
-        if fix_y_range:
+        # A fixed physiological Y band keeps the axis from re-scaling every frame
+        # (autorange jitter reads as lag) and zooms the trace so single-degree
+        # changes are visible. y_range wins over the legacy fix_y_range flag.
+        if y_range is not None:
+            self.setYRange(y_range[0], y_range[1], padding=0)
+        elif fix_y_range:
             self.setYRange(-MAX_ANKLE_ANGLE, MAX_ANKLE_ANGLE, padding=0)
 
         # Set background color
@@ -187,4 +204,3 @@ class PyAnklePlot(pg.PlotWidget):
                 self.setXRange(0, self.max_points, padding=0)
         except Exception as exc:
             print(f"[AnklePlot] update_plot error: {exc}")
-

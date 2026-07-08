@@ -6,12 +6,16 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Standalone pop-out window bundling the live knee/ankle/hip angle plots.
+
+``PlotDialog`` hosts ``PyAnglePlot`` / ``PyAnklePlot`` / ``PyHipPlot`` with a
+Reset button; opened from the IMU setup page's "Start Graph" action.
+"""
 from qt_core import *
 from gui.widgets.py_angle_plot.py_angle_plot import PyAnglePlot
 from gui.widgets.py_angle_plot.py_ankle_plot import PyAnklePlot
 from gui.widgets.py_angle_plot.py_hip_plot import PyHipPlot
 from angle_calibrator import AngleCalibrator
-
 
 class PlotDialog(QDialog):
     """Floating dialog that shows real-time knee and ankle angle plots."""

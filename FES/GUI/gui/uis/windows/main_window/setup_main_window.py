@@ -14,6 +14,15 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Builds all Page content and experiment-configuration logic.
+
+``SetupMainWindow`` constructs every page of the PyDracula stacked widget (home,
+subject, task + stim params, stim setup, confirmation, FSR setup, IMU setup +
+calibration, Test execution with embedded live plots, pre-test review) and holds
+the associated business logic. ``create_dict`` / ``confirm_clicked`` assemble the
+full kwargs dict handed to the ``ExperimentHandler`` to launch a run. Despite the
+size, most of this file is widget construction.
+"""
 # IMPORT PACKAGES AND MODULES
 # ///////////////////////////////////////////////////////////////
 from collections import defaultdict
@@ -73,7 +82,6 @@ from typing import TYPE_CHECKING, Optional
 from serial import Serial
 from gui.widgets.py_left_menu.py_left_menu_button import PyLeftMenuButton
 
-
 if TYPE_CHECKING:
     from .ui_main import UI_MainWindow
     from gui.core.functions import Functions
@@ -109,15 +117,19 @@ def _default_patients_phase1_dir() -> str:
         # Fallback near the app root if anything fails
         return os.path.join(os.path.abspath(os.getcwd()), "NeuroPulseAnalyzer_Dataset", "phase1")
 
-
 PATIENTS_BASE_DIR = _default_patients_phase1_dir()
 FILE_NAME_FORMAT = "Task-SubjID-Time"
-
-
 
 # PY WINDOW
 # ///////////////////////////////////////////////////////////////
 class SetupMainWindow:
+    """Constructs and wires every GUI page; mixed into ``MainWindow``.
+
+    Each ``setup_*`` / page-builder method creates one page's widgets and event
+    handlers; ``create_dict`` gathers the configured stim params, channels,
+    sensor selection and calibration references into the dict sent to start an
+    experiment.
+    """
     def __init__(self):
         super().__init__()
         # SETUP MAIN WINDOw
@@ -638,7 +650,7 @@ class SetupMainWindow:
         def stim_clicked():
             self.ui.left_menu.select_only_one("btn_stimulation")
             MainFunctions.set_page(self, self.ui.load_pages.page_05)
-        
+
         def new_stim_clicked():
             self.ui.left_menu.select_only_one("btn_stimulation_2")
             MainFunctions.set_page(self, self.ui.load_pages.page_06)
@@ -650,7 +662,7 @@ class SetupMainWindow:
         def imu_clicked():
             self.ui.left_menu.select_only_one("none")
             MainFunctions.set_page(self, self.ui.load_pages.page_09)
-        
+
         # Open directly the IMU GUI without going trough the page 9
         # def open_imu_gui():
         #     if self.process is not None:
@@ -693,21 +705,21 @@ class SetupMainWindow:
 
             # Load confirmation page (PAGE 6)
             MainFunctions.set_page(self, self.ui.load_pages.page_06)
-        
+
         def _build_user_gait_mapping():
             # Returns a dict: {Phase: [ [left_targets], [right_targets] ]}
             # Use self.page10_gait_model_map (target -> set of phases)
-            
+
             # ============ harded coded in gait_model_stimulation_functions the pre-set gait model that takes into account the targets for each phase for both FES and tSCS
-            
+
             # if self.fes_toggle.isChecked():
             #     # FES mapping: Only swing phase triggers stimulation
-                
+
             #         #BF: Biceps Femoris (hamstrings)
             #         #TA : Tibialis Anterior
             #         #GA: Gastrocnemius
-            #         #VM: Vastus Medialis  
-                    
+            #         #VM: Vastus Medialis
+
             #     fes_map = {
             #         Phase.MID_SWING: [["BF_left", "TA_left"], ["BF_right", "TA_right"]],
             #         Phase.STANCE: [[], []],  # No stimulation during stance
@@ -792,7 +804,6 @@ class SetupMainWindow:
                     self.dropbox_port.setEnabled(True)
                     _update_connection_status("Not Connected")
 
-
         def close_clicked():
             # Close the serial port if it is open
             if self.serial_port is not None:
@@ -809,7 +820,7 @@ class SetupMainWindow:
         self.safe_info_btn.clicked.connect(safe_clicked)
         self.stimulation_info_btn.clicked.connect(stim_clicked)
         self.setup_fsr_btn.clicked.connect(fsr_clicked)
-        #self.setup_imu_btn.clicked.connect(open_imu_gui) Dans version to take u straight to movella dots 
+        #self.setup_imu_btn.clicked.connect(open_imu_gui) Dans version to take u straight to movella dots
         self.setup_imu_btn.clicked.connect(imu_clicked)
         self.start_btn.clicked.connect(start_clicked)
 
@@ -847,7 +858,7 @@ class SetupMainWindow:
         self.connection_status_label.setStyleSheet("font-size: 15pt; font-weight:500;")
 
         # Use standard line edit style, but make it read-only and centered
-        
+
         # Read-only status field styled similar to PyDropbox
         self.connection_status_value = QLineEdit("Not Connected")
         self.connection_status_value.setReadOnly(True)
@@ -884,7 +895,6 @@ class SetupMainWindow:
             self.connection_status_value.setText(text)
             _set_connection_status_style(text.strip().lower() == "connected")
 
-        
         # Helper to update status text
         def _set_connection_status_style(connected: bool):
             bg = self.themes["app_color"]["dark_four"] if connected else self.themes["app_color"]["dark_one"]
@@ -902,9 +912,9 @@ class SetupMainWindow:
                 }}
             """)
 
-        # Initialize connection status 
+        # Initialize connection status
         _update_connection_status("Not Connected")
-        
+
         self.ui.load_pages.start_layout.addWidget(self.start_btn, 0, 0)
         self.ui.load_pages.start_layout.addWidget(self.subject_info_btn, 0, 1)
 
@@ -939,7 +949,7 @@ class SetupMainWindow:
                 print(f"Patient scan failed: {e}")
             # Unique + sorted
             return sorted(set(subjects)), mapping
-        
+
         # Compute next session_N directory under a patient folder
         def _next_session_dir(patient_folder: str) -> str:
             # If the folder doesn't exist yet, default to session_1 without scanning
@@ -954,7 +964,7 @@ class SetupMainWindow:
             except Exception as e:
                 print(f"Session scan failed: {e}")
             return os.path.join(patient_folder, f"session_{next_idx}")
-        
+
         # Compute the session dir for a given phase key without creating folders
         def _compute_session_dir_for_phase(phase_key: str) -> str:
             try:
@@ -1026,7 +1036,6 @@ class SetupMainWindow:
                 if key in info and info[key] is not None:
                     le.setText(str(info[key]))
 
-
             _set_line(self.lineEdit_first_name, "first name")
             _set_line(self.lineEdit_last_name, "last name")
             _set_line(self.lineEdit_age, "age")
@@ -1050,14 +1059,13 @@ class SetupMainWindow:
                 self.dropbox_affected_limb.setCurrentText(affected_limb)
             else:
                 self.dropbox_affected_limb.setCurrentIndex(-1)
-            
+
             # Prepare next session folder under the selected patient and set it as default save path
             self.selected_patient_folder = folder
             session_dir = _next_session_dir(folder)
             self.current_session_path = session_dir
             self.lineEdit_safe_path.setText(session_dir)
             self.lineEdit_safe_path.setToolTip(session_dir)
-
 
         # Use a runtime-configurable base directory (default = PATIENTS_BASE_DIR)
         self.patients_base_dir = PATIENTS_BASE_DIR
@@ -1106,7 +1114,7 @@ class SetupMainWindow:
         self.save_path_label = QLabel("Save To")
         self.save_path_label.setStyleSheet("font-size: 12pt;")
         self.save_path_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-      
+
         # Reuse same styling as Page 4, but create here so it's available app-wide
         self.lineEdit_safe_path = PyLineEdit(
             text="",
@@ -1162,7 +1170,7 @@ class SetupMainWindow:
 
         # Insert the selector above all frames (top of Page 2)
         self.ui.load_pages.page_2_layout.insertWidget(1, self.subject_selector_widget, 0, Qt.AlignmentFlag.AlignLeft)
-        
+
         ########## DEMOGRAPHICS FRAME
         # Create a bordered frame with a small top-left title
         self.demographics_frame = QFrame(self.ui.load_pages.page_02)
@@ -1201,7 +1209,6 @@ class SetupMainWindow:
             disable_color=self.themes["app_color"]["dark_four"],
         )
 
-        
         # Make size consistent with line edits
         self.dropbox_sex.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.dropbox_sex.setMinimumHeight(LINE_HEIGHT)
@@ -1225,7 +1232,6 @@ class SetupMainWindow:
         # Insert the frame near the top of page_02 (right after the page title)
         # Title label is index 0 in page_2_layout, so insert at 1
         self.ui.load_pages.page_2_layout.insertWidget(2, self.demographics_frame)
-
 
         ########## BIOMETRICS FRAME
         # Create a bordered frame with a small top-left title
@@ -1302,7 +1308,6 @@ class SetupMainWindow:
             context_color=self.themes["app_color"]["context_color"],
             disable_color=self.themes["app_color"]["dark_four"],
         )
-        
 
         # Make size consistent with line edits
         self.dropbox_injury.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -1335,8 +1340,6 @@ class SetupMainWindow:
         self.dropbox_affected_limb.setPlaceholderText("Affected limb")
         self.dropbox_affected_limb.setCurrentIndex(-1)
 
-       
-
         # Medical history grid: labels + fields (2 columns) with centered alignment and bigger font
         label_style = "font-size: 14pt;"  # match Page 2 labels
         self.lbl_injury_type = QLabel("Injury Type")
@@ -1358,7 +1361,6 @@ class SetupMainWindow:
                 self.ui.load_pages.page_2_layout.removeWidget(w)
                 w.setParent(None)
                 w.deleteLater()
-
 
         # LINE EDIT 1 - FIRST NAME
         self.lineEdit_first_name = SetupMainWindow.create_std_line_edit(self.themes, place_holder_text="First Name")
@@ -1501,28 +1503,27 @@ class SetupMainWindow:
                 data: dict = json.load(f)
                 task: dict[str, int] = data["tasks"].get(selected_action.text(), None)
                 # Populate the line edits with the data from the JSON file
-                
+
                 # For single stimulation type:
                 self.lineEdit_burst_frequency.setText(task.get("burst_frequency", ""))
                 self.lineEdit_burst_duration.setText(task.get("burst_duration", ""))
                 self.lineEdit_pulse_deadtime.setText(task.get("pulse_deadtime", ""))
                 self.lineEdit_interpulse_interval.setText(task.get("interpulse_interval", ""))
                 self.lineEdit_carrier_frequency.setText(task.get("carrier_frequency", ""))
-                
+
                 # For Hybrid stimulation type (tSCS + FES):
                 self.lineEdit_burst_frequency_tscs.setText(task.get("burst_frequency_tscs", ""))
                 self.lineEdit_burst_duration_tscs.setText(task.get("burst_duration_tscs", ""))
                 self.lineEdit_pulse_deadtime_tscs.setText(task.get("pulse_deadtime_tscs", ""))
                 self.lineEdit_interpulse_interval_tscs.setText(task.get("interpulse_interval_tscs", ""))
                 self.lineEdit_carrier_frequency_tscs.setText(task.get("carrier_frequency_tscs", ""))
-                
+
                 self.lineEdit_burst_frequency_fes.setText(task.get("burst_frequency_fes", ""))
                 self.lineEdit_burst_duration_fes.setText(task.get("burst_duration_fes", ""))
                 self.lineEdit_pulse_deadtime_fes.setText(task.get("pulse_deadtime_fes", ""))
                 self.lineEdit_interpulse_interval_fes.setText(task.get("interpulse_interval_fes", ""))
                 self.lineEdit_carrier_frequency_fes.setText(task.get("carrier_frequency_fes", ""))
-                
-                
+
                 # Reflect task name on Page 10
                 if hasattr(self, "lineEdit_selected_task_10"):
                     self.lineEdit_selected_task_10.setText(selected_action.text())
@@ -1566,7 +1567,7 @@ class SetupMainWindow:
                 except Exception:
                     pass
             update_target_list()
-        
+
         # Render ALL labels (L1.., M1, R1..) on Page 10 image for current arrangement
         def _page10_render_all_labels_for_arrangement():
             if not hasattr(self, "back_image_10"):
@@ -1606,7 +1607,6 @@ class SetupMainWindow:
                 except Exception:
                     is_fes_arrangement = "fes" in (arrangement or "").lower()
 
-                
                 if is_fes_arrangement:
                     # EDIT THIS ARRAY TO MATCH YOUR FES MUSCLE NAMES / DESIRED ORDER
                     labels = ["BF_L", "VM_L", "GA_L", "TA_L", "BF_R", "VM_R", "GA_R", "TA_R"]
@@ -1635,7 +1635,7 @@ class SetupMainWindow:
                 self.back_image_10.renderer().setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
             except Exception:
                 pass
-        
+
         # Tighten vertical spacing in the Gait Detection settings
         def _tighten_gait_spacing():
             # Main gait settings panel
@@ -1710,7 +1710,7 @@ class SetupMainWindow:
             QAction("FES - 8 Electrodes"),
             QAction("FES - No Stimulation"),
          #   QAction("FES - No Stimulation"), Add electrode placement for hybrid
-            
+
         ]
 
         # Create a "Study Phase" frame to the LEFT of gait settings
@@ -1755,7 +1755,7 @@ class SetupMainWindow:
             "phase_1": "No Stimulation - tSCS",   # Phase 1 -> task "No Stimulation"
             "phase_2_group_1": "Task 4 - Open Loop Singlesite",   # Phase 2 Group 1 -> "Task 4"
             "phase_2_group_2": "Task 6 - OL Single + Multisite",   # Phase 2 Group 2 -> "Task 6"
-            "FES": "CL FES",  
+            "FES": "CL FES",
             "SS_tSCS_FES" : "SS tSCS + FES",
         }
 
@@ -1828,9 +1828,8 @@ class SetupMainWindow:
         self.phase1_radio.toggled.connect(_on_study_phase_changed)
         self.phase2g1_radio.toggled.connect(_on_study_phase_changed)
         self.phase2g2_radio.toggled.connect(_on_study_phase_changed)
-        self.FES_radio.toggled.connect(_on_study_phase_changed) 
+        self.FES_radio.toggled.connect(_on_study_phase_changed)
         self.ss_tscs_fes_radio.toggled.connect(_on_study_phase_changed)
-        
 
         # DROP DOWN BUTTON 1 - TASK SELECTION
         self.dropdown_btn_task = SetupMainWindow.create_std_dropdown_btn(self.themes, self.task_actions, "Select Task")
@@ -1919,7 +1918,7 @@ class SetupMainWindow:
         self.phase_toggle = SetupMainWindow.create_std_small_toggle(self.themes, text="Use Phase Detection")
         self.closed_loop_toggle = SetupMainWindow.create_std_small_toggle(self.themes, text="Closed Loop")
         #self.closed_loop_toggle.setEnabled(False)
-        
+
         # NEW: Stimulation type header + tSCS / FES toggles row (placed below gait_toggle and above the method dropdown)
         self.stim_type_label = QLabel("Stimulation type:", self.ui.load_pages.gait_detection_frame)
         self.stim_type_label.setStyleSheet("font-size: 12pt; font-weight: 600;")
@@ -1951,9 +1950,9 @@ class SetupMainWindow:
         self._tscs_fes_layout.addWidget(self.fes_toggle)
         self._tscs_fes_layout.addStretch(1)
         self._tscs_fes_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        
+
         # ---------- stimulation mode maps and safe switch handlers ----------
-        
+
         self._tscs_target_map: dict[str, str] = {
             "Not to be used": None,
             "Left Leg": "full_leg_left",
@@ -1964,7 +1963,7 @@ class SetupMainWindow:
             "Right Distal": "distal_right",
             "Continuous": "continuous",
         }
-       
+
         self._fes_target_map: dict[str, str] = {
             "Not to be used": None,
             "Left Tibialis Anterior (TA)": "TA_left",
@@ -1977,11 +1976,11 @@ class SetupMainWindow:
             "Right Rectus Femoris (RF)" : "RF_right",
             "Left Hamstrings (HAM)": "BF_left",
             "Right Hamstrings (HAM)": "BF_right",
-            "Left Gluteus Maximus (GM)": "GM_left",  
+            "Left Gluteus Maximus (GM)": "GM_left",
             "Right Gluteus Maximus (GM)": "GM_right",
-            
+
         }
-        
+
         self._hybrid_target_map: dict[str, str] = {
             "Not to be used": None,
             "Left Leg": "full_leg_left",
@@ -2001,9 +2000,9 @@ class SetupMainWindow:
             "Right Rectus Femoris (RF)" : "RF_right",
             "Left Hamstrings (HAM)": "BF_left",
             "Right Hamstrings (HAM)": "BF_right",
-            "Left Gluteus Maximus (GM)": "GM_left",  
+            "Left Gluteus Maximus (GM)": "GM_left",
             "Right Gluteus Maximus (GM)": "GM_right",
-            
+
         }
 
         # single source-of-truth for mode
@@ -2080,7 +2079,6 @@ class SetupMainWindow:
 
         # ---------- end stimulation mode helpers ----------
 
-
         # DROP DOWN BUTTON 3 - Gait detection METHOD SELECTION
         #Actions for IMU methods
         self.method_actions = [
@@ -2098,7 +2096,6 @@ class SetupMainWindow:
                 self.dropdown_btn_method.setToolTip("Method based on gyro norm and thresholds.")
             else:
                 self.dropdown_btn_method.setToolTip("Use both methods for combined detection.")
-
 
         # Add tooltips for each method
         self.method_actions[0].setToolTip("Original method using find peaks function.")
@@ -2124,7 +2121,7 @@ class SetupMainWindow:
         self.lineEdit_walking_speed.setValidator(QRegularExpressionValidator(regex))
         self.lineEdit_walking_speed.setMaximumWidth(DROPDOWN_WIDTH)
         self.lineEdit_walking_speed.setText("0.4")
-        
+
         # --- Helpers to parse and normalize walking speed ---
         def _parse_decimal(txt: str) -> float | None:
             s = (txt or "").strip().replace(" ", "")
@@ -2199,7 +2196,6 @@ class SetupMainWindow:
         # then place the header at the very top so it appears above everything.
         self.ui.load_pages.gait_detection_layout.insertWidget(1, method_row)
 
-
         # Row 1: Walking speed label + line edit
         speed_row = QWidget(self.ui.load_pages.gait_detection_frame)
         speed_layout = QHBoxLayout(speed_row)
@@ -2217,7 +2213,6 @@ class SetupMainWindow:
         # Header first, then the two-toggle row directly under it.
         self.ui.load_pages.gait_detection_layout.insertWidget(0, self.stim_type_label)
         self.ui.load_pages.gait_detection_layout.insertWidget(1, self._tscs_fes_row)
-
 
         self.ui.load_pages.task_option_layout.insertWidget(0, self.gait_toggle)
         # Insert toggles relative to frames so order is:
@@ -2262,7 +2257,7 @@ class SetupMainWindow:
         self.fsr_method_actions[1].setToolTip("Detects mid-stance does not estimate pre-swing.")
         self.fsr_method_actions[0].setToolTip("Estimates mid-stance, and pre-swing phases.")
 
-        self.dropdown_btn_fsr_method = getattr(self, "dropdown_btn_fsr_method", 
+        self.dropdown_btn_fsr_method = getattr(self, "dropdown_btn_fsr_method",
                                                SetupMainWindow.create_std_dropdown_btn(self.themes, self.fsr_method_actions, "Main (ST, SW)"))
         self.dropdown_btn_fsr_method.setMinimumWidth(DROPDOWN_WIDTH)
         self.dropdown_btn_fsr_method.clicked.connect(self.dropdown_btn_fsr_method.showMenu)
@@ -2272,7 +2267,6 @@ class SetupMainWindow:
         l.insertWidget(phase_frame_idx + 1, fsr_method_row)
         # finally insert the phase toggle
         l.insertWidget(phase_frame_idx + 2, self.phase_toggle)
-
 
         # Enable/disable dropdown depending on the FSR toggle state
         try:
@@ -2292,7 +2286,7 @@ class SetupMainWindow:
                     if "Main (ST, SW)" in txt:
                         self.fsr_threshold_left_spin_box.setValue(5)
                         self.fsr_threshold_right_spin_box.setValue(5)
-                        
+
                         # remove restriction if switching back
                         self._restrict_gait_model = False
                         if hasattr(self, "dropdown_btn_gait_model") and hasattr(self, "gait_model_actions"):
@@ -2305,7 +2299,7 @@ class SetupMainWindow:
                         self.fsr_threshold_left_spin_box.setValue(20)
                         self.fsr_threshold_right_spin_box.setValue(20)
 
-                        #disable possibility to choose gait model with distal 
+                        #disable possibility to choose gait model with distal
                         # store flag in case Page 10 not yet created
                         self._restrict_gait_model = True
                         # if Page 10 widgets already exist, apply immediately
@@ -2579,8 +2573,6 @@ class SetupMainWindow:
         if hasattr(self.ui.load_pages, "page_04"):
             self.ui.load_pages.page_04.setVisible(False)
 
-
-
         # --------------------------------------------------------------------
         # PAGE 10 - New Stimulation page (title + Carrier Frequency selection)
         # --------------------------------------------------------------------
@@ -2636,7 +2628,6 @@ class SetupMainWindow:
         self.cf_group_10.addButton(self.cf_10khz_cb)
         self.cf_group_10.addButton(self.cf_other_cb)
 
-
         self.cf_row_10_layout.addWidget(self.cf_label_10)
         self.cf_row_10_layout.addWidget(self.cf_0khz_cb)
         self.cf_row_10_layout.addWidget(self.cf_5khz_cb)
@@ -2644,7 +2635,7 @@ class SetupMainWindow:
         self.cf_row_10_layout.addWidget(self.cf_other_cb)
         self.cf_row_10_layout.addWidget(self.cf_other_edit)
         self.cf_row_10_layout.addStretch(1)
-        
+
         # FES Frequency (Hz) - appears to the left of burst Width for FES-only / hybrid
         self.burst_freq_fes_label = QLabel("FES Frequency [Hz]:", self.cf_row_10)
         self.burst_freq_fes_label.setStyleSheet("font-size: 12pt;")
@@ -2658,7 +2649,6 @@ class SetupMainWindow:
         self.cf_row_10_layout.addWidget(self.burst_freq_fes_label)
         self.cf_row_10_layout.addWidget(self.lineEdit_burst_frequency_fes)
 
-        
         # FES Pulse Width (μs) - appears in place of Carrier for FES-only, and alongside Carrier for hybrid
         self.pulse_width_fes_label = QLabel("FES Pulse Width [\u03bcs]:", self.cf_row_10)
         self.pulse_width_fes_label.setStyleSheet("font-size: 12pt;")
@@ -2670,8 +2660,7 @@ class SetupMainWindow:
         self.lineEdit_pulse_width_fes.setVisible(False)
         self.cf_row_10_layout.addWidget(self.pulse_width_fes_label)
         self.cf_row_10_layout.addWidget(self.lineEdit_pulse_width_fes)
-        
-        
+
         # Show/Hide carrier / FES pulse-width depending on toggles
         def _update_carrier_and_pulse_width_visibility(_=None):
             try:
@@ -2694,7 +2683,7 @@ class SetupMainWindow:
                     self.pulse_width_fes_label.setVisible(True)
                     self.lineEdit_pulse_width_fes.setVisible(True)
                     self.burst_freq_fes_label.setVisible(True)
-                    self.lineEdit_burst_frequency_fes.setVisible(True)   
+                    self.lineEdit_burst_frequency_fes.setVisible(True)
                     # Hybrid: show both
                 else:
                     for w in (self.cf_label_10, self.cf_0khz_cb, self.cf_5khz_cb, self.cf_10khz_cb, self.cf_other_cb, self.cf_other_edit):
@@ -2719,57 +2708,55 @@ class SetupMainWindow:
             self.lineEdit_burst_frequency_fes.editingFinished.connect(calculate_stimulation_parameters)
         except Exception:
             pass
- 
-        #Function to get Burst duration from Pulse width 
+
+        #Function to get Burst duration from Pulse width
         def calculate_burst_duration_FES() -> float :
             tscs_on = bool(getattr(self, "tscs_toggle", None) and self.tscs_toggle.isChecked())
             fes_on = bool(getattr(self, "fes_toggle", None) and self.fes_toggle.isChecked())
-            
-            
+
             pw = float(self.lineEdit_pulse_width_fes.text()) if getattr(self, "lineEdit_pulse_width_fes", None) and self.lineEdit_pulse_width_fes.text().strip() else 0
 
             if fes_on and not tscs_on:
-                if pw == 0: 
+                if pw == 0:
                     bd = self.lineEdit_burst_duration.as_value()
                 else:
                     bd = 2*pw
-            
-            elif fes_on and tscs_on: 
-                if pw == 0: 
+
+            elif fes_on and tscs_on:
+                if pw == 0:
                     bd = self.lineEdit_burst_duration_fes.as_value()
                 else:
                     bd = 2*pw
-                    
-            else: 
+
+            else:
                 bd=0
-            
+
             return bd
-        
+
         #Function to get Burst frequency
         def return_frequency_FES() -> float :
             tscs_on = bool(getattr(self, "tscs_toggle", None) and self.tscs_toggle.isChecked())
             fes_on = bool(getattr(self, "fes_toggle", None) and self.fes_toggle.isChecked())
-            
-            
+
             freq = float(self.lineEdit_burst_frequency_fes.text()) if getattr(self, "lineEdit_burst_frequency_fes", None) and self.lineEdit_burst_frequency_fes.text().strip() else 0
 
             if fes_on and not tscs_on:
-                if freq == 0: 
+                if freq == 0:
                     freq_fes = self.lineEdit_burst_frequency.as_value()
                 else:
                     freq_fes = freq
-            
-            elif fes_on and tscs_on: 
-                if freq == 0: 
+
+            elif fes_on and tscs_on:
+                if freq == 0:
                     freq_fes = self.lineEdit_burst_frequency_fes.as_value()
                 else:
                     freq_fes = freq
-                    
-            else: 
+
+            else:
                 freq_fes=0
-            
+
             return freq_fes
-                    
+
         # -- New: Personalize channels toggle (Page 10) --
         self.page10_personalize_channels_cb = QCheckBox("Personalize channels", self.cf_row_10)
         self.page10_personalize_channels_cb.setToolTip("Enable manual mapping of hardware channels to each electrode row")
@@ -2783,7 +2770,7 @@ class SetupMainWindow:
         self.page10_audio_cues_cb = QCheckBox("Audio cues on gait events", self.cf_row_10)
         self.page10_audio_cues_cb.setToolTip("Emit an audible beep at each detected Heel-Strike and Toe-Off (both legs)")
         self.page10_audio_cues_cb.setMinimumHeight(28)
-        
+
         self.ui.load_pages.page_10_layout.addWidget(self.cf_row_10)
 
         # --- Page 10: Selected Task (read-only) + Electrode Image ---
@@ -2815,7 +2802,7 @@ class SetupMainWindow:
         # Show gait-model selector only when tSCS mode is active (tSCS-only)
         def _update_gait_model_visibility(_=None):
             try:
-                visible = bool(getattr(self, "tscs_toggle", None) and self.tscs_toggle.isChecked()) 
+                visible = bool(getattr(self, "tscs_toggle", None) and self.tscs_toggle.isChecked())
                 self.gait_model_label.setVisible(visible)
                 self.dropdown_btn_gait_model.setVisible(visible)
             except Exception:
@@ -2828,7 +2815,7 @@ class SetupMainWindow:
             self.fes_toggle.toggled.connect(_update_gait_model_visibility)
         except Exception:
             pass
-        
+
         # --- INSERT: Gait Model label + dropdown (left-most) ---
         self.gait_model_actions = [
             QAction("Gait Model with Distal"),
@@ -2875,7 +2862,6 @@ class SetupMainWindow:
         except Exception:
             pass
         self.page10_controls_row_layout.addStretch(1)
-        
 
         # --- PRE-SWING PERCENTAGE CONTROLS (right side) ---
         self.page10_pre_swing_label = QLabel("Pre-swing Percentage:")
@@ -2968,7 +2954,6 @@ class SetupMainWindow:
         self.page10_personalize_channels_cb.toggled.connect(_on_channels_personalize_toggled)
         self.page10_personalize_gait_cb.toggled.connect(_on_gait_personalize_toggled)
 
-
         # Insert just under the Selected Task (before the image+grids row)
         self.task_view_layout_10.addWidget(self.page10_controls_row, 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -2987,7 +2972,6 @@ class SetupMainWindow:
         # Styled header labels (bigger + bold)
         header_css = "font-size: 16pt;"
 
-
         self.page10_left_hdr_target = QLabel("Target")
         self.page10_left_hdr_target.setStyleSheet(header_css)
         self.page10_left_hdr_current_label = QLabel("Current [mA]")
@@ -3003,7 +2987,7 @@ class SetupMainWindow:
         hdr_left_layout.addWidget(self.page10_left_hdr_current_label)
         hdr_left_layout.addWidget(self.page10_left_hdr_max_label)
         self.page10_left_hdr_current = hdr_left_widget
-        
+
         self.page10_left_hdr_electrode = QLabel("Electrode")
         self.page10_left_hdr_electrode.setStyleSheet(header_css)
         # New header for Channel (hidden by default)
@@ -3023,7 +3007,6 @@ class SetupMainWindow:
 
         # Add left grid aligned to top so headers line up horizontally
         self.page10_center_row_layout.addWidget(self.page10_left_widget, 0, Qt.AlignmentFlag.AlignVCenter)
-
 
         # Electrode image (separate instance for Page 10)
         self.back_image_10 = QSvgWidget()
@@ -3054,7 +3037,7 @@ class SetupMainWindow:
         self.page10_right_hdr_current = hdr_right_widget
         self.page10_right_hdr_target = QLabel("Target")
         self.page10_right_hdr_target.setStyleSheet(header_css)
-        
+
         # New header for Channel (hidden by default)
         self.page10_right_hdr_channel = QLabel("Channel")
         self.page10_right_hdr_channel.setStyleSheet(header_css)
@@ -3071,7 +3054,6 @@ class SetupMainWindow:
         self.page10_right_grid.addWidget(self.page10_right_hdr_target,    0, 3, Qt.AlignmentFlag.AlignCenter)
         self.page10_right_grid.addWidget(self.page10_right_hdr_gait_phases, 0, 4, Qt.AlignmentFlag.AlignCenter)
 
-        
         # Add right grid aligned to top so headers line up horizontally
         self.page10_center_row_layout.addWidget(self.page10_right_widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -3116,8 +3098,8 @@ class SetupMainWindow:
             active = self._fes_target_map
         else:
             active = self._tscs_target_map
-        self.page10_target_key_map = dict(active)            
-        
+        self.page10_target_key_map = dict(active)
+
         # Keep a flat list of label strings for dynamic menus
         self.page10_target_labels: list[str] = list(self.page10_target_key_map.keys())
 
@@ -3168,7 +3150,7 @@ class SetupMainWindow:
                 return 7
             if arrangement == "Multisite - Eight Electrodes":
                 return 8
-            
+
             # Accept the FES placement label as an explicit 8-electrode option
             if arrangement == "FES - 8 Electrodes" or arrangement.strip().lower() == "fes - 8 electrodes":
                 return 8
@@ -3235,7 +3217,6 @@ class SetupMainWindow:
             # Ensure the menu opens on click
             btn.clicked.connect(btn.showMenu)
             return btn
-
 
         # def _make_current_cell(ch_idx: int) -> QWidget:
         #     # Create a current QLineEdit with persisted/default value
@@ -3383,7 +3364,7 @@ class SetupMainWindow:
                 pass
 
             return w
-        
+
         # Helper: clear grid rows below header
         def _clear_grid_rows(grid: QGridLayout):
             # Remove all items below header row (row 0) safely
@@ -3459,7 +3440,7 @@ class SetupMainWindow:
             # Apply default to ensure mapping is persisted on first build
             _apply_channel_selection(default_text)
             return btn
-        
+
         # Build rows around the image based on electrode count
         def _rebuild_page10_rows():
 
@@ -3471,7 +3452,7 @@ class SetupMainWindow:
                             self._page10_prev_target_text[r] = btn.text()
             except Exception:
                 pass
-            
+
             # Preserve previous selections (targets and channels) before clearing
             try:
                 self._page10_prev_target_text = {
@@ -3484,7 +3465,7 @@ class SetupMainWindow:
                 self._page10_prev_channel_text = {idx: btn.text() for idx, btn in self.page10_channel_sel.items() if btn}
             except Exception:
                 self._page10_prev_channel_text = {}
-            
+
              # Preserve previous current texts and update the persisted map
             try:
                 self._page10_prev_current_text = {
@@ -3704,7 +3685,7 @@ class SetupMainWindow:
                     gait_cell = _make_gait_cell(row)
                     if gait_cell is not None:
                         self.page10_right_grid.addWidget(gait_cell, i + 1, 4)
-            
+
             # After creating target cells, hook their menus so selecting a target refreshes gait cells
             def _hook_target_menu_for_row(row_idx: int):
                 btn = self.page10_target_sel.get(row_idx)
@@ -3770,7 +3751,6 @@ class SetupMainWindow:
         # Rebuild when toggling personalization
         self.page10_personalize_channels_cb.toggled.connect(lambda _: _rebuild_page10_rows())
 
-
         # Initial build
         QTimer.singleShot(0, _rebuild_page10_rows)
         # Also render labels once Page 10 is ready
@@ -3797,7 +3777,6 @@ class SetupMainWindow:
                 act.triggered.connect(lambda _: _page10_refresh_target_options())
                 # render labels of selected electrode on the back image
                 act.triggered.connect(lambda _: _page10_render_labels())
-
 
             # Keep previous selection if still allowed; otherwise default to "Not to be used"
             if prev in labels:
@@ -3835,7 +3814,7 @@ class SetupMainWindow:
                 # Allow current selection even if used (to keep it selectable for this channel)
                 available = ["Not to be used"] + [lbl for lbl in self.page10_target_labels if lbl not in used or lbl == current]
                 _set_actions_for_channel(ch, available)
-        
+
         # Render numeric labels on the Page 10 image for channels with selected targets
         def _page10_render_labels():
             if not hasattr(self, "back_image_10"):
@@ -3859,7 +3838,7 @@ class SetupMainWindow:
                 labels = ["L1", "L2", "L3", "R1", "R2", "R3"]
             elif n == 7:
                 labels = ["L1", "L2", "L3", "M1", "R1", "R2", "R3"]
-                
+
             elif n == 8:
                 # Default left-to-right ordering matching button indices 0..7
                 # Use FES-specific muscle names when either:
@@ -3874,14 +3853,13 @@ class SetupMainWindow:
                 except Exception:
                     is_fes_arrangement = "fes" in (arrangement or "").lower()
 
-               
                 if is_fes_arrangement:
                     # EDIT THIS ARRAY TO MATCH YOUR FES MUSCLE NAMES / DESIRED ORDER
                     labels = ["BF_L", "VM_L", "GA_L", "TA_L", "BF_R", "VM_R", "GA_R", "TA_R"]
-                    
+
                 else:
                     labels = ["L1", "L2", "L3", "L4", "R1", "R2", "R3", "R4"]
-                    
+
             else:
                 labels = []
 
@@ -3958,7 +3936,7 @@ class SetupMainWindow:
                     "BF_left": getattr(self, "dropdown_btn_target_7", None),
                     "BF_right": getattr(self, "dropdown_btn_target_8", None),
                 }
-            elif self.tscs_toggle.isChecked() and not self.fes_toggle.isChecked():   
+            elif self.tscs_toggle.isChecked() and not self.fes_toggle.isChecked():
                 page5_targets = {
                     "full_leg_left": getattr(self, "dropdown_btn_target_1", None),
                     "full_leg_right": getattr(self, "dropdown_btn_target_2", None),
@@ -3968,11 +3946,11 @@ class SetupMainWindow:
                     "distal_right": getattr(self, "dropdown_btn_target_6", None),
                     "continuous": getattr(self, "dropdown_btn_target_7", None),
                 }
-                
-            else: 
-                
+
+            else:
+
                 pass
-            
+
             # Invert label map: key -> label
             inv_label = {v: k for k, v in self.page10_target_key_map.items()}
             for key, btn in page5_targets.items():
@@ -4015,7 +3993,7 @@ class SetupMainWindow:
 
         # --- Page 10: Testing box (manual quick test on channel 0) ---
         # UI
-       
+
         self.page10_test_frame = QFrame(self.ui.load_pages.page_10)
         self.page10_test_frame.setObjectName("page10_test_frame")
         self.page10_test_frame.setStyleSheet(
@@ -4156,7 +4134,7 @@ class SetupMainWindow:
                 return float(txt)
             except Exception:
                 pass
-                
+
         # Show/hide duration input when Test Functional Stimulation is toggled.
         def _on_test_functional_toggled(checked: bool):
             try:
@@ -4187,7 +4165,7 @@ class SetupMainWindow:
                         pass
             except Exception:
                 pass
-            
+
         # Connect the checkbox to the handler and apply initial state
         try:
             self.test_functional_cb.toggled.connect(_on_test_functional_toggled)
@@ -4258,7 +4236,7 @@ class SetupMainWindow:
         # Timer to auto-stop phase/channel stimulation
         self._page10_test_auto_stop_timer = QTimer(self)
         self._page10_test_auto_stop_timer.setSingleShot(True)
-        
+
         # Track whether we've connected a slot to the timer so disconnect() is safe
         self._page10_test_auto_stop_timer_connected = False
 
@@ -4298,8 +4276,6 @@ class SetupMainWindow:
                 return int(txt.split(" ")[-1])
             except Exception:
                 return 0
-
-
 
         def _refresh_page10_test_channels():
             # Build channel list from the assigned/available channels on Page 5
@@ -4514,8 +4490,6 @@ class SetupMainWindow:
 
             tscs_params = None
             fes_params = None
-            
-            
 
             if tscs_on:
                 tscs_params = {
@@ -4607,7 +4581,7 @@ class SetupMainWindow:
                     params.channel_mode_by_channel[int(ch)] = params.channel_mode_by_target[target_for_ch]
                 except Exception:
                     pass
-                
+
             # Debug: print resolved mapping for quick-test channel
             try:
                 debug_mode = params.get_mode_for_channel(int(ch)) if hasattr(params, "get_mode_for_channel") else "unknown"
@@ -4631,7 +4605,7 @@ class SetupMainWindow:
                     return int(float(val))
                 except Exception:
                     return int(fallback)
-                    
+
         # Step 1: Only prime (no activation)
         def _prime_channel(port: Serial, ch: int, params: StimulatorParameters, mode: int = 0):
             from stimulator.ComPortFunc import SetSingleChanAllParam, SetSingleChanSingleParam
@@ -4643,7 +4617,7 @@ class SetupMainWindow:
             except Exception:
                 pass
             sleep(0.02)
-            
+
             # Debug: print derived params that will be sent to hardware
             try:
                 derived = params._get_derived_for_channel(ch)
@@ -4727,7 +4701,7 @@ class SetupMainWindow:
                 QMessageBox.warning(self, "Not Connected", "Please connect to the stimulator first on Page 3.")
                 return
             try:
-                params = _build_params_from_page10()                
+                params = _build_params_from_page10()
                 # Channel mode: single channel activation
                 ch = _current_test_channel()
                 _activate_channel(self.serial_port, ch, params)
@@ -4744,14 +4718,11 @@ class SetupMainWindow:
                     _connect_auto_stop(lambda ch=ch: StimulatorParameters.deactivate_output(self.serial_port, ch))
                     self._page10_test_auto_stop_timer.start(int(dur * 1000))
 
-
                 self.page10_test_start_btn.setEnabled(False)
                 self.page10_test_stop_btn.setEnabled(True)
             except Exception as e:
                 QMessageBox.critical(self, "Test Error", f"Failed to start test:\n{e}")
 
-
-                
         def _page10_test_stop():
             if not hasattr(self, "serial_port") or self.serial_port is None:
                 return
@@ -4763,7 +4734,7 @@ class SetupMainWindow:
                 pass
 
             # If phase mode, deactivate all mapped channels for selected phase
-            
+
             ch = _current_test_channel()
             try:
                 StimulatorParameters.deactivate_output(self.serial_port, ch)
@@ -4774,15 +4745,13 @@ class SetupMainWindow:
                 _disconnect_auto_stop()
                 self.page10_test_start_btn.setEnabled(True)
                 self.page10_test_stop_btn.setEnabled(False)
-                    
+
         try:
             self.page10_test_set_btn.clicked.connect(_page10_test_set)
             self.page10_test_start_btn.clicked.connect(_page10_test_start)
             self.page10_test_stop_btn.clicked.connect(_page10_test_stop)
         except Exception:
             pass
-
-
 
         # --- Move Start Experiment button from Page 1 to Page 10 ---
         # Detach from Page 1 if it was added there
@@ -4809,7 +4778,7 @@ class SetupMainWindow:
         self.page10_start_btn_layout = QHBoxLayout(self.page10_start_btn_widget)
         self.page10_start_btn_layout.setContentsMargins(0, 0, 0, 0)
         self.page10_start_btn_layout.setSpacing(0)
-        
+
         # Make the Start button expand horizontally to fill the left column
         self.start_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.page10_start_btn_layout.addWidget(self.start_btn, 1)
@@ -4845,7 +4814,7 @@ class SetupMainWindow:
         left_col_layout.setSpacing(8)
         left_col_layout.addWidget(self.page10_start_btn_widget)
         left_col_layout.addWidget(self.page10_stop_btn_widget)
-        
+
         # --- NEW: Page 10 Pause button widget (inserted between Start and Stop) ---
         self.page10_pause_btn_widget = QWidget(self.ui.load_pages.page_10)
         self.page10_pause_btn_widget.setObjectName("page10_pause_btn_widget")
@@ -4919,7 +4888,7 @@ class SetupMainWindow:
         self.page10_step_left_value.setReadOnly(True)
         self.page10_step_left_value.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.page10_step_left_value.setMinimumHeight(LINE_HEIGHT)
-        
+
         # Active Phase title and per-leg read-only fields (below step counters)
         lbl_active = QLabel("Active Phase")
         lbl_active.setStyleSheet("font-size: 12pt; font-weight: 600;")
@@ -4959,14 +4928,13 @@ class SetupMainWindow:
         # Cells row (same line for both)
         step_grid.addWidget(self.page10_step_right_value, 2, 1)
         step_grid.addWidget(self.page10_step_left_value, 2, 0)
-        
+
         # Active phase rows
         step_grid.addWidget(lbl_active, 3, 0, 1, 2, Qt.AlignmentFlag.AlignHCenter)
         step_grid.addWidget(lbl_active_right, 4, 1)
         step_grid.addWidget(lbl_active_left, 4, 0)
         step_grid.addWidget(self.page10_phase_right_value, 5, 1)
         step_grid.addWidget(self.page10_phase_left_value, 5, 0)
-
 
         # TIMER GROUP (label over spacer over cell) so the cell aligns with the step cells row
         lbl_timer = QLabel("Timer")
@@ -5063,8 +5031,8 @@ class SetupMainWindow:
             # Uses the hidden field from Task Information page
             if tscs_on and not fes_on:
                self.lineEdit_carrier_frequency.setText(str(freq_hz))
-            else: 
-               self.lineEdit_carrier_frequency_tscs.setText(str(freq_hz)) 
+            else:
+               self.lineEdit_carrier_frequency_tscs.setText(str(freq_hz))
             calculate_stimulation_parameters()
 
         self.cf_0khz_cb.toggled.connect(lambda checked: _on_carrier_selected(0) if checked else None)
@@ -5132,29 +5100,6 @@ class SetupMainWindow:
                     _sync_carrier_checkboxes()
                 except Exception:
                     pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
         # PAGE 5 - STIMULATION SETUP
         # ///////////////////////////////////////////////////////////////
@@ -5398,11 +5343,10 @@ class SetupMainWindow:
         # DROP DOWN BUTTON 15
         self.dropdown_btn_target_7 = SetupMainWindow.create_std_dropdown_btn(self.themes, [], "Not to be used")
         self.dropdown_btn_target_7.setMinimumHeight(LINE_HEIGHT)
-        
+
         # DROP DOWN BUTTON 16
         self.dropdown_btn_target_8 = SetupMainWindow.create_std_dropdown_btn(self.themes, [], "Not to be used")
         self.dropdown_btn_target_8.setMinimumHeight(LINE_HEIGHT)
-
 
         # PUSH BUTTON 1
         self.finish_btn_4 = SetupMainWindow.create_std_push_btn(self.themes, text="Finish")
@@ -5876,7 +5820,7 @@ class SetupMainWindow:
                 import re
                 final_path = self.lineEdit_save_info_confirm.text().strip()
                 parent_dir = os.path.dirname(final_path)
-                
+
                 patient_name = self.lineEdit_subject_id.text().strip()
                 if patient_name:
                     safe_patient_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', patient_name)
@@ -5893,7 +5837,7 @@ class SetupMainWindow:
                 self._last_experiment_save_path = final_path
             except Exception as e:
                 print(f"Failed to prepare/save session directory: {e}")
-            
+
             # Reset timer display only; start happens via MainWindow.start_timer
             try:
                 self.ui.load_pages.time_label.setText("00:00:00")
@@ -6072,7 +6016,7 @@ class SetupMainWindow:
             value_range=(0, 500),
             value=20,
         )
-        
+
         self.fsr_threshold_right_spin_box = PySpinBox(
             text_color=self.themes["app_color"]["text_foreground"],
             bg_color=self.themes["app_color"]["dark_one"],
@@ -6162,7 +6106,6 @@ class SetupMainWindow:
 
         # Finish button
         self.ui.load_pages.finish_btn_layout_3.addWidget(self.finish_btn_6)
-
 
         # Change frame color
         self.ui.load_pages.fsr_frame.setStyleSheet(self.frame_stylesheet)
@@ -6526,7 +6469,8 @@ class SetupMainWindow:
             background_color=self.themes["app_color"]["dark_three"],
             line_color_left=self.themes["app_color"]["yellow"],
             line_color_right=self.themes["app_color"]["red"],
-            max_points=1000,
+            max_points=120,
+            y_range=(-20, 90),
         )
         _knee_legend, self.page10_knee_lvalue, self.page10_knee_rvalue = _legend_row(
             "Left Knee", self.themes["app_color"]["yellow"],
@@ -6541,7 +6485,8 @@ class SetupMainWindow:
             background_color=self.themes["app_color"]["dark_three"],
             line_color_left="#50fa7b",
             line_color_right="#bd93f9",
-            max_points=1000,
+            max_points=120,
+            y_range=(-50, 50),
         )
         _ankle_legend, self.page10_ankle_lvalue, self.page10_ankle_rvalue = _legend_row(
             "Left Ankle", "#50fa7b", "Right Ankle", "#bd93f9",
@@ -6555,7 +6500,8 @@ class SetupMainWindow:
             background_color=self.themes["app_color"]["dark_three"],
             line_color_left="#8be9fd",
             line_color_right="#ffb86c",
-            max_points=1000,
+            max_points=120,
+            y_range=(-40, 60),
         )
         _hip_legend, self.page10_hip_lvalue, self.page10_hip_rvalue = _legend_row(
             "Left Hip", "#8be9fd", "Right Hip", "#ffb86c",
@@ -6583,11 +6529,11 @@ class SetupMainWindow:
             except Exception:
                 pass
 
-        # Drive the embedded plots with a dedicated 20 Hz timer.
+        # Drive the embedded plots with a dedicated 30 Hz timer.
         # Always running: when no IMU data flows the plots stay flat, which is
         # the right idle behaviour for a monitoring page.
         self.page10_plot_timer = QTimer(self)
-        self.page10_plot_timer.setInterval(50)
+        self.page10_plot_timer.setInterval(33)
         self.page10_plot_timer.timeout.connect(self.page10_knee_plot.update_plot)
         self.page10_plot_timer.timeout.connect(self.page10_ankle_plot.update_plot)
         self.page10_plot_timer.timeout.connect(self.page10_hip_plot.update_plot)
@@ -7025,7 +6971,6 @@ class SetupMainWindow:
         hg.addWidget(self.hip_flexion_left_spin_box,   5, 1, 1, 1)
         hg.addWidget(self.hip_flexion_right_spin_box,  5, 2, 1, 1)
 
-
         # ── Finish ──
         self.ui.load_pages.finish_btn_layout_6.addWidget(self.finish_btn_7)
 
@@ -7300,11 +7245,11 @@ class SetupMainWindow:
             svg_name = "electrode_arrangement_eight.svg"
         elif arrangement == "Combination - Seven Electrodes":
             svg_name = "electrode_arrangement_seven.svg"
-            
+
         # Accept the FES label as alias for the 8-electrode arrangement
         elif arrangement == "FES - 8 Electrodes" or arrangement.strip().lower() == "fes - 8 electrodes":
-            svg_name = "FES_arrangment_8_electodes.svg" 
-            
+            svg_name = "FES_arrangment_8_electodes.svg"
+
         elif arrangement == "FES - No Stimulation":
             svg_name = "FES_arrangment_no_electodes.svg"
 
@@ -7317,7 +7262,7 @@ class SetupMainWindow:
             task_definitions: dict = json.load(file)
 
         #enabled_buttons: list[int] = task_definitions[arrangement]["buttons"]
-        
+
         # Resolve buttons entry defensively: prefer exact key, then try common fallbacks
         enabled_buttons: list[int] = []
         try:
@@ -7358,20 +7303,19 @@ class SetupMainWindow:
             svg_name = "electrode_arrangement_eight.svg"
         elif arrangement == "Combination - Seven Electrodes":
             svg_name = "electrode_arrangement_seven.svg"
-        
+
         elif arrangement == "FES - 8 Electrodes" or arrangement.strip().lower() == "fes - 8 electrodes":
-            svg_name = "electrode_arrangement_eight.svg" 
-            
+            svg_name = "electrode_arrangement_eight.svg"
+
         elif arrangement == "FES - No Stimulation":
             svg_name = "FES_arrangment_no_electodes.svg"
-        
+
         # Override modified_image.svg with task image
         change_number_to(Functions.set_svg_image(svg_name), 0, 0)
 
         # Load the new image and set aspect ratio
         back_image.load(Functions.set_svg_image("modified_image.svg"))
         back_image.renderer().setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-
 
     @staticmethod
     def update_confirm_page(
@@ -7403,13 +7347,12 @@ class SetupMainWindow:
         # If nothing found, return empty list (caller already guards against length==0)
         return []
 
-
     @staticmethod
     def create_dict(
         main_window: QMainWindow,
         parameters: StimulatorParameters,
     ) -> dict:
-        
+
         # # Get the targets (Page 5 default)
         # # Helper to safely parse an int channel index from a dropdown widget's text
         # import re
@@ -7499,7 +7442,7 @@ class SetupMainWindow:
         currents: dict[str, int] = {}
         max_currents: dict[str, int] = {}
         not_in_use: list = []
-        
+
         # Prefer Page 10 target->channel overrides
         page10_override: dict[str, int] = {}
         if hasattr(main_window, "page10_target_sel"):
@@ -7567,7 +7510,6 @@ class SetupMainWindow:
                 if not ch_text:
                     ch_text = page10_ch_curr.get(ch_idx, "").strip()
 
-
                 # 2) Confirmation page (if available)
                 if not ch_text:
                     try:
@@ -7615,7 +7557,7 @@ class SetupMainWindow:
         print(" UG: about to set stim currents", {"channels": channels, "currents": currents, "max_currents": max_currents})
         parameters.set_stim_currents(currents)                 # uses target keys
         parameters.set_max_currents(max_currents)
-        
+
         parameters.set_targets(channels)
 
         # Ensure stim_param knows per-channel modes inferred from targets (do this after set_targets)
@@ -7627,7 +7569,7 @@ class SetupMainWindow:
             print(
                 "DEBUG: create_dict: inferred channel modes:",
                 {ch: parameters.get_mode_for_channel(ch) for ch in parameters.channel_to_target.keys()},
-            )        
+            )
         print(f"Channels: {channels}")
         print(f"Currents: {currents}")
 
@@ -7668,16 +7610,14 @@ class SetupMainWindow:
         except AttributeError:
             scale_left, scale_right = 1.0, 1.0
 
-    
-
         # Decide whether to run continuous stimulation
         try:
             # Heuristic: if the "continuous" target is selected, prefer continuous mode
-            do_continuous = ("continuous" in channels) 
-            
+            do_continuous = ("continuous" in channels)
+
         except Exception:
             do_continuous = ("continuous" in channels)
-            
+
         # map new imu methods names to previous names:
         imu_mapping = {
             "Main (norm)":"Method 2 - IMU",
@@ -7697,9 +7637,7 @@ class SetupMainWindow:
             method_fsr = fsr_mapping[main_window.dropdown_btn_fsr_method.text()]
         else:
             method_fsr = main_window.dropdown_btn_fsr_method.text()
-            
-        
-        
+
         # --- read FES-step UI values safely ---
         try:
             stimulate_fes_step = bool(getattr(main_window, "stimulate_fes_step_cb", None) and main_window.stimulate_fes_step_cb.isChecked())
@@ -7729,7 +7667,7 @@ class SetupMainWindow:
             fes_side = getattr(main_window, "page10_fes_side_dd", None) and main_window.page10_fes_side_dd.text().strip() or "Both"
         except Exception:
             fes_side = "Both"
-            
+
         # --- New: Pre-swing percentage mapping to terminal stance divider (15% -> 4, 10% -> 6) ---
         try:
             if getattr(main_window, "page10_pre_swing_15_toggle", None) and main_window.page10_pre_swing_15_toggle.isChecked():
@@ -7798,18 +7736,16 @@ class SetupMainWindow:
 
             "method_imu": method_imu,
             "method_fsr": method_fsr,
-            
+
             "personalized_gait_model" : main_window.page10_personalize_gait_cb.isChecked(),
             "gait_model" : main_window.dropdown_btn_gait_model.text(),
             "terminal_stance_divider": terminal_stance_divider,
 
-            
             # --- FES-step UI values ---
             "stimulate_fes_step": stimulate_fes_step,  # bool
             "fes_speed": float(fes_speed),             # float (km/h)
             "fes_steps": int(fes_steps),               # int (number of steps)
             "fes_side": str(fes_side),                 # "Left"|"Right"|"Both"
         }
-            
-        
+
         return dict_to_send

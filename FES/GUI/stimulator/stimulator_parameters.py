@@ -1,3 +1,10 @@
+"""Stimulator channel configuration and high-level parameter translation.
+
+``StimulatorParameters`` holds the 8-channel setup (per-channel tSCS/FES mode,
+currents + max + PI offset, burst/carrier/pulse parameters, ``MAX_CURRENT``)
+and translates these high-level parameters into the low-level ``ComPortFunc``
+serial calls that program the device.
+"""
 import numpy as np
 import logging
 from serial import Serial
@@ -25,7 +32,6 @@ MAX_CURRENT = 110 # [mA], maximum current that can be set for a channel, this is
 # So that defaultdict can create a new array everytime a new key is used
 def empty_array():
     return np.array([])
-
 
 class StimulatorParameters:
     """A class to store the parameters of the waveform used for stimulation"""
@@ -77,13 +83,13 @@ class StimulatorParameters:
         self.initial_current = np.uint32(initial_current)
         # Max currents for each channel, initialized to the same values as stim_currents
         self.max_stim_currents: dict = {i: stim_currents[i] for i in stim_currents.keys()}
-        
+
         # Targets
         # To get the the amplitude of the current having the channel value as key (0,1,2,...,7 and not distal_left, proximal_right, etc.)
         # Will be set using a function after initialization
         self.channel_to_target: dict = {}
         self.target_to_channel: dict = {} # The inverse of targets
-        
+
         # PI controller offset for each channel, initialized to 0
         self.pi_current_offset: dict = {i: 0.0 for i in stim_currents.keys()}
 
@@ -94,7 +100,6 @@ class StimulatorParameters:
         self.stim_values_right: dict = {i: defaultdict(empty_array) for i in range(NB_CHANNELS)}
         # Timestamps of the deactivation of stimulation for the right leg
         self.timestamps_de_stim_right: dict = {i: defaultdict(empty_array) for i in range(NB_CHANNELS)}
-        
 
         # Timestamps of the stimulation for the left leg
         self.timestamps_stim_left: dict = {i: defaultdict(empty_array) for i in range(NB_CHANNELS)}
@@ -102,7 +107,7 @@ class StimulatorParameters:
         self.stim_values_left: dict = {i: defaultdict(empty_array) for i in range(NB_CHANNELS)}
         # Timestamps of the deactivation of stimulation for the left leg
         self.timestamps_de_stim_left: dict = {i: defaultdict(empty_array) for i in range(NB_CHANNELS)}
-        
+
         # Helper: compute derived values for a given param dict
         def _compute_derived(params):
             out = {}
@@ -132,9 +137,8 @@ class StimulatorParameters:
                 out["pulses_per_burst"] = np.uint32(1)
             # keep raw values
             out.update({"burst_frequency": bf, "burst_duration": bd, "interpulse_interval": ipi, "pulse_deadtime": pd, "carrier_frequency": cf})
-            
+
             return out
-        
 
         # Compute derived values per-mode when provided
         if self.tscs_params is not None:
@@ -146,7 +150,7 @@ class StimulatorParameters:
             self.fes_derived = _compute_derived(self.fes_params)
         else:
             self.fes_derived = None
-            
+
         # Backwards-compatible single-mode attributes: compute only when no per-mode dicts provided
         if self.tscs_params is None and self.fes_params is None:
             # original single-mode behavior (kept as before)
@@ -176,7 +180,7 @@ class StimulatorParameters:
             self.carrier_period = np.nan
             self.ideal_pulse_width = np.uint32(0)
             self.pulses_per_burst = np.uint32(1) # For FES: the "Burst" should gointain 1 biphasic pulse
-            
+
         # Per-channel / per-target mode mapping: values: "tSCS" or "FES"
         self.channel_mode_by_channel: dict[int, str] = {}
         self.channel_mode_by_target: dict[str, str] = {}
@@ -193,7 +197,7 @@ class StimulatorParameters:
             self.channel_mode_by_target[channel_or_target] = mode
             return
         raise TypeError("channel_or_target must be int (channel) or str (target)")
-    
+
     def infer_channel_modes_from_targets(self, fes_target_names: set | None = None) -> dict:
         """
         Infer per-channel / per-target mode ("FES" | "tSCS") from self.target_to_channel.
@@ -276,7 +280,6 @@ class StimulatorParameters:
             return {}
     # ---------------------- end mode helpers ----------------------
 
-
     def __str__(self):
         # Show per-mode config presence concisely
         modes = []
@@ -337,7 +340,7 @@ class StimulatorParameters:
                 "stim_currents",
                 "burst_period",
                 "min_total_deadtime",
-                #"carrier_period", allow NaN for FES 
+                #"carrier_period", allow NaN for FES
                 "ideal_pulse_width",
                 "pulses_per_burst",
              ]
@@ -370,7 +373,7 @@ class StimulatorParameters:
 
         self.stim_currents = stim_currents
         self.pi_current_offset = {i: 0.0 for i in self.stim_currents.keys()}  # Reset the PI controller offset for each channel
-        
+
     def set_max_currents(self, max_currents: dict) -> None:
         """Set the maximum stimulation currents for each channel. Resets the pi_current_offset for each channel to 0.
 
@@ -384,7 +387,7 @@ class StimulatorParameters:
         for key in max_currents.keys():
             if key not in self.stim_currents:
                 raise ValueError(f"Key '{key}' in max_currents not found in stim_currents: {self.stim_currents.keys()}")
-        
+
         self.max_stim_currents = max_currents
         self.pi_current_offset = {i: 0.0 for i in self.stim_currents.keys()}  # Reset the PI controller offset for each channel
 
@@ -397,7 +400,7 @@ class StimulatorParameters:
         # Add the pairs {channel: target} (e.g., {0: 'proximal_left'}) to the targets dictionary if the target is in the stim_currents dictionary
         self.channel_to_target = {channels[target]: target for target in self.stim_currents.keys()}
         self.target_to_channel = channels  # Inverse mapping for convenience
-        
+
     def get_channel_of_target(self, target: str) -> int:
         """Get the channel number of a target muscle group.
 
@@ -473,7 +476,7 @@ class StimulatorParameters:
         target_channel = self.get_channel_of_target(target)
         assert self.stim_currents[target] + self.pi_current_offset[target] <= self.max_stim_currents[target], f"Current exceeds maximum limit: {self.stim_currents[target] + self.pi_current_offset[target]} mA > {MAX_CURRENT} mA"
         SetSingleChanSingleParam(stimulator_connection, target_channel, CURRENT_AMPLITUDE_ID, self.stim_currents[target] + self.pi_current_offset[target])
-        
+
     def set_ramp_current_of_channel_from_target(self, stimulator_connection: Serial, target: str, ramp_multi: float) -> None:
         """Set the ramp current of a channel. The current is stored in this class and consists of a base current defined at the start and an offset modified by the PI controller.
 
@@ -516,8 +519,7 @@ class StimulatorParameters:
         """
         self.timestamps_stim_left[channel][stim_type.name] = np.append(self.timestamps_stim_left[channel][stim_type.name], timestamp)
         self.stim_values_left[channel][stim_type.name] = np.append(self.stim_values_left[channel][stim_type.name], self.stim_currents[target] + self.pi_current_offset[target])
-        
-    
+
     def append_de_stim_right(self, channel: int, target:str, stim_type: Phase, timestamp: float) -> None:
         """Append a deactivation of stimulation per phase to the right stimulation recording.
 
@@ -545,8 +547,7 @@ class StimulatorParameters:
         :type timestamp: float
         """
         self.timestamps_de_stim_left[channel][stim_type.name] = np.append(self.timestamps_de_stim_left[channel][stim_type.name], timestamp)
-        
-        
+
     def update_pi_current_offset(self, target: str, offset: float) -> None:
         """Update the PI controller offset for a specific target. This is used to adjust the current applied to the channel based on the PI controller output.
 
@@ -558,15 +559,14 @@ class StimulatorParameters:
         """
         if target not in self.stim_currents:
             raise ValueError(f"Target '{target}' not found in stim_currents. Available targets: {list(self.stim_currents.keys())}")
-        
+
         # Ensure the offset does not exceed the maximum current limits
         if self.stim_currents[target] + offset < 0:
             offset = -self.stim_currents[target]  # Prevent negative current
         elif self.stim_currents[target] + offset > self.max_stim_currents[target]:
             offset = self.max_stim_currents[target] - self.stim_currents[target]
-            
+
         self.pi_current_offset[target] = offset
-        
 
     @staticmethod
     def close_all_channels(stimulator_connection: Serial, channels=[0, 1, 2, 3, 4, 5, 6, 7]) -> None:

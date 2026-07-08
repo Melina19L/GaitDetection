@@ -1,3 +1,13 @@
+"""Live joint-angle engine feeding the GUI plots and calibration.
+
+``AngleCalibrator`` resolves the per-side LSL IMU streams (via a
+``LSLStreamResolver`` worker thread), time-matches paired quaternion snapshots
+on a 20 ms timer, and computes knee/ankle/hip angles through ``ROM`` /
+``closed_loop``. It also runs the calibration routines: neutral-pose offset
+(standing) and the ankle functional calibration (5 s flex -> ``identify_hinge_axis``),
+storing the resulting references/axes for both live use and export. The
+computed angles feed the Test-page live plots and the ``_plot`` pickle/xlsx.
+"""
 from collections import deque
 from pylsl import StreamInlet, resolve_byprop
 from qt_core import *
@@ -15,21 +25,27 @@ from typing import Optional
 TIMEOUT = 3.0  # seconds
 MAX_BUFFER = 5000  # max samples kept in memory per channel (≈50 s at 100 Hz)
 
-
 class CalibrationStep(Enum):
+    """Stage of the calibration state machine."""
     READY = 0
     NEUTRAL_POSE = 1
     COLLECT_DATA = 2
     ANKLE_CALIBRATION = 3
 
-
 class SIDE(Enum):
+    """Which leg a stream/computation refers to."""
     LEFT = 0
     RIGHT = 1
     NONE = 2
 
-
 class AngleCalibrator(QObject):
+    """Live joint-angle engine + calibration for one experiment session.
+
+    Owns the per-side IMU inlets, the 20 ms ``record_data`` timer that computes
+    knee/ankle/hip angles from time-matched quaternions, the calibration
+    routines (neutral offset + ankle hinge) and the buffers exported to the
+    ``_plot`` pickle/xlsx. Emits status/error/data signals to the GUI.
+    """
     message_signal = Signal(str)
     error_signal = Signal(str)
     # Carries HTML-formatted diagnostic lines for display in the status box
@@ -100,7 +116,7 @@ class AngleCalibrator(QObject):
         # banner into diagnostic_signal exactly once per joint so the operator
         # cannot miss it mid-trial. Cleared on calibrator reset (start_session).
         self._fallback_warned: set[str] = set()
-        
+
         # Raw data logging for debugging time-sync issues
         # Raw per-sample IMU log (timestamp + 10 sensor channels per inlet).
         # Used to dump quaternions + accel + gyro post-test so the offline
@@ -142,12 +158,12 @@ class AngleCalibrator(QObject):
             "l_hip_thigh": deque(maxlen=_BUF),
             "r_hip_pelvis": deque(maxlen=_BUF),
             "r_hip_thigh": deque(maxlen=_BUF),
-            
+
             "l_knee_thigh": deque(maxlen=_BUF),
             "l_knee_shank": deque(maxlen=_BUF),
             "r_knee_thigh": deque(maxlen=_BUF),
             "r_knee_shank": deque(maxlen=_BUF),
-            
+
             "l_ankle_shank": deque(maxlen=_BUF),
             "l_ankle_foot": deque(maxlen=_BUF),
             "r_ankle_shank": deque(maxlen=_BUF),
@@ -291,7 +307,7 @@ class AngleCalibrator(QObject):
             # If a worker thread is running, stop it
             self.worker_thread.wait()
             self.worker_thread.deleteLater()
-            
+
         self.save_raw_data()
         self.message_signal.emit("Angle calibration stopped (knee + ankle + hip).")
 
@@ -412,49 +428,49 @@ class AngleCalibrator(QObject):
 
         self.__set_checkboxes_enabled(False)
         self.calibration_step = CalibrationStep.ANKLE_CALIBRATION
-        
+
         self.diagnostic_signal.emit(
             '<p style="color:#3498db; font-weight:bold;">'
             '&#128095; Ankle Functional Calibration&hellip;<br/>'
             'Please repeatedly flex and extend your ankle (dorsiflexion/plantarflexion) for 5 seconds.</p>'
         )
         QCoreApplication.processEvents()
-        
+
         self.timer.stop()
-        
+
         for _name, inlet, _key in self._connected_inlets():
             try:
                 inlet.flush()
             except Exception:
                 pass
-                
+
         import time
         from stimulator.closed_loop import detect_most_vertical_axis, detect_most_horizontal_axis
-        
+
         duration = 5.0
         start_t = time.time()
-        
+
         left_shank_qs = []
         left_foot_qs = []
         right_shank_qs = []
         right_foot_qs = []
-        
+
         while time.time() - start_t < duration:
             if self.left_checkbox.isChecked() and self.left_shank_inlet and self.left_foot_inlet:
                 qs_chunk, _ = self.left_shank_inlet.pull_chunk(timeout=0.0)
                 qf_chunk, _ = self.left_foot_inlet.pull_chunk(timeout=0.0)
                 if qs_chunk: left_shank_qs.extend(qs_chunk)
                 if qf_chunk: left_foot_qs.extend(qf_chunk)
-                
+
             if self.right_checkbox.isChecked() and self.right_shank_inlet and self.right_foot_inlet:
                 qs_chunk, _ = self.right_shank_inlet.pull_chunk(timeout=0.0)
                 qf_chunk, _ = self.right_foot_inlet.pull_chunk(timeout=0.0)
                 if qs_chunk: right_shank_qs.extend(qs_chunk)
                 if qf_chunk: right_foot_qs.extend(qf_chunk)
-                
+
             QCoreApplication.processEvents()
             time.sleep(0.02)
-            
+
         # Same quality threshold the global 10 s calibration uses (S0/S1 ratio).
         ANKLE_SVD_QUALITY_MIN = 2.0
         ankle_failures: list[str] = []
@@ -513,7 +529,7 @@ class AngleCalibrator(QObject):
                   "drifts with yaw). Recalibrate with a fuller dorsi/plantar "
                   "range of motion."
             )
-        
+
         # Flush angle/sample buffers so recording starts fresh (no flex/extend
         # motion in the saved data).
         self.flush_buffers()
@@ -526,7 +542,6 @@ class AngleCalibrator(QObject):
             '<p style="color:#2ecc71; font-weight:bold;">'
             '&#10004; Ankle Functional Calibration Complete.</p>'
         )
-
 
     def global_calibration_10s(self):
         """COMBINED 10 s calibration replacing the old 1 s neutral-pose offset
@@ -1427,7 +1442,6 @@ class AngleCalibrator(QObject):
             self.right_hip_data       = self.right_hip_data[-MAX_BUFFER:]
             self.right_hip_timestamps = self.right_hip_timestamps[-MAX_BUFFER:]
 
-
     def save_data(self, path: str) -> bool:
         """Save all angle data and metadata to a .pkl file.
 
@@ -1634,7 +1648,6 @@ class AngleCalibrator(QObject):
             print(f"[AngleCalibrator] save_data failed: {e}")
             return False
 
-
     @Slot(tuple)
     def handle_found_inlets(self, inlets: tuple):
         """Handle the found inlets from the stream resolver.
@@ -1711,7 +1724,6 @@ class AngleCalibrator(QObject):
 
         self.resolving = SIDE.NONE
 
-
     ################################
     """ PRIVATE METHODS """
     ################################
@@ -1748,7 +1760,7 @@ class AngleCalibrator(QObject):
         # # Else ask the user to stand in neutral position and press "Calibrate Offset" once ready
         # self.message_signal.emit("Please stand in a neutral position and press 'Calibrate Offset' when ready.")
         # self.calibration_step = CalibrationStep.NEUTRAL_POSE
-        
+
         if self.left_checkbox.isChecked() and (self.left_shank_inlet is None or self.left_thigh_inlet is None):
             self.message_signal.emit("Connecting to left leg streams...")
             self.__connect_to_streams_for_left()
@@ -1760,7 +1772,6 @@ class AngleCalibrator(QObject):
         # Don't block — let handle_found_inlets start the timer when ready
         self.message_signal.emit("Please stand in a neutral position and press 'Calibrate Offset' when ready.")
         self.calibration_step = CalibrationStep.NEUTRAL_POSE
-
 
     # def __functional_calibration(self):
     #     if self.left_checkbox.isChecked():
@@ -1975,8 +1986,6 @@ class AngleCalibrator(QObject):
                 )
             self.axis_diagnostic_signal.emit(combined)
 
-
-
     def __set_checkboxes_enabled(self, enabled: bool):
         """Enable or disable the checkboxes."""
         self.left_checkbox.setEnabled(enabled)
@@ -1990,7 +1999,7 @@ class AngleCalibrator(QObject):
         inlet.flush()
         sample, _ = inlet.pull_sample(timeout=TIMEOUT)
         return np.array(sample[6:10]) if sample else None
-    
+
     def __get_latest_quaternion_nonblocking(self, inlet: StreamInlet, max_wait=2.0, poll_interval=0.05):
         """Try to read one quaternion sample with short polling intervals (non-blocking to GUI).
         Returns None if no data after max_wait seconds."""
@@ -2089,7 +2098,6 @@ class AngleCalibrator(QObject):
         if norm < 1e-9:
             return None
         return avg / norm
-
 
     def __connect_to_streams_for_left(self):
         # Create a worker thread to resolve the streams
@@ -2230,7 +2238,7 @@ class AngleCalibrator(QObject):
             return np.array([])
 
         n_pairs = min(len(samples_proximal), len(samples_distal))
-        
+
         if ts_proximal and ts_distal:
             ts_prox_arr = np.array(ts_proximal[:n_pairs], dtype=np.float64)
             ts_dist_arr = np.array(ts_distal[:n_pairs],   dtype=np.float64)
@@ -2320,10 +2328,6 @@ class AngleCalibrator(QObject):
                 pass  # skip numerically degenerate quaternions
 
         return np.array(angles) if angles else np.array([])
-
-
-
-
 
     @Slot()
     def _run_diagnostics(self):
@@ -2435,7 +2439,6 @@ class AngleCalibrator(QObject):
         """Stop the diagnostic loop."""
         self._diag_timer.stop()
 
-
 class LSLStreamResolver(QObject):
 
     """A class to resolve LSL streams for angle calibration in a separate thread."""
@@ -2508,8 +2511,8 @@ class LSLStreamResolver(QObject):
             self.message_signal.emit("Right leg streams found. Connecting...")
 
         self.found_inlets.emit((shank_inlet, thigh_inlet, foot_inlet, pelvis_inlet))
-            
-    @Slot()            
+
+    @Slot()
     def move_to_main(self):
         """Move the resolver to the main thread to avoid threading issues."""
         if self.thread() is not QApplication.instance().thread():

@@ -14,6 +14,12 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Live hip-angle plot widget (pyqtgraph) for the Test page.
+
+``PyHipPlot`` mirrors ``PyAnglePlot`` for the hip: it polls the
+``AngleCalibrator`` and draws a scrolling left/right hip flexion/extension trace
+with optional target lines.
+"""
 # IMPORT QT CORE
 # ///////////////////////////////////////////////////////////////
 from qt_core import *
@@ -34,10 +40,15 @@ MAX_ANGLE = 100
 FLEXION_ANGLE = 60
 EXTENSION_ANGLE = 10
 
-
 # PY HIP PLOT
 # ///////////////////////////////////////////////////////////////
 class PyHipPlot(pg.PlotWidget):
+    """Scrolling live hip-angle plot for left and right legs.
+
+    Same design as ``PyAnglePlot`` but for hip flexion/extension: rolling window
+    fed from the ``AngleCalibrator``, per-leg target lines, scale/invert and
+    optional fixed Y range.
+    """
     def __init__(
         self,
         calibrator: AngleCalibrator,
@@ -47,6 +58,7 @@ class PyHipPlot(pg.PlotWidget):
         line_color_right="#ff5555",
         max_points=200,
         fix_y_range=False,
+        y_range=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -70,7 +82,12 @@ class PyHipPlot(pg.PlotWidget):
         # SET STYLE
         # Fix ranges
         self.setXRange(0, self.max_points, padding=0)
-        if fix_y_range:
+        # A fixed physiological Y band keeps the axis from re-scaling every frame
+        # (autorange jitter reads as lag) and zooms the trace so single-degree
+        # changes are visible. y_range wins over the legacy fix_y_range flag.
+        if y_range is not None:
+            self.setYRange(y_range[0], y_range[1], padding=0)
+        elif fix_y_range:
             self.setYRange(-MAX_ANGLE, MAX_ANGLE, padding=0)
 
         # Set background color
@@ -138,14 +155,14 @@ class PyHipPlot(pg.PlotWidget):
                 self.scale_factor_right = -scale_factor
             else:
                 self.scale_factor_right = scale_factor
-                
+
     def set_target_extension_angle(self, angle: float, left: bool):
         # Set the target extension angle for the specified hip
         if left:
             self.lower_line_left.setPos(angle)
         else:
             self.lower_line_right.setPos(angle)
-            
+
     def set_target_flexion_angle(self, angle: float, left: bool):
         # Set the target bend angle for the specified hip
         if left:

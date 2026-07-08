@@ -1,3 +1,19 @@
+"""Real-time stimulation loop classes.
+
+``StimulationBasic`` is the abstract QObject that owns the 10 ms real-time loop
+(``main_loop_iteration``: update sensors -> phase detection -> closed-loop update
+-> current ramp -> stimulate), plus pause/resume and pickle/xlsx saving. The
+concrete subclasses select the sensing/stimulation mode:
+
+  * ``NoStimulation``       — record only, no stimulation output.
+  * ``StimulationFSR``      — FSR-driven gait detection.
+  * ``StimulationIMUs``     — IMU-driven gait detection + closed loop.
+  * ``StimulationFSRandIMU``— fused FSR+IMU detection.
+  * ``StimulationFESStep``  — fixed FES step sequence.
+
+One instance lives in the ``ExperimentHandler`` thread; all cross-thread comms
+is via Qt signals.
+"""
 from datetime import datetime,timezone
 from .stimulator_parameters import StimulatorParameters
 from .gait_detection_imu import IMUGaitFSM , IMUGaitFSM_2 , IMUGaitFSM_DUMMY
@@ -291,20 +307,24 @@ def export_xlsx_log(save_path, data_to_save):
     except Exception as e:
         print(f"Failed to export Excel workbook: {e}")
 
-
 COM_PORT = "COM3"  # Replace with your COM port
 BAUDRATE = 115200 * 8  # Replace with your baud rate
 TIMEOUT = 2  # seconds, time to wait for the streams to be found
 
-PRIORITY = [("foot", "fsm2") , ("shank", "fsm2"), ("foot", "fsm1"), ("shank", "fsm1") ] # THIS NEED TO BE REVIEWED, AT THE END WE WILL ONLY USE ONE METHOD AND PLACMENT FOR STIMULATION 
-
-
+PRIORITY = [("foot", "fsm2") , ("shank", "fsm2"), ("foot", "fsm1"), ("shank", "fsm1") ] # THIS NEED TO BE REVIEWED, AT THE END WE WILL ONLY USE ONE METHOD AND PLACMENT FOR STIMULATION
 
 class MetaQObjectABC(type(QObject), ABCMeta):
     pass
 
-
 class StimulationBasic(QObject, metaclass=MetaQObjectABC):
+    """Abstract base for every stimulation mode: owns the 10 ms real-time loop.
+
+    Each ``main_loop_iteration`` (driven by a 10 ms QTimer) updates the sensor
+    inlets, runs phase detection, updates the closed loop, ramps current and
+    stimulates. Handles start/pause/resume (draining LSL inlets on pause) and,
+    on stop, saves the recording as pickle + ``export_xlsx_log``. Subclasses
+    implement the mode-specific sensing and stimulation.
+    """
     # Create a threading event for the STOP button in the GUI
     stop_main_event = Event()
     finished = Signal(tuple)
@@ -334,7 +354,6 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
         self._continuous_ramp_start: float | None = None
         self._continuous_ramp_channel: int | None = None
         self._continuous_last_level: float | None = None
-        
 
         if len(self.stim_param.stim_currents) > 0:
             # Prepare the channels for stimulation
@@ -410,7 +429,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
     def return_values(self):
         # Return values to be overridden in subclasses
         return None
-    
+
     def force_stop_and_save(self):
         """Immediately finalize, even if paused (Stop pressed during pause)."""
         if getattr(self, "_finished", False):
@@ -536,11 +555,11 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
             return
         # Activate Output
         SetSingleChanState(self.stimulator_connection, channel, 1, 1, 1)
-    
+
     def ramp_activate_output(self, channel):
         if self.stimulator_connection is None:
             return
-        #start timer 
+        #start timer
         self._continuous_ramp_channel = channel
         self._continuous_ramp_start = time.monotonic()
         self._continuous_ramp_active = True
@@ -548,7 +567,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
         # ensure HV on & initial output on
         SetSingleChanState(self.stimulator_connection, channel, 1, 1, 1)
         self._update_continuous_ramp()
-        
+
     def _update_continuous_ramp(self):
         """Advance ramp if active; called every timer tick."""
         if not self._continuous_ramp_active:
@@ -660,7 +679,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
                 self.timer.start()
         except Exception:
             pass
-        
+
         # restart the global 10s ramp after resume
         try:
             start_ramp()
@@ -672,7 +691,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
                 self._ui_tick.start()
         except Exception:
             pass
-        
+
         if getattr(self, "_continuous_ramp_remaining", None) is not None:
             if self._continuous_ramp_remaining > 0:
                 self._continuous_ramp_start = time.monotonic() - (10.0 - self._continuous_ramp_remaining)
@@ -693,7 +712,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
             self.active_run_seconds_changed.emit(float(self._compute_active_run_seconds()))
         except Exception:
             pass
-    
+
     # ---------------------------------------------------------------------
     # Helpers to drain LSL queues on pause/resume
     # ---------------------------------------------------------------------
@@ -734,7 +753,6 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
         for inlet in self._iter_inlets():
             self._drain_inlet(inlet)
 
-        
     # ---------------------------------------------------------------------
     # Private methods
     # ---------------------------------------------------------------------
@@ -780,7 +798,7 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
         if not stream:
             raise RuntimeError(f"No {stream_name} stream found")
         return StreamInlet(stream[0])
-    
+
     # --- helper to attach experiment meta to saved files ---
     def _experiment_meta(self) -> dict:
         start_ts = self._exp_start_ts
@@ -798,11 +816,9 @@ class StimulationBasic(QObject, metaclass=MetaQObjectABC):
             "experiment_duration_s": duration_s,
         }
 
-
 ############################################################################
 """ Class in case of no gait detection, and no stimulation """
 ############################################################################
-
 
 class NoStimulation(StimulationBasic):
     """This class is used when nothing should be done and is more used for testing purposes."""
@@ -861,12 +877,11 @@ class NoStimulation(StimulationBasic):
 """ Class for gait detection and stimulation with FSR """
 ############################################################################
 
-
 class StimulationFSR(StimulationBasic):
     # New per-leg FSR step signals
     fsr_left_step_count_changed = Signal(int)
     fsr_right_step_count_changed = Signal(int)
-    
+
     # New per-leg FSR phase signals (emit Phase value as int)
     fsr_left_phase_changed = Signal(int)
     fsr_right_phase_changed = Signal(int)
@@ -877,9 +892,8 @@ class StimulationFSR(StimulationBasic):
         self.personalized_gait_model: bool = kwargs.get("personalized_gait_model", False)
         self.terminal_stance_divider=kwargs.get("terminal_stance_divider", 4)
 
-        
         super().__init__(**kwargs)
-        
+
         if self.method == "Method 1 - FSR":
             self.threshold_left: int = kwargs.get("threshold_left", 20)
             self.threshold_right: int = kwargs.get("threshold_right", 20)
@@ -888,7 +902,7 @@ class StimulationFSR(StimulationBasic):
             self.right_fsr_fsm = FSRGaitFSM(self._resolve_streaminlet("FSR_Right"), self.threshold_right)
             self.left_fsr_fsm = FSRGaitFSM(self._resolve_streaminlet("FSR_Left"), self.threshold_left)
 
-        else:  # method 2 
+        else:  # method 2
             self.threshold_left: int = kwargs.get("threshold_left", 5)
             self.threshold_right: int = kwargs.get("threshold_right", 5)
 
@@ -898,13 +912,13 @@ class StimulationFSR(StimulationBasic):
 
         if self.right_fsr_fsm is None:
             self.right_fsr_fsm = FSRGaitFSM_DUMMY()
-            
+
         if self.left_fsr_fsm is None:
             self.left_fsr_fsm = FSRGaitFSM_DUMMY()
-            
+
         self.right_fsr_fsm.steps_changed.connect(self.__on_fsr_leg_steps_changed)
         self.left_fsr_fsm.steps_changed.connect(self.__on_fsr_leg_steps_changed)
-        
+
         # NEW: forward per-leg FSR counts
         self.right_fsr_fsm.steps_changed.connect(
             lambda _c: self.fsr_right_step_count_changed.emit(int(self.right_fsr_fsm.get_step_count()))
@@ -912,7 +926,7 @@ class StimulationFSR(StimulationBasic):
         self.left_fsr_fsm.steps_changed.connect(
             lambda _c: self.fsr_left_step_count_changed.emit(int(self.left_fsr_fsm.get_step_count()))
         )
-        
+
         # forward FSR phase changes to top-level signals
         try:
             self.right_fsr_fsm.phase_changed.connect(lambda v: self.fsr_right_phase_changed.emit(int(v)))
@@ -953,12 +967,12 @@ class StimulationFSR(StimulationBasic):
             # Stimulation phases
             if right_fsr_fsm is None:
              right_fsr_fsm = FSRGaitFSM_DUMMY()
-             
+
             if left_fsr_fsm is None:
              left_fsr_fsm = FSRGaitFSM_DUMMY()
-             
-            if not self.__check_for_unknown_phases(): 
-               open_stimulation_channel_phases_fsr(  
+
+            if not self.__check_for_unknown_phases():
+               open_stimulation_channel_phases_fsr(
                     self.stimulator_connection,
                     self.channels,
                     right_leg=self.right_fsr_fsm,
@@ -969,7 +983,7 @@ class StimulationFSR(StimulationBasic):
                     method_fsr= self.method,
                     _total_paused_duration=self._total_paused_duration
                 )
-            
+
         elif self.do_subphase_detection:
             # Stimulation subphases
             # TODO implement stimulation subphases with FSR
@@ -1012,7 +1026,7 @@ class StimulationFSR(StimulationBasic):
             "fsr_phase_timestamps_right": getattr(self.right_fsr_fsm, "phase_timestamps", None),
             "fsr_phase_counters_left":    getattr(self.left_fsr_fsm,  "phase_counters",   None),
             "fsr_phase_counters_right":   getattr(self.right_fsr_fsm, "phase_counters",   None),
-           
+
             # FSR Method 2 durations (only when using Method 2), safe fallback to empty list
             "fsr_loading_response_durations_right": (
                 self.right_fsr_fsm.FSR2_loading_response_durations
@@ -1044,7 +1058,6 @@ class StimulationFSR(StimulationBasic):
                 if getattr(self, "method_fsr", "") == "Method 2 - FSR" and getattr(self.left_fsr_fsm, "FSR2_stance_durations", None) is not None
                 else []
             ),
-            
 
             #add active run time
             "active_run_seconds": getattr(self, "active_run_seconds", self._compute_active_run_seconds())
@@ -1084,11 +1097,9 @@ class StimulationFSR(StimulationBasic):
             pass
         self.step_count_changed.emit(int(total))
 
-
 ############################################################################
 """ Class for gait detection and stimulation with IMU """
 ############################################################################
-
 
 class StimulationIMUs(StimulationBasic):
     # New per-leg IMU step signals
@@ -1104,7 +1115,7 @@ class StimulationIMUs(StimulationBasic):
         self.gait_model= kwargs.get("gait_model", "Gait Model with Distal")
         self.personalized_gait_model: bool = kwargs.get("personalized_gait_model", False)
         self.terminal_stance_divider=kwargs.get("terminal_stance_divider", 4)
-        
+
         super().__init__(**kwargs)
 
         # Map methods to FSM classes and attribute suffixes
@@ -1159,7 +1170,6 @@ class StimulationIMUs(StimulationBasic):
 
                         fsm = fsm_cls(inlet=inlet_m, speed=self.speed, terminal_stance_divider=self.terminal_stance_divider,  FES=self.FES,  both_imu_methods=(self.method=="Both"), do_closed_loop=self.do_closed_loop)
                         setattr(self, attr, fsm)
-                       
 
                         # Forward fsm phase updates dynamically (only for shank/foot)
                         try:
@@ -1328,7 +1338,7 @@ class StimulationIMUs(StimulationBasic):
             fsm = getattr(self, f"pelvis_{suffix}", None)
             if fsm is not None:
                 yield "pelvis", "pelvis", suffix, fsm
-    
+
     # Preferred-step-counter selection and wiring
     def _get_preferred_fsm_for_side(self, side: str):
         # Priority: Foot Method1 -> Foot Method2 -> Shank Method1 -> Shank Method2
@@ -1360,7 +1370,6 @@ class StimulationIMUs(StimulationBasic):
                 # Recompute and emit total from chosen pair
                 fsm.steps_changed.connect(self.__on_imu_leg_steps_changed)
 
-    
     def __on_imu_leg_steps_changed(self, *_):
         total = 0
         for side in ("left", "right"):
@@ -1389,7 +1398,6 @@ class StimulationIMUs(StimulationBasic):
             if side == "pelvis":
                 continue
             fsm.imu_phase_detection()
-            
 
     # Helper to get the first available FSM for a side
     def get_first_available_fsm(self, side: str):
@@ -1398,7 +1406,7 @@ class StimulationIMUs(StimulationBasic):
             if fsm is not None and not fsm.is_phase_unknown():
                 return fsm
         return None
-            
+
     @override
     def stimulate(self):
         if self.stimulator_connection is None:
@@ -1422,7 +1430,7 @@ class StimulationIMUs(StimulationBasic):
                 right_leg=right_fsm,
                 left_leg=left_fsm,
                 stim_param=self.stim_param,
-                gait_model=self.gait_model, 
+                gait_model=self.gait_model,
                 personalized_gait_model=self.personalized_gait_model,
                _total_paused_duration=self._total_paused_duration
             )
@@ -1477,13 +1485,13 @@ class StimulationIMUs(StimulationBasic):
             "imu_right_knee_angles_algo2": getattr(self.right_knee_rom, "angles_algo2", None)[:, 1] if hasattr(self.right_knee_rom, "angles_algo2") else None,
             "imu_left_knee_timestamps_algo2": getattr(self.left_knee_rom, "angles_algo2", None)[:, 0] if hasattr(self.left_knee_rom, "angles_algo2") else None,
             "imu_right_knee_timestamps_algo2": getattr(self.right_knee_rom, "angles_algo2", None)[:, 0] if hasattr(self.right_knee_rom, "angles_algo2") else None,
-            
+
             # --- add ankle ROM data ---
             "imu_left_ankle_angles": getattr(self.left_ankle_rom, "angles", None)[:, 1] if hasattr(self.left_ankle_rom, "angles") else None,
             "imu_right_ankle_angles": getattr(self.right_ankle_rom, "angles", None)[:, 1] if hasattr(self.right_ankle_rom, "angles") else None,
             "imu_left_ankle_timestamps": getattr(self.left_ankle_rom, "angles", None)[:, 0] if hasattr(self.left_ankle_rom, "angles") else None,
             "imu_right_ankle_timestamps": getattr(self.right_ankle_rom, "angles", None)[:, 0] if hasattr(self.right_ankle_rom, "angles") else None,
-            
+
             # --- add hip ROM data ---
             "imu_left_hip_angles": getattr(self.left_hip_rom, "angles", None)[:, 1] if hasattr(self.left_hip_rom, "angles") else None,
             "imu_right_hip_angles": getattr(self.right_hip_rom, "angles", None)[:, 1] if hasattr(self.right_hip_rom, "angles") else None,
@@ -1541,7 +1549,6 @@ class StimulationIMUs(StimulationBasic):
             # Phase counters
             data_to_save[f"{key_prefix}_phase_counters"] = getattr(fsm, "phase_counters", None)
 
-
             # Subphase timestamps (you said you don't use subphase now, but safe to store if present)
             sub_ts = getattr(fsm, "subphase_timestamps", None)
             if sub_ts is not None:
@@ -1558,7 +1565,7 @@ class StimulationIMUs(StimulationBasic):
             # save durations of Loading response
             if hasattr(fsm, "loading_response_durations"):
                 data_to_save[f"{key_prefix}_loading_response_durations"] = fsm.loading_response_durations
-                
+
             # save durations of mid-stance
             if hasattr(fsm, "mid_stance_durations"):
                 data_to_save[f"{key_prefix}_mid_stance_durations"] = fsm.mid_stance_durations
@@ -1580,7 +1587,6 @@ class StimulationIMUs(StimulationBasic):
         except Exception as e:
             print(f"Data not saved: {e}")
 
-
     #OLD VERSION
     ##########
     # @override
@@ -1595,7 +1601,7 @@ class StimulationIMUs(StimulationBasic):
     #         self.right_leg_shank_fsm.imu_subphase_detection(self.left_leg_shank_fsm)
     #         self.left_leg_shank_fsm.imu_subphase_detection(self.right_leg_shank_fsm)
 
-    # @override 
+    # @override
     # def update_sensors(self):
     #     # Update the IMU data
     #     self.right_leg_shank_fsm.update_imu()
@@ -1606,13 +1612,12 @@ class StimulationIMUs(StimulationBasic):
 
     @override
     def update_closed_loop(self):
-       
 
         # Availability checks (shank + at least one between thigh and foot)
         left_shank_ready_fsm1 = getattr(self, "left_leg_shank_fsm1", None) is not None
         left_thigh_ready_fsm1 = getattr(self, "left_leg_thigh_fsm1", None) is not None
         left_foot_ready_fsm1 = getattr(self, "left_leg_foot_fsm1", None) is not None
-        
+
         left_shank_ready_fsm2 = getattr(self, "left_leg_shank_fsm2", None) is not None
         left_thigh_ready_fsm2 = getattr(self, "left_leg_thigh_fsm2", None) is not None
         left_foot_ready_fsm2 = getattr(self, "left_leg_foot_fsm2", None) is not None
@@ -1675,11 +1680,10 @@ class StimulationIMUs(StimulationBasic):
 
                 ts_left = time.time()
 
-
                 # Compute Knee ROM if thigh is available
                 if getattr(q_thigh_left_array, "size", 0) > 0:
                     self.left_knee_rom.compute_from_list(q_thigh_left_array, q_shank_left_array, ts_left)
-                
+
                 # Compute Ankle ROM if foot is available (signed Z-axis method)
                 if getattr(q_foot_left_array, "size", 0) > 0:
                     self.left_ankle_rom.ankle_compute_from_list(q_shank_left_array, q_foot_left_array, ts_left)
@@ -1699,7 +1703,6 @@ class StimulationIMUs(StimulationBasic):
 
                     # Apply to stim (True = left)
                     update_offset(self.stimulator_connection, self.stim_param, phase_left, output_left, ts_left, True)
-                    
 
         # ----------------
         # RIGHT LEG (if ready)
@@ -1730,7 +1733,7 @@ class StimulationIMUs(StimulationBasic):
                 # Compute Knee ROM if thigh is available
                 if getattr(q_thigh_right_array, "size", 0) > 0:
                     self.right_knee_rom.compute_from_list(q_thigh_right_array, q_shank_right_array, ts_right)
-                
+
                 # Compute Ankle ROM if foot is available (signed Z-axis method)
                 if getattr(q_foot_right_array, "size", 0) > 0:
                     self.right_ankle_rom.ankle_compute_from_list(q_shank_right_array, q_foot_right_array, ts_right)
@@ -1747,9 +1750,6 @@ class StimulationIMUs(StimulationBasic):
                     output_right = self.right_pi_controller.compute(self.right_knee_rom.get_pi_angle(), ts_right)
 
                     update_offset(self.stimulator_connection, self.stim_param, phase_right, output_right, ts_right, False)
-                
-
-
 
     # @override
     # def stimulate(self):
@@ -1842,9 +1842,7 @@ class StimulationIMUs(StimulationBasic):
     #         return
 
     #     print("Saving completed")
-    
-    
-    
+
     @override
     def return_values(self) -> dict:
         # Close all present inlets
@@ -1864,42 +1862,33 @@ class StimulationIMUs(StimulationBasic):
             }
         return out
 
-
-
-        
     def __check_for_unknown_phases(self, right_fsm, left_fsm) -> bool:
         """Return True iff BOTH legs are UNKNOWN for this specific pair."""
         return right_fsm.is_phase_unknown() and left_fsm.is_phase_unknown()
-
-
-    
 
 ############################################################################
 """ Class for gait detection and stimulation with FSR and IMU """
 ############################################################################
 
-
 class StimulationFSRandIMU(StimulationIMUs):
     # New per-leg FSR step signals (IMU signals are inherited from StimulationIMUs)
     fsr_imu_left_step_count_changed = Signal(int)
     fsr_imu_right_step_count_changed = Signal(int)
-    
+
     fsr_imu_left_phase_changed = Signal(int)
     fsr_imu_right_phase_changed = Signal(int)
 
     def __init__(self, **kwargs):
-        
+
         self.terminal_stance_divider: int = kwargs.get("terminal_stance_divider", 4)
         self.FES: bool = kwargs.get("FES", False)
         self.do_closed_loop: bool = kwargs.get("do_closed_loop")
 
         super().__init__(**kwargs)
 
-
         self.threshold_left: int = kwargs.get("threshold_left", 5)
         self.threshold_right: int = kwargs.get("threshold_right", 5)
-        
-        
+
         # Prefer Shank over Foot; Method 1 over Method 2 (edit if needed)
         PRIORITY = [("foot", "fsm2") , ("shank", "fsm2"), ("foot", "fsm1"), ("shank", "fsm1") ]
 
@@ -1963,7 +1952,7 @@ class StimulationFSRandIMU(StimulationIMUs):
             )
         else:
             self.left_fsr_imu_fsm = FSRGaitFSM_DUMMY()
-        
+
         # NEW: forward per-leg FSR counts in combined mode
         self.right_fsr_imu_fsm.steps_changed.connect(
             lambda _c: self.fsr_imu_right_step_count_changed.emit(int(self.right_fsr_imu_fsm.get_step_count()))
@@ -1971,15 +1960,15 @@ class StimulationFSRandIMU(StimulationIMUs):
         self.left_fsr_imu_fsm.steps_changed.connect(
             lambda _c: self.fsr_imu_left_step_count_changed.emit(int(self.left_fsr_imu_fsm.get_step_count()))
         )
-        
-        try:   
+
+        try:
             # forward FSR phase -> stim signals
             if hasattr(self.left_fsr_imu_fsm, "phase_changed"):
                     self.left_fsr_imu_fsm.phase_changed.connect(lambda v: self.fsr_imu_left_phase_changed.emit(int(v)))
-            
+
             if hasattr(self.right_fsr_imu_fsm, "phase_changed"):
                 self.right_fsr_imu_fsm.phase_changed.connect(lambda v: self.fsr_imu_right_phase_changed.emit(int(v)))
-        
+
         except Exception:
             pass
 
@@ -2003,8 +1992,6 @@ class StimulationFSRandIMU(StimulationIMUs):
         self.right_fsr_imu_fsm.update_fsr_imu()
         self.left_fsr_imu_fsm.update_fsr_imu()
 
-
-
     @override
     def stimulate(self):
         if self.stimulator_connection is None:
@@ -2023,7 +2010,7 @@ class StimulationFSRandIMU(StimulationIMUs):
 
         )
         return  # fire once per tick
-            
+
     @override
     def save_data(self):
         def rom_block(gait_fsm):
@@ -2142,10 +2129,10 @@ class StimulationFSRandIMU(StimulationIMUs):
             "fsr_heel_strike_timestamps_right": self.right_fsr_imu_fsm.heel_strike_timestamps,
             "fsr_mid_stance_timestamps_right": self.right_fsr_imu_fsm.mid_stance_timestamps,
             "fsr_toe_off_timestamps_right": self.right_fsr_imu_fsm.toe_off_timestamps,
-            
+
             "fsr_valley_timestamps_left": self.left_fsr_imu_fsm.valleys_timestamps,
             "fsr_valley_timestamps_right": self.right_fsr_imu_fsm.valleys_timestamps,
-            
+
             # FSR phase timestamps and counters
             "fsr_phase_timestamps_left": getattr(self.left_fsr_imu_fsm, "phase_timestamps", None),
             "fsr_phase_timestamps_right": getattr(self.right_fsr_imu_fsm, "phase_timestamps", None),
@@ -2154,17 +2141,17 @@ class StimulationFSRandIMU(StimulationIMUs):
 
             #add active run time
             "active_run_seconds": getattr(self, "active_run_seconds", self._compute_active_run_seconds()),
-            
+
             # FSR Method 2 loading-response durations (only when using Method 2), safe fallback to empty list
             "fsr_loading_response_durations_right": (
                 self.right_fsr_imu_fsm.FSR2_loading_response_durations
-               
+
             ),
             "fsr_loading_response_durations_left": (
                 self.left_fsr_imu_fsm.FSR2_loading_response_durations
-                
+
             ),
-            
+
             "fsr_mid_stance_durations_right": (
                 self.right_fsr_imu_fsm.FSR2_mid_stance_durations
 
@@ -2181,7 +2168,7 @@ class StimulationFSRandIMU(StimulationIMUs):
                 self.left_fsr_imu_fsm.FSR2_stance_durations
 
             ),
-            
+
             }
 
         # IMU data for every connected stream: side/placement/method
@@ -2218,15 +2205,12 @@ class StimulationFSRandIMU(StimulationIMUs):
         except Exception as e:
             print(f"Data not saved: {e}")
 
-   
     def __check_for_unknown_phases(self, right_imu, left_imu) -> bool:
         """True iff IMU pair is unknown on both legs AND both FSRs are unknown."""
         imu_unknown = right_imu.is_phase_unknown() and left_imu.is_phase_unknown()
         fsr_unknown = self.right_fsr_imu_fsm.is_phase_unknown() and self.left_fsr_imu_fsm.is_phase_unknown()
         return imu_unknown and fsr_unknown
 
-
-    
     @override
     def return_values(self) -> dict:
         # Close all IMU inlets
@@ -2262,15 +2246,11 @@ class StimulationFSRandIMU(StimulationIMUs):
             "subphase_counters": getattr(self.left_fsr_imu_fsm, "subphase_counters", None),
         }
         return out
-    
-    
-    
+
 ############################################################################
 """ Class for Stimulating Step using FES """
 ############################################################################
 
-
-    
 class StimulationFESStep(StimulationBasic):
     """This class is used when calibrating FES for to have a Functional step and is more used for testing purposes."""
 
@@ -2278,7 +2258,7 @@ class StimulationFESStep(StimulationBasic):
         self.fes_speed= kwargs.get("fes_speed", "0.8")
         self.fes_steps= kwargs.get("fes_steps", "3")
         self.fes_side = kwargs.get("fes_side", "left")
-        
+
         super().__init__(**kwargs)
         # Debug
         self.current = True
@@ -2300,7 +2280,7 @@ class StimulationFESStep(StimulationBasic):
 
     @override
     def stimulate(self):
-        
+
         open_stimulation_FES_step( self.stimulator_connection,
                               self.channels,
                               stim_param = self.stim_param,

@@ -1,3 +1,10 @@
+"""Fused FSR + IMU gait-phase detection FSM.
+
+Combines the two sensor modalities: the FSR insole drives the stance/swing
+split, while the shank-IMU gyro valley triggers the MID_SWING -> TERMINAL_SWING
+transition (used for FES timing). Same interface and ``Phase`` signals as the
+standalone detectors; Qt-signal driven, runs in its own thread.
+"""
 import numpy as np
 from pylsl import StreamInlet
 from collections import deque
@@ -8,8 +15,12 @@ from typing import Optional
 from scipy.signal import find_peaks
 from .gait_detection_imu import filter_peaks_by_min_distance , identify_valleys
 
-
 class FSRIMUGaitFSM(QObject):
+    """FSR-driven stance/swing fused with an IMU gyro-valley swing trigger.
+
+    FSR force sets stance vs swing; an IMU gyro valley after toe-off fires the
+    MID_SWING -> TERMINAL_SWING transition. Emits step/phase signals to the GUI.
+    """
     # initialize the class and phase counters
     steps_changed = Signal(int)
     # emit when active phase changes (value is Phase enum value -> int)
@@ -23,10 +34,10 @@ class FSRIMUGaitFSM(QObject):
         self.threshold = threshold  # Threshold for phase detection
         self.hysteresis = hysteresis
         self.terminal_stance_divider=terminal_stance_divider
-        
+
         self.FES=FES
         self.do_closed_loop=do_closed_loop
-        
+
         # helper used when splitting SWING into MID_SWING -> TERMINAL_SWING
         self._awaiting_terminal_swing = False
         self._last_toe_off_ts = None
@@ -42,13 +53,12 @@ class FSRIMUGaitFSM(QObject):
             Phase.SWING: np.array([]),
             Phase.UNKNOWN: np.array([]),
         }
-        
+
         if FES: #If FES is true we will split swing
             self.phase_counters[Phase.MID_SWING] = 0
             self.phase_counters[Phase.TERMINAL_SWING] = 0
             self.phase_timestamps[Phase.MID_SWING] = np.array([])
             self.phase_timestamps[Phase.TERMINAL_SWING] = np.array([])
-
 
         self.heel_strike = np.array([])
         self.toe_off = np.array([])
@@ -61,8 +71,7 @@ class FSRIMUGaitFSM(QObject):
         self.data_ff = deque(maxlen=1000)  # Data for the front foot sensor
         self.data_mf = deque(maxlen=1000)  # Data for the middle foot sensor
         self.data_bf = deque(maxlen=1000)  # Data for the back foot sensor
-        
-        
+
         self.timestamps_fsr = deque(maxlen=1000)
 
         # Data for the offline analysis
@@ -72,7 +81,7 @@ class FSRIMUGaitFSM(QObject):
         self.data_cop_x_offline = np.array([])
         self.data_cop_y_offline = np.array([])
         self.timestamps_fsr_offline = np.array([])
-        
+
         # IMU DATA
         self.data_gy = deque(maxlen=1000)
         self.data_gy_rom = []
@@ -88,9 +97,7 @@ class FSRIMUGaitFSM(QObject):
         # optionally make window/threshold configurable
         self.valley_search_window_s = 0.6
         self._midswing_start_imu_ts = None
-        
 
-        
         #Loading phase info
         self.stance_time=0
         self.FSR2_loading_response_durations = np.array([])
@@ -124,8 +131,7 @@ class FSRIMUGaitFSM(QObject):
             self.data_mf.extend(sample[1] for sample in samples_fsr)
             self.data_bf.extend(sample[2] for sample in samples_fsr)
             self.timestamps_fsr.extend(timestamps_fsr)
-            
-            
+
             # For offline analysis, store the data in numpy arrays
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples_fsr]))
             self.data_mf_offline = np.append(self.data_mf_offline, np.array([sample[1] for sample in samples_fsr]))
@@ -133,7 +139,7 @@ class FSRIMUGaitFSM(QObject):
             self.data_cop_x_offline = np.append(self.data_cop_x_offline, np.array([sample[3] for sample in samples_fsr]))
             self.data_cop_y_offline = np.append(self.data_cop_y_offline, np.array([sample[4] for sample in samples_fsr]))
             self.timestamps_fsr_offline = np.append(self.timestamps_fsr_offline, np.array(timestamps_fsr))
-            
+
         #IMU
         # Pull data from lsl stream — guard against missing IMU inlet:
         # StimulationFSRandIMU may construct this FSM with inlet_imu=None when
@@ -155,10 +161,9 @@ class FSRIMUGaitFSM(QObject):
                 self.data_gy_rom.extend(sample[4] for sample in samples)
             else: #open-loop doesnt need calibration for now so just invert y
                 self.data_gy_rom.extend(-sample[4] for sample in samples)
-            
+
             self.timestamps_rom_imu.extend(timestamps)
 
-    
     def _find_valley_after_toeoff(self, after_ts: float, window_s: float = 0.6) -> Optional[float]:
         """Find the first IMU valley timestamp within window_s seconds after after_ts.
         Returns None if no valley found or not enough IMU samples.
@@ -185,7 +190,7 @@ class FSRIMUGaitFSM(QObject):
         first_local_idx = int(valleys_sub[0])
         global_idx = start_idx + first_local_idx
         return float(ts_arr[global_idx])
-    
+
     def _fsr_ts_closest_to(self, t_imu: float) -> Optional[float]:
         ts = np.asarray(self.timestamps_fsr, dtype=float)
         if ts.size == 0:
@@ -197,21 +202,20 @@ class FSRIMUGaitFSM(QObject):
             return float(ts[-1])
         return float(ts[i-1] if (t_imu - ts[i-1]) <= (ts[i] - t_imu) else ts[i])
 
-
     def fsr_phase_detection(self):
         """Detect the gait phase based on the IMU data."""
         # Ensure we have enough data points to update the plot
         # (changing this parameter would not affect the phase counters result but only the plots' starting point)
         if len(self.data_ff) <= 100:
-            return        
+            return
 
         ff=np.asarray(self.data_ff)
         mf=np.asarray(self.data_mf)
         bf=np.asarray(self.data_bf)
-        
+
         gy = np.asarray(self.data_gy) * self._deg
-        
-        data_mean = (ff + mf + bf) / 3 
+
+        data_mean = (ff + mf + bf) / 3
 
         # Detect swing if phase is unknown
         if self.active_phase == Phase.UNKNOWN and data_mean[-1] < self.threshold:
@@ -219,7 +223,6 @@ class FSRIMUGaitFSM(QObject):
             if self.FES:
                 self._awaiting_terminal_swing = True
                 self._midswing_start_imu_ts = float(self.timestamps_imu[-1]) if len(self.timestamps_imu) else None
-
 
         # Detect heel strike
         if data_mean[-1] > abs(self.threshold + self.hysteresis) and self.active_phase in (Phase.SWING, Phase.MID_SWING, Phase.TERMINAL_SWING):
@@ -231,27 +234,26 @@ class FSRIMUGaitFSM(QObject):
                             QTimer.singleShot(100, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
                             QTimer.singleShot(300, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
                             QTimer.singleShot(500, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-            else: 
+            else:
                 # compute loading response duration as 1/6 of stance, convert seconds -> milliseconds
-                LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms 
+                LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms
                 self.FSR2_loading_response_durations = np.append(self.FSR2_loading_response_durations, LR_time_ms)
                 QTimer.singleShot(LR_time_ms, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
-                
+
                 # compute mid stance duration as 1/3 of stance, convert seconds -> milliseconds
-                MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 100 ms 
+                MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 100 ms
                 self.FSR2_mid_stance_durations = np.append(self.FSR2_mid_stance_durations, MST_time_ms)
                 delay_MST= LR_time_ms + MST_time_ms
                 QTimer.singleShot(delay_MST, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
 
                 # compute terminal stance duration , convert seconds -> milliseconds
-                TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms 
+                TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms
                 delay_TST= delay_MST + TST_time_ms
                 #print(f"DEBUG: Terminal stance duration = {TST_time_ms} ms, divider = {self.terminal_stance_divider}")
                 #print(f"DEBUG: scheduling transitions LR={LR_time_ms}ms MST={MST_time_ms}ms TST={TST_time_ms}ms (delay_TST={delay_TST}ms)")
                 QTimer.singleShot(delay_TST, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
                 self._awaiting_terminal_swing = False
                 self._last_toe_off_ts = None
-    
 
         # Detect toe off
         if data_mean[-1] < abs(self.threshold - self.hysteresis) and self.active_phase == Phase.PRE_SWING:
@@ -260,7 +262,7 @@ class FSRIMUGaitFSM(QObject):
 
             if not self.FES:
                 self.__transition_to(Phase.SWING)
-            
+
             else:
                 self.__transition_to(Phase.MID_SWING)
                 self._awaiting_terminal_swing = True
@@ -268,18 +270,18 @@ class FSRIMUGaitFSM(QObject):
                 self._midswing_start_imu_ts = float(self.timestamps_imu[-1]) if len(self.timestamps_imu) else None
                 # clear the toe-off anchored ts (not used as the search start anymore)
                 self._last_toe_off_ts = None
-            
+
             if self.heel_strike_timestamps.size == 0 or self.toe_off_timestamps.size == 0:
                 # not enough data yet to compute stance_time
                 pass
-            
+
             else:
                 dt = float(self.toe_off_timestamps[-1] - self.heel_strike_timestamps[-1])
                 self.FSR2_stance_durations = np.append(self.FSR2_stance_durations, dt)
                 if self.stance_time == 0:
                     self.stance_time = dt
                 else:
-                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new 
+                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new
                     alpha = 0.2
                     self.stance_time = alpha * dt + (1.0 - alpha) * self.stance_time
 
@@ -329,7 +331,6 @@ class FSRIMUGaitFSM(QObject):
                 pass
                 #print(f"DEBUG: Exception in valley detection: {e}")
 
-
         # Public helper for counting steps
     def get_step_count(self) -> int:
         try:
@@ -369,7 +370,7 @@ class FSRIMUGaitFSM(QObject):
             # Emit on heel-strike phase if applicable
             if next_phase == Phase.LOADING_RESPONSE:
                 self.steps_changed.emit(self.get_step_count())
-  
+
     @Slot()
     def _mid_stance_transition(self) -> None:
         """Transition to the mid stance phase of the gait cycle and record the timestamp.
@@ -379,7 +380,7 @@ class FSRIMUGaitFSM(QObject):
         if self.active_phase == Phase.LOADING_RESPONSE:
          self.__transition_to(Phase.MID_STANCE)
          #print(f"DEBUG: _mid_stance_transition called; active_phase={self.active_phase}")
-        
+
     @Slot()
     def _terminal_stance_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -388,7 +389,7 @@ class FSRIMUGaitFSM(QObject):
         # only allow if we are still in stance progression
         if self.active_phase in (Phase.LOADING_RESPONSE, Phase.MID_STANCE):
          self.__transition_to(Phase.TERMINAL_STANCE)
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -404,13 +405,8 @@ class FSRIMUGaitFSM(QObject):
         self.heel_strike = np.append(self.heel_strike, self.data_bf[-1])
         #print(f"DEBUG: __record_heel_strike ts={timestamp:.6f}")
 
-
     def __record_toe_off(self, timestamp: float) -> None:
         """Record the time of the detected and classified toe off."""
         self.toe_off_timestamps = np.append(self.toe_off_timestamps, timestamp)
         self.toe_off = np.append(self.toe_off, self.data_ff[-1])
         #print(f"DEBUG: __record_toe_off ts={timestamp:.6f}")
-
-
-        
-        

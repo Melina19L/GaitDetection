@@ -1,3 +1,12 @@
+"""Low-level serial protocol for the stimulator (custom 7-bit framing).
+
+Implements the device's framed serial protocol over pyserial (COM3, 115200x8):
+the MSB of every byte is reserved for framing (``MSG_END = 0x80``) and the
+checksum is the XOR of all bytes ``& 0x7F``. Key functions program single/all
+channel parameters and channel state (Power -> HV -> Output, in order);
+``uint32_to_binary`` / ``float_to_binary`` split 32-bit values into 5x7-bit
+bytes. Called by ``stimulator_parameters`` — not used directly elsewhere.
+"""
 from serial import Serial
 import serial.tools.list_ports
 import numpy as np
@@ -5,7 +14,6 @@ import struct
 import time
 
 NOT_MSB_MASK = 0b01111111  # Mask to keep only the 7 least significant bits
-
 
 def SetSingleChanSingleParam(s: Serial, channel_id: int, var_id: int, data: int | float):
     """SetSingleChanSingleParam: Sets a single parameter of a single channel.\n
@@ -61,7 +69,6 @@ def SetSingleChanSingleParam(s: Serial, channel_id: int, var_id: int, data: int 
     # Write message to serial port
     s.write(msg + bytes([ccr, MSG_END]))
 
-
 def SetSingleChanState(s: Serial, channel_id: int, power_state: bool, hv_state: bool, output_state: bool):
     """SetSingleChanState: Sets the state of a single channel.\n
     Each state can only be set if the state before is set as well:\n
@@ -109,12 +116,11 @@ def SetSingleChanState(s: Serial, channel_id: int, power_state: bool, hv_state: 
     ccr = 0
     for byte in msg:
         ccr ^= byte # XOR operation with each byte in the message
-        
+
     # Ensure the checksum is within the 7 least significant bits
     ccr = ccr & NOT_MSB_MASK
 
     s.write(msg + bytes([ccr, MSG_END]))
-
 
 def SetSingleChanAllParam(
     s: Serial,
@@ -177,13 +183,12 @@ def SetSingleChanAllParam(
     ccr = 0
     for byte in msg:
         ccr ^= byte  # XOR operation with each byte in the message
-    
+
     # Ensure the checksum is within the 7 least significant bits
     ccr = ccr & NOT_MSB_MASK
 
     # Write message to serial port
     s.write(msg + bytearray([ccr, MSG_END]))
-
 
 def uint32_to_binary(uint32: int) -> bytearray:
     """Convert conventional 32-bit integer (int) to 5 bytes
@@ -210,7 +215,6 @@ def uint32_to_binary(uint32: int) -> bytearray:
     # Convert each group to an integer and then to a byte
     return bytearray([int(val, 2) for val in val_5_bins])
 
-
 def float_to_binary(float32: float) -> bytearray:
     """Convert conventional 32-bit float (float) to 5 bytes
     (7 bits each, with a leading zero for the first 4 bytes and 3 bits for the last byte).\n
@@ -235,7 +239,6 @@ def float_to_binary(float32: float) -> bytearray:
 
     # Convert each group to an integer and then to a byte
     return bytearray([int(val, 2) for val in val_5_bins])
-
 
 def readComBuffer(s: Serial, OPTin: dict = None):
     """Read data from the serial buffer.
@@ -300,7 +303,7 @@ def list_serial_devices() -> list[str]:
     devices = []
     for port in ports:
         devices.append(port.device + " - " + port.description)
-        
+
     return devices
 
 def open_serial_port(ComPort: str, Baudrate: int) -> Serial:
@@ -329,7 +332,6 @@ def open_serial_port(ComPort: str, Baudrate: int) -> Serial:
     s = Serial(ComPort, baudrate=Baudrate, timeout=1, write_timeout=1, inter_byte_timeout=None)
     s.reset_input_buffer()
     return s
-
 
 def close_serial_port(s: Serial):
     """Closes the specified serial port.

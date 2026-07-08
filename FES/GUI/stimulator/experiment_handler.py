@@ -21,7 +21,6 @@ from PySide6.QtCore import Signal, QObject, Slot
 import platform
 import subprocess
 
-
 #################################################
 """ Block sleep mode during the experiment """
 #################################################
@@ -72,12 +71,10 @@ def allow_sleep():
         if '_inhibit_proc' in globals() and _inhibit_proc.poll() is None:
             _inhibit_proc.terminate()
     # No action needed for other OSes
-    
 
 #########################################
 """Prepare channels for stimulation"""
 #########################################
-
 
 # NOTE this snippet here is to be activated in the TASK 2 (different frequencies for different channels)
 # this commented snippet is for the last task of the protocol: we wan to set a different a diffrent stimulation frequency from the 30Hz (reference),
@@ -97,18 +94,22 @@ def change_stimulation_frequency(
         print("Error detected or user interruption. Shutting down all channels...")
         StimulatorParameters.close_all_channels(stimulator_connection)
 
-
 ##########################################################################
 """ MAIN Thread - real-time gait detection and tSCS stimulation """
 ##########################################################################
 
-
 class ExperimentHandler(QObject):
+    """Selects and runs the right ``Stimulation*`` subclass for an experiment.
+
+    From the ``use_imus`` / ``use_fsr`` kwargs it instantiates the matching
+    stimulation mode, wires its step/phase/active-time signals to the GUI, and
+    prevents the machine from sleeping during a run. Lives in its own QThread.
+    """
     finished = Signal(tuple)
     error_message = Signal(str)
     starting_experiment = Signal()
     step_count_changed = Signal(int)
-    
+
     stimulator = None
 
     # New signals forwarded to MainWindow
@@ -121,7 +122,7 @@ class ExperimentHandler(QObject):
     # per-leg phase signals from backend (FSR)
     fsr_left_phase_changed = Signal(int)
     fsr_right_phase_changed = Signal(int)
-    #fsr and imu 
+    #fsr and imu
     fsr_imu_left_step_count_changed = Signal(int)
     fsr_imu_right_step_count_changed = Signal(int)
     fsr_imu_left_phase_changed = Signal(int)
@@ -151,7 +152,7 @@ class ExperimentHandler(QObject):
 
     def start_experiment(self, kwargs: dict):
         # Prevent the system from sleeping during the experiment
-        prevent_sleep()  
+        prevent_sleep()
         # DEBUG, Remove after testing
         for key, value in kwargs.items():
             print(f"{key}: {value}")
@@ -159,14 +160,13 @@ class ExperimentHandler(QObject):
         # Get bool values for use_imus and use_fsr
         use_imus = kwargs.get("use_imus", False)
         use_fsr = kwargs.get("use_fsr", False)
-        
+
         do_fes_step = kwargs.get("stimulate_fes_step")
-        
+
         if do_fes_step:
             self.stimulator=StimulationFESStep(**kwargs)
             self.stimulator.finished.connect(self.return_results)
             self.stimulator.error.connect(self.handle_error)
-
 
             # Start the main loop
             self.starting_experiment.emit()
@@ -185,7 +185,7 @@ class ExperimentHandler(QObject):
             try:
                 self.stimulator.active_run_seconds_changed.connect(self.active_run_seconds_changed.emit)
             except Exception:
-                pass   
+                pass
             # NEW: per-leg IMU steps
             try:
                 self.stimulator.imu_left_step_count_changed.connect(self.imu_left_step_count_changed)
@@ -216,14 +216,14 @@ class ExperimentHandler(QObject):
                 self.stimulator.fsr_imu_right_step_count_changed.connect(self.fsr_imu_right_step_count_changed)
             except Exception:
                 pass
-            
+
             # NEW: per-leg FSR phases
             try:
                 self.stimulator.fsr_imu_left_phase_changed.connect(self.fsr_imu_left_phase_changed)
                 self.stimulator.fsr_imu_right_phase_changed.connect(self.fsr_imu_right_phase_changed)
             except Exception:
                 pass
-            
+
             # Start the main loop
             self.starting_experiment.emit()
             self.stimulator.start_main_loop()
@@ -247,19 +247,18 @@ class ExperimentHandler(QObject):
                 self.stimulator.fsr_right_step_count_changed.connect(self.fsr_right_step_count_changed)
             except Exception:
                 pass
-            
+
             # NEW: per-leg FSR phases
             try:
                 self.stimulator.fsr_left_phase_changed.connect(self.fsr_left_phase_changed)
                 self.stimulator.fsr_right_phase_changed.connect(self.fsr_right_phase_changed)
             except Exception:
                 pass
-            
+
             # Start the main loop
             self.starting_experiment.emit()
             self.stimulator.start_main_loop()
-            
-            
+
         else:
             # Stimulation without gait detection
             self.stimulator = NoStimulation(**kwargs)
@@ -327,7 +326,7 @@ class ExperimentHandler(QObject):
         except Exception:
             # Fallback: if base resume is not available, do nothing
             pass
-        
+
     @Slot(Exception)
     def handle_error(self, e: Exception):
         if self.stimulator:
@@ -338,7 +337,7 @@ class ExperimentHandler(QObject):
         print(error_message)
         traceback.print_exc()
         self.error_message.emit(error_message)
-        
+
     @Slot(tuple)
     def return_results(self, results: tuple):
         # Emit the results signal with the results dictionary

@@ -1,9 +1,14 @@
+"""SVG electrode-map parsing and labelling helpers.
+
+Parses the electrode SVG, extracts path data, writes/reads ``numbers.json``
+(path index -> label) and recolours paths so the GUI can show which electrode is
+mapped to which channel/muscle target.
+"""
 # parse the svg file and get the path data
 
 import os
 import json
 import xml.etree.ElementTree as ET
-
 
 # Function to find the target structure
 def find_target_group(root: ET.Element) -> tuple[list[ET.Element], list[ET.Element]]:
@@ -20,7 +25,6 @@ def find_target_group(root: ET.Element) -> tuple[list[ET.Element], list[ET.Eleme
 
     return gs, paths  # Return both elements
 
-
 # Function to find the target structure
 def find_circle_group(root: ET.Element) -> tuple[list[ET.Element], list[ET.Element]]:
     gs, paths = [], []
@@ -32,7 +36,6 @@ def find_circle_group(root: ET.Element) -> tuple[list[ET.Element], list[ET.Eleme
             paths.append(circle)
 
     return gs, paths  # Return both elements
-
 
 # Function to parse the SVG file and get the target group and path
 def parse_svg(svg_path) -> ET.ElementTree:
@@ -47,7 +50,6 @@ def parse_svg(svg_path) -> ET.ElementTree:
     # Load SVG
     return ET.parse(svg_path)
 
-
 # Create a json file with the path data to create numbers
 def read_out_numbers_of_file(svg_image_path: str):
     # Parse the SVG file
@@ -61,7 +63,6 @@ def read_out_numbers_of_file(svg_image_path: str):
         dict_path[i] = path.attrib["d"]
     with open("numbers.json", "w") as file:
         json.dump(dict_path, file, indent=4)
-
 
 # Visually change the channel number of the electrode
 def change_number_to(svg_image_path: str, electrode_nb: int, new_number: int) -> str:
@@ -111,7 +112,7 @@ def change_label_to(svg_image_path: str, electrode_nb: int, label: str, fill: st
     # Fallback to place at (0,0) if no circle info (will likely be transformed by parent group)
     if cx is None or cy is None:
         cx, cy = "0", "0"
-    
+
     # Apply tiny downward adjustment
     try:
         cy_val = float(cy)
@@ -156,7 +157,6 @@ def change_label_to(svg_image_path: str, electrode_nb: int, label: str, fill: st
     tree.write(svg_image_path, encoding="utf-8", xml_declaration=True)
     return svg_image_path
 
-
 # Visually change the color of the number
 def change_color_to(svg_image_path: str, group_nb: int, new_color: str, is_back=True) -> str:
     # Parse the SVG file
@@ -197,8 +197,6 @@ def change_circle_color_to(svg_image_path: str, group_nb: int, new_color: str) -
 
     # Write the parsed file to the same svg file
     tree.write(svg_image_path)
-
-
 
 # Get SVG Path
 if __name__ == "__main__":

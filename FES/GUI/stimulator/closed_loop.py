@@ -1,11 +1,27 @@
+"""Quaternion joint-angle math and closed-loop knee control.
+
+This is the geometry core of the system. From per-segment IMU quaternions it
+computes knee, hip and ankle angles:
+
+  * Knee/hip: SVD-identified hinge axis (``identify_hinge_axis``) + swing-twist
+    projection (``extract_functional_angle``) — yaw-invariant, decoupled from
+    segment rotation.
+  * Ankle: gravity-constrained signed sagittal projection
+    (``signed_ankle_angle``) / hinge method, decoupled from knee flexion, with a
+    physiological clamp and spike rejection.
+
+``ROM`` stores per-joint angles and offers the calibration + runtime entry
+points; ``PIController`` drives closed-loop knee stimulation. Sensor-axis
+detection helpers make the algorithm robust to strap mounting orientation.
+
+All quaternions are [w, x, y, z]: w is the scalar part, (x, y, z) the vector
+part.
+"""
 import numpy as np
 from .gait_phases import Phase
 
 from scipy.spatial.transform import Rotation as R
 import math
-
-
-# NOTE: Assume the quaternions are in the format [w, x, y, z] where w is the scalar part and (x, y, z) is the vector part.
 
 DEG_TO_CURRENT = 0.1  # Example conversion factor from degrees to current
 FLEXION_ANGLE = 60.0  # Example target knee bend angle in degrees
@@ -17,8 +33,6 @@ DORSIFLEXION_ANGLE = -10.0   # Target ankle dorsiflexion angle in degrees (mid-s
 
 TIME_TOLERANCE = 0.10  # Time tolerance in seconds for matching timestamps (100 ms)
 
-
-    
 # Luka's Method - Relative Quqaternion Angle (RQA method)
 #   - Assumption 1: Knee joint (and ankle) = Hinge joint (1 DOF)
 #   - Assumption 2: which is a direct consequence of Assumption 1 => thigh ML axis is alligned with joint axis
@@ -48,8 +62,6 @@ def angle_between_quaternions_algo2(q_thigh, q_shank): #, joint_axis=None):
 
     return np.degrees(angle)
 
-
-
 # Dominks Method - Segment Axis Angle (SAA Method) - Main  Method, this is the one that acctually runs
 def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
     xAxis = np.array([1.0, 0.0, 0.0])
@@ -58,7 +70,6 @@ def angle_between_quaternions(q1: np.ndarray, q2: np.ndarray) -> float:
     angleRad = angle_between_vectors(x1, x2)
     angleDeg = np.degrees(angleRad)
     return angleDeg
-
 
 def ankle_angle_between_quaternions(
     q_shank: np.ndarray,
@@ -96,7 +107,6 @@ def ankle_angle_between_quaternions(
     angle_rad = angle_between_vectors(shank_global, foot_global)
     return float(np.degrees(angle_rad))
 
-
 def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
     """Return an HTML table showing how shank and foot sensor axes project in the global frame.
 
@@ -133,7 +143,7 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
                 f'<td title="horizontal">{bar_f} {alignment_floor:.2f}</td></tr>'
             )
             if alignment_grav  > best_grav[1]:  best_grav  = (name, alignment_grav)
-            
+
         floor_label = fwd_axis if fwd_axis else '?'
         rows.append(
             f'<tr style="color:#f39c12"><td><b>{label} summary</b></td>'
@@ -191,14 +201,11 @@ def sensor_axes_diagnostic(q_shank: np.ndarray, q_foot: np.ndarray) -> str:
     )
     return html
 
-
 def rotate_vector_by_quaternion(v: np.ndarray, q: np.ndarray) -> np.ndarray:
     u = q[1:4]  # Extract the vector part of the quaternion
     s: float = q[0]  # Extract the scalar part of the quaternion
     v_rotated: np.ndarray = u * 2.0 * u.dot(v) + v * (s * s - u.dot(u)) + np.cross(u, v) * 2.0 * s
     return v_rotated
-
-
 
 def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
     # Normalize the vectors
@@ -208,7 +215,6 @@ def angle_between_vectors(v1: np.ndarray, v2: np.ndarray) -> float:
     # Calculate the dot product
     dot_product = np.clip(np.dot(v1_norm, v2_norm), -1.0, 1.0)  # Ensure the value is within the valid range for arccos
     return np.arccos(dot_product)
-
 
 # ── Swing-twist decomposition ────────────────────────────────────────────────
 def twist_angle_around_axis(q: np.ndarray, axis: np.ndarray) -> float:
@@ -234,7 +240,6 @@ def twist_angle_around_axis(q: np.ndarray, axis: np.ndarray) -> float:
     if proj < 0:
         angle = -angle
     return angle
-
 
 def signed_ankle_angle(
     q_shank: np.ndarray,
@@ -319,7 +324,6 @@ def signed_ankle_angle(
     offset = _sagittal_angle(qs_ref, qf_ref)
     return _sagittal_angle(qs, qf) - offset
 
-
 # ── Sensor-axis detection ────────────────────────────────────────────────────
 # At calibration time we look at the world projection of each sensor's local
 # axes (X / Y / Z) and pick the one most aligned with gravity (= longitudinal
@@ -331,7 +335,6 @@ AXIS_VECTORS = {
     'Y': np.array([0.0, 1.0, 0.0]),
     'Z': np.array([0.0, 0.0, 1.0]),
 }
-
 
 def detect_most_vertical_axis(q: np.ndarray) -> str:
     """Return the local axis name ('X' | 'Y' | 'Z') of a sensor whose world
@@ -348,7 +351,6 @@ def detect_most_vertical_axis(q: np.ndarray) -> str:
             best_score = score
             best_name = name
     return best_name
-
 
 def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> str:
     """Return the local axis name ('X' | 'Y' | 'Z') of the foot sensor that
@@ -372,7 +374,7 @@ def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> st
 
     # Find shank's vertical axis to determine its forward plane
     shank_grav = detect_most_vertical_axis(q_shank)
-    
+
     # The shank's forward direction is its most horizontal axis
     shank_fwd = 'Y'
     best_shank_horiz = -1.0
@@ -384,7 +386,7 @@ def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> st
         if horiz > best_shank_horiz:
             best_shank_horiz = horiz
             shank_fwd = name
-            
+
     shank_fwd_vec = rotate_vector_by_quaternion(AXIS_VECTORS[shank_fwd], q_shank)
     # Project shank forward vector perfectly onto horizontal plane
     shank_fwd_horiz = np.array([shank_fwd_vec[0], shank_fwd_vec[1], 0.0])
@@ -404,14 +406,13 @@ def detect_most_horizontal_axis(q: np.ndarray, q_shank: np.ndarray = None) -> st
         gn = np.linalg.norm(gv_horiz)
         if gn > 1e-6:
             gv_horiz = gv_horiz / gn
-            
+
         align = abs(float(np.dot(gv_horiz, shank_fwd_horiz)))
         if align > best_align:
             best_align = align
             best_foot_fwd = name
-            
-    return best_foot_fwd
 
+    return best_foot_fwd
 
 def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = None) -> str:
     """Return the foot's local axis that is the ankle's medio-lateral (rotation) axis.
@@ -455,7 +456,6 @@ def detect_foot_medio_lateral_axis(q_foot: np.ndarray, q_shank: np.ndarray = Non
             best_perp = perp
             best_name = name
     return best_name
-
 
 def identify_hinge_axis(q_prox_array: np.ndarray, q_dist_array: np.ndarray,
                         return_quality: bool = False):
@@ -536,8 +536,15 @@ def extract_functional_angle(qs: np.ndarray, qf: np.ndarray, qs_ref: np.ndarray,
     angle_rad = twist_angle_around_axis(q_diff, hinge_axis)
     return float(np.degrees(angle_rad))
 
-
 class ROM:
+    """Per-joint angle computation and storage (Range Of Motion).
+
+    One instance per joint/side. Holds the calibration offset, scale, neutral
+    reference quaternions and hinge axis, and accumulates the computed angle
+    time-series in ``self.angles``. Provides the knee (SAA / functional hinge),
+    hip (functional hinge) and ankle (signed sagittal / functional) computation
+    paths plus the ``*_reference`` setters populated at calibration time.
+    """
     def __init__(self, offset: float = 0.0, scale: float = 1.0):
         self.timestamp: float = 0.0
         self.offset: float = offset
@@ -583,10 +590,10 @@ class ROM:
         self.offset = offset
 
     # ── Knee / Hip functional (sagittal hinge projection) ────────────────────
-    # Mirror del pattern ankle: dopo calibrazione funzionale (5s flex/extend),
-    # angolo calcolato via swing-twist su asse hinge identificato per SVD.
-    # Elimina la contaminazione da rotazione/adduzione presente in
-    # angle_between_quaternions (che e' la geodesica 3D cardinale).
+    # Mirrors the ankle pattern: after functional calibration (5s flex/extend),
+    # angle computed via swing-twist around the hinge axis identified by SVD.
+    # Removes the rotation/adduction contamination present in
+    # angle_between_quaternions (which is the 3D cardinal geodesic).
     def set_knee_reference(self, q_thigh_ref: np.ndarray, q_shank_ref: np.ndarray,
                            hinge_axis: np.ndarray = None) -> None:
         self.q_thigh_ref_knee = normalize(np.asarray(q_thigh_ref, dtype=float))
@@ -673,7 +680,7 @@ class ROM:
             all_axes = {'X', 'Y', 'Z'}
             remaining = all_axes - {shank_vert, shank_axis}
             shank_ml = remaining.pop() if len(remaining) == 1 else 'Y'
-            
+
             return signed_ankle_angle(
                 q_shank, q_foot, q_shank_ref, q_foot_ref,
                 foot_axis=foot_axis,
@@ -783,7 +790,7 @@ class ROM:
                 except Exception:
                     pass
                 return angle_primary
-    
+
     @staticmethod
     def static_compute_from_list(q_thigh_array: np.ndarray, q_shank_array: np.ndarray, offset: float) -> float:
         """Compute joint angles from lists of quaternions for thigh and shank containing samples with timestamps.\n
@@ -828,15 +835,21 @@ class ROM:
         if self.angles.size == 0:
             return 0.0
         return self.angles[-1, 1]
-    
+
     def get_algo2_angle(self) -> float:
         """Return last saved algo2 angle (timestamp, angle saved in angles_algo2)."""
         if self.angles_algo2.size == 0:
             return 0.0
         return self.angles_algo2[-1, 1]
 
-
 class PIController:
+    """Proportional-Integral controller for closed-loop knee stimulation.
+
+    Tracks a target knee angle that alternates between extension and flexion
+    setpoints as the gait phase advances (``update_target``), producing a
+    stimulation-current output from the measured angle error. Records
+    timestamps/errors/outputs and target changes for offline analysis.
+    """
     def __init__(self, kp: float, ki: float, dt: float, target_extension: float = EXTENSION_ANGLE, target_flexion: float = FLEXION_ANGLE):
         self.kp = kp
         self.ki = ki
@@ -851,7 +864,7 @@ class PIController:
         self.timestamps = []
         self.errors = []
         self.outputs = []
-        
+
         # Record the target changes
         self.target_changes = np.empty((0, 2))  # Each row will be [timestamp, target_angle]
         self.target_changes = np.append(self.target_changes, [[0.0, self.target_extension]], axis=0)  # Initialize with the extension target
@@ -874,12 +887,12 @@ class PIController:
         # Inverse the current if the controller is in inverse mode
         if self.inverse:
             output = -output
-        
+
         # Record the data for analysis
         self.timestamps.append(timestamp)
         self.errors.append(error)
         self.outputs.append(output)
-        
+
         return output  # *DEG_TO_CURRENT Convert output to current
 
     def set_target(self, target_value: float):
@@ -930,7 +943,6 @@ class PIController:
     def reset(self):
         """Reset the integral."""
         self.integral = 0.0
-
 
 if __name__ == "__main__":
     # Example usage

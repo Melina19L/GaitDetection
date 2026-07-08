@@ -1,3 +1,21 @@
+"""IMU-based gait-phase detection FSMs (Movella/Xsens DOT over LSL).
+
+Two interchangeable detection methods over the shank/foot gyro signal, plus a
+no-op fallback, all sharing the same interface (update sensor -> phase
+detection -> subphase detection -> step counting) and emitting ``Phase`` values
+to drive stimulation:
+
+  * ``IMUGaitFSM``  = Method 1: find_peaks/valleys on gyro-Y; heel-strike vs
+    toe-off classified by distance to the valley/peak.
+  * ``IMUGaitFSM_2`` = Method 2: gyro-norm threshold gating for TO/HS plus the
+    static Aminian pipeline.
+  * ``IMUGaitFSM_DUMMY`` = no-op stand-in when IMU detection is disabled.
+
+Both real FSMs auto-tune their thresholds from the measured cadence and peak
+heights and scale with walking speed. Stance subphases are timed off the
+detected heel-strike via QTimer. Everything is Qt-signal driven and lives in
+its own thread.
+"""
 import numpy as np
 import sys, subprocess
 from scipy.signal import find_peaks, butter, filtfilt, argrelextrema
@@ -6,7 +24,6 @@ from collections import deque
 from enum import Enum
 from PySide6.QtCore import QTimer, Qt, QObject, Slot, SLOT, Signal
 from .gait_phases import Phase
-
 
 import threading
 
@@ -33,7 +50,6 @@ def _play_step_beep(is_hs: bool = True) -> None:
             print("\a", end="", flush=True)
     except Exception:
         pass
-
 
 #PEAK_DETECTION_DEADZONE = 0.25  # seconds
 #HEEL_STRIKE_PEAK_RANGE = 0.5  # seconds
@@ -72,10 +88,10 @@ parameters = {
 }
 
 class FirstStep(Enum):
+    """State of the first-step bootstrap, before steady-state detection begins."""
     DETECTING_HEEL_STRIKE = 1
     DETECTING_TOE_OFF = 2
     DETECTED = 3
-
 
 def filter_peaks_by_min_distance(peaks, min_distance) -> np.ndarray:
     # No filtering required if there is only one peak or none
@@ -89,7 +105,6 @@ def filter_peaks_by_min_distance(peaks, min_distance) -> np.ndarray:
         if peaks[i] - filtered_peaks[-1] >= min_distance:
             filtered_peaks.append(peaks[i])
     return np.array(filtered_peaks)
-
 
 # Identification of heel strike and toe off
 def identify_gait_phases(
@@ -109,15 +124,21 @@ def identify_gait_phases(
 
     return peaks, height_peaks
 
-
 def identify_valleys(data: np.ndarray, valley_height: float, distance_valleys: float, min_distance_between_valleys: float) -> np.ndarray:
     # Find valleys in the data, by finding peaks of the inverted signal
     valleys, _ = find_peaks(-data, height=valley_height, distance=distance_valleys)
     valleys = filter_peaks_by_min_distance(valleys, min_distance_between_valleys)
     return valleys
 
-
 class IMUGaitFSM(QObject):
+    """Method 1 IMU gait FSM: peak/valley detection on shank gyro-Y.
+
+    Detects heel-strike and toe-off as peaks/valleys of the shank gyro signal,
+    classifying each by its distance to the neighbouring valley/peak. Runs the
+    stance subphase timers off the heel-strike, counts steps, and emits
+    ``steps_changed`` / ``phase_changed`` to the GUI. Parameters auto-tune from
+    measured cadence and peak heights.
+    """
     # Class-level flag toggled by the GUI checkbox "Audio cues on gait events".
     # When True, every recorded HS/TO event triggers a non-blocking beep.
     audio_cues_enabled = False
@@ -146,13 +167,13 @@ class IMUGaitFSM(QObject):
         self.speed = speed
         self.both_imu_methods = both_imu_methods
         self.terminal_stance_divider=terminal_stance_divider
-        
+
         self.FES=FES
         self.do_closed_loop=do_closed_loop
         # helper used when splitting SWING into MID_SWING -> TERMINAL_SWING
         self._awaiting_terminal_swing = False
         self._last_toe_off_ts = None
-        
+
         if FES: #If FES is true we will split swing
             self.phase_counters[Phase.MID_SWING] = 0
             self.phase_counters[Phase.TERMINAL_SWING] = 0
@@ -161,7 +182,6 @@ class IMUGaitFSM(QObject):
             self.valleys = np.array([])                # ensure valleys exist
             self.valleys_timestamps = np.array([])     # ensure valley timestamps exist
 
-        
         # Add loading response and mid stance to the phase counters and timestamps if the stance phase is split
         if split_stance:
             self.phase_counters[Phase.LOADING_RESPONSE] = 0
@@ -208,16 +228,15 @@ class IMUGaitFSM(QObject):
         self.first_step_detected = FirstStep.DETECTING_HEEL_STRIKE  # Initial state for first step detection
         self.is_preferred = False
 
-        
         # Increase the number of samples between two peaks, if the gait is slow (e.g., walking at 1 km/h)
-        
-        self.stream_name = self.inlet.info().name() # extract name of stream 
-        
+
+        self.stream_name = self.inlet.info().name() # extract name of stream
+
         if speed > 1.5:
             fast_walking= True
         else:
             fast_walking = False
-        
+
         if self.stream_name in ("Right Shank", "Left Shank"): # method S1
             if fast_walking:
                 parameters['min_distance_between_peaks'] = 15
@@ -235,7 +254,7 @@ class IMUGaitFSM(QObject):
                     parameters['peak_detection_deadzone'] = 0.25
                     parameters['heel_strike_peak_range'] = 2.5
 
-                elif 0.4 < speed <= 0.8: 
+                elif 0.4 < speed <= 0.8:
                     parameters['peak_threshold'] = 0.20
                     parameters['distance'] = 25
                     parameters['min_distance_between_peaks'] = 25
@@ -245,7 +264,7 @@ class IMUGaitFSM(QObject):
                     parameters['min_distance_between_valleys'] = 50
                     parameters['peak_detection_deadzone'] = 0.25
                     parameters['heel_strike_peak_range'] = 1
-                    
+
                 else:
                     # 0.8 – 1.5 km/h shank: the default 0.25 threshold is tuned for
                     # 3 km/h and is too high for the shank gyroscope at moderate speed.
@@ -259,8 +278,7 @@ class IMUGaitFSM(QObject):
                     parameters['distance_valleys'] = 40
                     parameters['min_distance_between_valleys'] = 45
 
-                
-        elif self.stream_name in ("Right Foot", "Left Foot"): # Method F1 
+        elif self.stream_name in ("Right Foot", "Left Foot"): # Method F1
             if fast_walking:
                 parameters['min_distance_between_peaks'] = 15
                 parameters['prominence'] = 0.5
@@ -277,7 +295,7 @@ class IMUGaitFSM(QObject):
                     parameters['peak_detection_deadzone'] = 0.25
                     parameters['heel_strike_peak_range'] = 1
 
-                elif 0.3 < speed <= 0.8: 
+                elif 0.3 < speed <= 0.8:
                     parameters['peak_threshold'] = 0.25
                     parameters['distance'] = 25
                     parameters['min_distance_between_peaks'] = 25
@@ -287,13 +305,10 @@ class IMUGaitFSM(QObject):
                     parameters['min_distance_between_valleys'] = 50
                     parameters['peak_detection_deadzone'] = 0.25
                     parameters['heel_strike_peak_range'] = 1
-                    
+
                 else: # this would mean 0.8 km/h - 1.5 km/h, and we leave the parameters as they are
-                    pass 
-                    
-                    
-                
-            
+                    pass
+
         # Parameters for peak detection
         self.peak_threshold = parameters["peak_threshold"]
         self.distance = parameters["distance"]
@@ -304,7 +319,6 @@ class IMUGaitFSM(QObject):
         self.prominence = parameters["prominence"]
         self.peak_detection_deadzone = parameters['peak_detection_deadzone']
         self.heel_strike_peak_range = parameters['heel_strike_peak_range']
-
 
         self.active_subphase = Phase.UNKNOWN  # Initial state
         self.previous_subphase = Phase.UNKNOWN  # Previous state
@@ -325,7 +339,7 @@ class IMUGaitFSM(QObject):
             Phase.TERMINAL_SWING: np.array([]),
             Phase.UNKNOWN: np.array([]),
         }
-        
+
         #Loading phase info
         self.stance_time=0
         self.loading_response_durations = np.array([])
@@ -375,24 +389,23 @@ class IMUGaitFSM(QObject):
             # Update the data for ROM calculation (offline)
             self.data_gx_rom.extend(sample[3] for sample in samples)
             self.data_gy_rom.extend(-sample[4] for sample in samples)
-            
+
             self.data_gz_rom.extend(sample[5] for sample in samples)
             self.data_accx_rom.extend(sample[0] for sample in samples)
             self.data_accy_rom.extend(sample[1] for sample in samples)
             self.data_accz_rom.extend(sample[2] for sample in samples)
-            
+
             self.data_quatw_rom.extend(sample[6] for sample in samples)
             self.data_quatx_rom.extend(sample[7] for sample in samples)
             self.data_quaty_rom.extend(sample[8] for sample in samples)
             self.data_quatz_rom.extend(sample[9] for sample in samples)
-            
+
             # self.data_magx_rom.extend(sample[10] for sample in samples) we dont send magnetometer data :(
             # self.data_magy_rom.extend(sample[11] for sample in samples)
             # self.data_magz_rom.extend(sample[12] for sample in samples)
-            
-            
+
             self.timestamps_rom.extend(timestamps)
-            
+
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
@@ -502,7 +515,7 @@ class IMUGaitFSM(QObject):
         else:
             # Default case: if no conditions are met, transition to UNKNOWN subphase
             self.__transition_to_sub(Phase.UNKNOWN)
-        
+
     def get_step_count(self) -> int:
         # Count steps as heel strikes:
         # - split_stance=True => LOADING_RESPONSE increments at HS
@@ -545,21 +558,21 @@ class IMUGaitFSM(QObject):
                 # Emit steps when we hit a heel-strike phase
                 if (self.split_stance and next_phase == Phase.LOADING_RESPONSE) or (not self.split_stance and next_phase == Phase.STANCE):
                     self.steps_changed.emit(self.get_step_count())
-            
+
     @Slot()
     def _mid_stance_transition(self) -> None:
         """Transition to the mid stance phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.MID_STANCE)
-    
+
     @Slot()
     def _terminal_stance_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.TERMINAL_STANCE)
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -606,27 +619,27 @@ class IMUGaitFSM(QObject):
         # If the distance to the valley is greater than the distance to the last peak, it is classified as a toe off
         if distance_to_valley > distance_to_peak:
             self.__record_toe_off_peak(peak_timestamp)
-            
+
             if not self.FES:  # tSCS - single SWING phase
                 self.__transition_to(Phase.SWING)
             else:
                 # FES: split swing. Go to MID_SWING and wait for the next valley to enter TERMINAL_SWING.
                 self.__transition_to(Phase.MID_SWING)
                 # mark we are awaiting the valley that will trigger TERMINAL_SWING
-                self._awaiting_terminal_swing = True               
+                self._awaiting_terminal_swing = True
                 self._last_toe_off_ts = peak_timestamp
-                
+
             if self.heel_strike_peaks_timestamps.size == 0 or self.toe_off_peaks_timestamps.size == 0:
                 # not enough data yet to compute stance_time
                 pass
-            
+
             else:
                 dt = float(self.toe_off_peaks_timestamps[-1] - self.heel_strike_peaks_timestamps[-1])
                 self.stance_durations = np.append(self.stance_durations, dt)
                 if self.stance_time == 0:
                     self.stance_time = dt
                 else:
-                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new 
+                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new
                     alpha = 0.2
                     self.stance_time = alpha * dt + (1.0 - alpha) * self.stance_time
 
@@ -642,28 +655,26 @@ class IMUGaitFSM(QObject):
                     QTimer.singleShot(300, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
                     QTimer.singleShot(500, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
 
-                else: 
+                else:
                     # compute loading response duration as 1/6 of stance, convert seconds -> milliseconds
-                    LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms 
+                    LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms
                     self.loading_response_durations = np.append(self.loading_response_durations, LR_time_ms)
                     QTimer.singleShot(LR_time_ms, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
-                    
+
                     # compute mid stance duration as 1/3 of stance, convert seconds -> milliseconds
-                    MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 300 ms 
+                    MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 300 ms
                     self.mid_stance_durations = np.append(self.mid_stance_durations, MST_time_ms)
                     delay_MST= LR_time_ms + MST_time_ms
                     QTimer.singleShot(delay_MST, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
-                   
+
                     # compute terminal stance duration , convert seconds -> milliseconds
-                    TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms 
+                    TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms
                     delay_TST= delay_MST + TST_time_ms
                     print(f"DEBUG: Terminal stance duration = {TST_time_ms} ms, divider = {self.terminal_stance_divider}")
                     QTimer.singleShot(delay_TST, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-                   
-                    
+
             else:
                 self.__transition_to(Phase.STANCE)
-
 
     def __detect_first_step(self, valley_timestamp: float, peak_timestamp: float) -> None:
         """Detect the first step of the gait cycle based on the peak and valley timestamps.\n
@@ -746,7 +757,7 @@ class IMUGaitFSM(QObject):
                 self.valleys_timestamps = np.append(self.valleys_timestamps, valley_timestamp)
 
              # If we were awaiting the terminal-swing trigger (FES mode), and the valley is after the last toe-off,
-            # then transition to TERMINAL_SWING. 
+            # then transition to TERMINAL_SWING.
             try:
                 if (
                     self._awaiting_terminal_swing
@@ -761,7 +772,7 @@ class IMUGaitFSM(QObject):
             except Exception:
                 # defensive: don't let valley bookkeeping break phase logic
                 self._awaiting_terminal_swing = False
-            
+
         except IndexError:
             # No valleys detected
             return np.inf
@@ -859,8 +870,14 @@ class IMUGaitFSM(QObject):
                         self.peak_threshold = new_threshold
                         self.prominence     = new_prominence
 
-
 class IMUGaitFSM_2(QObject):
+    """Method 2 IMU gait FSM: gyro-norm gating + static Aminian pipeline.
+
+    Detects toe-off/heel-strike by thresholding the gyro norm and applies the
+    Aminian shank-angle pipeline. Same interface and signals as ``IMUGaitFSM``
+    (stance-subphase timers, step counting, auto-tuned parameters); selectable
+    at runtime as the alternative to Method 1.
+    """
     # Class-level flag toggled by the GUI checkbox "Audio cues on gait events".
     # When True, every recorded HS/TO event triggers a non-blocking beep.
     audio_cues_enabled = False
@@ -890,13 +907,12 @@ class IMUGaitFSM_2(QObject):
         self.speed = speed
         self.terminal_stance_divider=terminal_stance_divider
 
-        
         self.FES = FES
         self.do_closed_loop=do_closed_loop
-        
+
         self._awaiting_terminal_swing = False
         self._last_toe_off_ts = None
-        
+
         if FES: #If FES is true we will split swing
             self.phase_counters[Phase.MID_SWING] = 0
             self.phase_counters[Phase.TERMINAL_SWING] = 0
@@ -908,8 +924,6 @@ class IMUGaitFSM_2(QObject):
             self.valleys = np.array([])
             self.valleys_timestamps = np.array([])
 
-
-        
         # Add loading response and mid stance to the phase counters and timestamps if the stance phase is split
         if split_stance:
             self.phase_counters[Phase.LOADING_RESPONSE] = 0
@@ -948,26 +962,25 @@ class IMUGaitFSM_2(QObject):
         self.data_quatx_rom = []
         self.data_quaty_rom = []
         self.data_quatz_rom = []
-        
+
         # self.data_magx_rom = [] we dont send magnetometer data :()
         # self.data_magy_rom = []
         # self.data_magz_rom = []
-        
+
         self.timestamps_rom = []
 
         self.first_step_detected = FirstStep.DETECTING_HEEL_STRIKE  # Initial state for first step detection
         self.is_preferred = False
 
-        
         # Increase the number of samples between two peaks, if the gait is slow (e.g., walking at 1 km/h)
-        
-        self.stream_name = self.inlet.info().name() # extract name of stream 
-        
+
+        self.stream_name = self.inlet.info().name() # extract name of stream
+
         if speed > 1.5:
             fast_walking= True # TEST WHAT PARAMETERS WORK FOR FAST WALKIONG AND 1.5 - 3 m/s
         else:
             fast_walking = False
-        
+
         if self.stream_name in ("Right Shank", "Left Shank" , "Right Thigh", "Left Thigh"): # method S2
             if fast_walking:
                     self.TO_threshold=120
@@ -977,7 +990,7 @@ class IMUGaitFSM_2(QObject):
                     self.valley_height= 1.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
-                    
+
             else:
                 if speed <= 0.3:
                     self.TO_threshold=45
@@ -988,17 +1001,16 @@ class IMUGaitFSM_2(QObject):
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
 
-
-                elif 0.3 < speed <= 0.5: 
-                    self.TO_threshold=55 
+                elif 0.3 < speed <= 0.5:
+                    self.TO_threshold=55
                     self.HS_threshold=10
                     self.min_event_distance=2
                     self.min_TO_HS_distance=0.5
                     self.valley_height= 0.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
-                    
-                elif 0.5 < speed < 0.8: 
+
+                elif 0.5 < speed < 0.8:
                     self.TO_threshold=67
                     self.HS_threshold=10
                     self.min_event_distance=1
@@ -1007,7 +1019,6 @@ class IMUGaitFSM_2(QObject):
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
 
-                    
                 else: # this would mean 0.8 km/h - 1.5 km/h, and we leave the parameters as they are
                     self.TO_threshold=75
                     self.HS_threshold=20
@@ -1015,28 +1026,28 @@ class IMUGaitFSM_2(QObject):
                     self.min_TO_HS_distance=0.5
                     self.valley_height= 0.5
                     self.distance_valleys=45
-                    self.min_distance_between_valleys= 50              
-                
-        elif self.stream_name in ("Right Foot", "Left Foot"): # Method F2 
+                    self.min_distance_between_valleys= 50
+
+        elif self.stream_name in ("Right Foot", "Left Foot"): # Method F2
             if fast_walking:
                     self.TO_threshold=200
                     self.HS_threshold=35
                     self.min_event_distance=1
-                    self.min_TO_HS_distance=0.25   
+                    self.min_TO_HS_distance=0.25
                     self.valley_height= 1.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
             else:
                 if speed <= 0.1:
                     self.TO_threshold=25
-                    self.HS_threshold=5 
+                    self.HS_threshold=5
                     self.min_event_distance=0.8
                     self.min_TO_HS_distance=2.4
                     self.valley_height= 0.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
-                    
-                elif 0.1 < speed <= 0.5: 
+
+                elif 0.1 < speed <= 0.5:
                     self.TO_threshold=50
                     self.HS_threshold=25
                     self.min_event_distance=0.8
@@ -1044,8 +1055,8 @@ class IMUGaitFSM_2(QObject):
                     self.valley_height= 0.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
-                
-                elif 0.5 < speed <= 0.8: 
+
+                elif 0.5 < speed <= 0.8:
                     self.TO_threshold=100
                     self.HS_threshold=25
                     self.min_event_distance=0.8
@@ -1053,17 +1064,15 @@ class IMUGaitFSM_2(QObject):
                     self.valley_height= 0.5
                     self.distance_valleys=45
                     self.min_distance_between_valleys= 50
-                    
+
                 else: # this would mean 0.8 km/h - 1.5 km/h, and we leave the parameters as they are
                     self.TO_threshold=125
                     self.HS_threshold=25
                     self.min_event_distance=0.8
-                    self.min_TO_HS_distance=0.5              
+                    self.min_TO_HS_distance=0.5
                     self.valley_height= 0.5
                     self.distance_valleys=45
-                    self.min_distance_between_valleys= 50 
-                    
-
+                    self.min_distance_between_valleys= 50
 
         self.active_subphase = Phase.UNKNOWN  # Initial state
         self.previous_subphase = Phase.UNKNOWN  # Previous state
@@ -1084,12 +1093,12 @@ class IMUGaitFSM_2(QObject):
             Phase.TERMINAL_SWING: np.array([]),
             Phase.UNKNOWN: np.array([]),
         }
-        
+
         self.last_processed_time = None
         self._to_gate_open = False
         self._swing_active = False
         self._deg = 180.0 / np.pi
-        
+
         #Loading phase info
         self.stance_time=0
         self.loading_response_durations = np.array([])
@@ -1153,23 +1162,21 @@ class IMUGaitFSM_2(QObject):
                 self.data_accy_rom.extend(sample[1] for sample in samples)
                 self.data_accz_rom.extend(sample[2] for sample in samples)
                 self.timestamps_rom.extend(timestamps)
-                
+
                 self.data_quatw_rom.extend(sample[6] for sample in samples)
                 self.data_quatx_rom.extend(sample[7] for sample in samples)
                 self.data_quaty_rom.extend(sample[8] for sample in samples)
                 self.data_quatz_rom.extend(sample[9] for sample in samples)
-                
+
                 # self.data_magx_rom.extend(sample[10] for sample in samples)
                 # self.data_magy_rom.extend(sample[11] for sample in samples)
                 # self.data_magz_rom.extend(sample[12] for sample in samples)
-            
+
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
             return np.array(list(self.quaternion)[-last_n:])
         return np.array(self.quaternion)
-    
-
 
     @staticmethod
     def _aminian_pipeline(gyr_y_degps: np.ndarray, fs: float = 60.0,
@@ -1219,7 +1226,6 @@ class IMUGaitFSM_2(QObject):
                 to_list.append(int(w0 + (mins[-1] if mins.size else int(np.argmin(gyr_f[w0:w1])))))
 
         return ms_idx.astype(int), np.array(hs_list, dtype=int), np.array(to_list, dtype=int)
-
 
     def imu_phase_detection(self):
         """Detect the gait phase based on the IMU data."""
@@ -1279,7 +1285,7 @@ class IMUGaitFSM_2(QObject):
                                 # smoother update (alpha controls responsiveness)
                                 alpha = 0.2
                                 self.stance_time = alpha * dt + (1.0 - alpha) * self.stance_time
-                                
+
                         self._to_gate_open = True
                         self._swing_active = True
             else:
@@ -1314,13 +1320,13 @@ class IMUGaitFSM_2(QObject):
                             self.mid_stance_durations = np.append(self.mid_stance_durations, MST_time_ms)
                             delay_MST = LR_time_ms + MST_time_ms
                             QTimer.singleShot(delay_MST, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
-                          
+
                             # compute terminal stance duration , convert seconds -> milliseconds
-                            TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms 
+                            TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms
                             delay_TST= delay_MST + TST_time_ms
                             print(f"DEBUG: Terminal stance duration = {TST_time_ms} ms, divider = {self.terminal_stance_divider}")
                             QTimer.singleShot(delay_TST, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-                   
+
                     else:
                         self.__transition_to(Phase.STANCE)
 
@@ -1376,7 +1382,7 @@ class IMUGaitFSM_2(QObject):
                     pass
 
         self.last_processed_time = ts[-1]
-    
+
     def get_step_count(self) -> int:
         # Count steps as heel strikes:
         # - split_stance=True => LOADING_RESPONSE increments at HS
@@ -1389,16 +1395,16 @@ class IMUGaitFSM_2(QObject):
             )
         except Exception:
             return 0
-        
+
     def __transition_to(self, next_phase: Phase) -> None:
-        """Transition to the next phase of the gait cycle and record the timestamp. :param next_phase: The next phase to transition to. :type next_phase: Phase :raises ValueError: If next_phase is not an instance of the Phase Enum. """ 
-        if not isinstance(next_phase, Phase): 
-            raise ValueError("next_phase must be an instance of the Phase Enum") 
-        # Update counter and current state 
-        if next_phase != self.active_phase: 
+        """Transition to the next phase of the gait cycle and record the timestamp. :param next_phase: The next phase to transition to. :type next_phase: Phase :raises ValueError: If next_phase is not an instance of the Phase Enum. """
+        if not isinstance(next_phase, Phase):
+            raise ValueError("next_phase must be an instance of the Phase Enum")
+        # Update counter and current state
+        if next_phase != self.active_phase:
             #print(f"Transitioning from {self.current_phase} to {next_phase}") # print for debugging s
-            self.phase_counters[next_phase] += 1 
-            self.active_phase = next_phase 
+            self.phase_counters[next_phase] += 1
+            self.active_phase = next_phase
             self.phase_timestamps[next_phase] = np.append(self.phase_timestamps[next_phase], self.timestamps[-1])
             try:
                 # emit numeric Phase so Qt signals are simple to forward
@@ -1414,14 +1420,14 @@ class IMUGaitFSM_2(QObject):
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.MID_STANCE)
-        
+
     @Slot()
     def _terminal_stance_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.TERMINAL_STANCE)
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -1444,8 +1450,6 @@ class IMUGaitFSM_2(QObject):
     #         self.subphase_counters[next_subphase] += 1
     #         self.active_subphase = next_subphase
     #         self.subphase_timestamps[next_subphase] = np.append(self.subphase_timestamps[next_subphase], self.timestamps[-1])
-
-
 
     # def __detect_first_step(self, valley_timestamp: float, peak_timestamp: float) -> None:
     #     """Detect the first step of the gait cycle based on the peak and valley timestamps.\n
@@ -1589,7 +1593,7 @@ class IMUGaitFSM_2(QObject):
                 self.valleys_timestamps = np.append(self.valleys_timestamps, valley_timestamp)
 
              # If we were awaiting the terminal-swing trigger (FES mode), and the valley is after the last toe-off,
-            # then transition to TERMINAL_SWING. 
+            # then transition to TERMINAL_SWING.
             try:
                 if (
                     self._awaiting_terminal_swing
@@ -1604,17 +1608,17 @@ class IMUGaitFSM_2(QObject):
             except Exception:
                 # defensive: don't let valley bookkeeping break phase logic
                 self._awaiting_terminal_swing = False
-            
+
         except IndexError:
             # No valleys detected
             pass
-        
-        
-        
-
-
 
 class IMUGaitFSM_DUMMY(QObject):
+    """No-op IMU gait FSM used when IMU detection is disabled.
+
+    Exposes the same interface as the real FSMs but never changes phase or
+    counts steps, so the stimulation loop can call it unconditionally.
+    """
     # initialize the class and phase counters
     steps_changed = Signal(int)
     # initialize the class and phase counters
@@ -1631,7 +1635,6 @@ class IMUGaitFSM_DUMMY(QObject):
         super().__init__()
         self.quaternion = deque(maxlen=10)
 
-        
         self.active_phase = Phase.UNKNOWN  # Initial state
         self.previous_phase = Phase.UNKNOWN  # Previous state
 
@@ -1654,8 +1657,6 @@ class IMUGaitFSM_DUMMY(QObject):
             Phase.TERMINAL_SWING: np.array([]),
             Phase.UNKNOWN: np.array([]),
         }
-        
-       
 
     ###############################
     # Public methods
@@ -1687,18 +1688,16 @@ class IMUGaitFSM_DUMMY(QObject):
 
     def update_imu(self):
         pass
-            
+
     def get_quaternion(self, last_n: int = None) -> np.ndarray[float]:
         """Get the quaternion data from the IMU."""
         if last_n is not None and last_n > 0:
             return np.array(list(self.quaternion)[-last_n:])
         return np.array(self.quaternion)
-    
-
 
     def imu_phase_detection(self):
        pass
-    
+
     def get_step_count(self) -> int:
         # Count steps as heel strikes:
         # - split_stance=True => LOADING_RESPONSE increments at HS
@@ -1711,7 +1710,7 @@ class IMUGaitFSM_DUMMY(QObject):
             )
         except Exception:
             return 0
-        
+
     def __transition_to(self, next_phase: Phase) -> None:
         pass
     @Slot()
@@ -1720,7 +1719,7 @@ class IMUGaitFSM_DUMMY(QObject):
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         pass
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -1735,6 +1734,6 @@ class IMUGaitFSM_DUMMY(QObject):
     def __record_toe_off_peak(self, peak_timestamp: float) -> None:
         """Record the time of the detected and classified toe off peak."""
         pass
-        
+
     def __record_valley_timestamp(self) -> None:
         pass

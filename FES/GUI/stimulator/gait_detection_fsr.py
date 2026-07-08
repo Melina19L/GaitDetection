@@ -1,3 +1,15 @@
+"""FSR-based gait-phase detection FSMs (force-sensitive insoles over LSL).
+
+Detects gait phases from the front/mid/back-foot force signals, mirroring the
+IMU detectors' interface (update sensor -> phase detection -> step counting)
+and emitting ``Phase`` values to drive stimulation:
+
+  * ``FSRGaitFSM``   = Method 1: threshold on foot force.
+  * ``FSRGaitFSM_2`` = Method 2: mean-threshold with hysteresis.
+  * ``FSRGaitFSM_DUMMY`` = no-op stand-in when FSR detection is disabled.
+
+Qt-signal driven; each runs in its own thread.
+"""
 import numpy as np
 from pylsl import StreamInlet
 from collections import deque
@@ -5,14 +17,19 @@ from enum import Enum
 from .gait_phases import Phase
 from PySide6.QtCore import QTimer, Qt, QObject, Slot, SLOT, Signal
 
-
 class FirstStep(Enum):
+    """State of the first-step bootstrap, before steady-state detection begins."""
     DETECTING_HEEL_STRIKE = 1
     DETECTING_TOE_OFF = 2
     DETECTED = 3
 
-
 class FSRGaitFSM(QObject):
+    """Method 1 FSR gait FSM: fixed force threshold on the insole signal.
+
+    Stance is detected while foot force exceeds a threshold, swing below it;
+    heel-strike/toe-off/mid-stance are recorded and steps counted. Emits
+    ``steps_changed`` / ``phase_changed`` to the GUI.
+    """
     # initialize the class and phase counters
     steps_changed = Signal(int)
     # emit when active phase changes (value is Phase enum value -> int)
@@ -84,10 +101,9 @@ class FSRGaitFSM(QObject):
             self.data_mf.extend(sample[1] for sample in samples)
             self.data_bf.extend(sample[2] for sample in samples)
             self.timestamps.extend(timestamps)
-            
+
             # Print streaming FSR data in the terminal (Front, Middle, Back foot)
             print(f"FSR Stream -> Front: {self.data_ff[-1]:.2f}, Middle: {self.data_mf[-1]:.2f}, Back: {self.data_bf[-1]:.2f}")
-
 
             # For offline analysis, store the data in numpy arrays
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples]))
@@ -135,7 +151,7 @@ class FSRGaitFSM(QObject):
 
         # Separate case to detect the first step
         if self.first_step_detected is not FirstStep.DETECTED:
-            
+
             # TODO Detect first step from fsr values
             pass
 
@@ -251,9 +267,15 @@ class FSRGaitFSM(QObject):
         """Record the time of the detected and classified mid stance."""
         self.mid_stance_timestamps = np.append(self.mid_stance_timestamps, timestamp)
         self.mid_stance = np.append(self.mid_stance, self.data_mf[-1])
-        
-        
+
 class FSRGaitFSM_2(QObject):
+    """Method 2 FSR gait FSM: mean-threshold with hysteresis.
+
+    Same interface as ``FSRGaitFSM`` but gates stance/swing on a mean force
+    threshold with hysteresis to reject chatter, and splits stance subphases
+    via ``terminal_stance_divider``. Selectable at runtime as the alternative
+    to Method 1.
+    """
     # initialize the class and phase counters
     steps_changed = Signal(int)
     # emit when active phase changes (value is Phase enum value -> int)
@@ -266,7 +288,6 @@ class FSRGaitFSM_2(QObject):
         self.threshold = threshold  # Threshold for phase detection
         self.hysteresis = hysteresis
         self.terminal_stance_divider=terminal_stance_divider
-
 
         self.active_phase = Phase.UNKNOWN  # Initial state
         self.previous_phase = Phase.UNKNOWN  # Previous state
@@ -291,7 +312,7 @@ class FSRGaitFSM_2(QObject):
         self.data_ff = deque(maxlen=1000)  # Data for the front foot sensor
         self.data_mf = deque(maxlen=1000)  # Data for the middle foot sensor
         self.data_bf = deque(maxlen=1000)  # Data for the back foot sensor
-        
+
         self.timestamps = deque(maxlen=1000)
 
         # Data for the offline analysis
@@ -301,7 +322,7 @@ class FSRGaitFSM_2(QObject):
         self.data_cop_x_offline = np.array([])
         self.data_cop_y_offline = np.array([])
         self.timestamps_offline = np.array([])
-        
+
         #Loading phase info
         self.stance_time=0
         self.FSR2_loading_response_durations = np.array([])
@@ -337,11 +358,9 @@ class FSRGaitFSM_2(QObject):
             self.data_mf.extend(sample[1] for sample in samples)
             self.data_bf.extend(sample[2] for sample in samples)
             self.timestamps.extend(timestamps)
-            
+
             # Print streaming FSR data in the terminal (Front, Middle, Back foot)
             print(f"FSR Stream -> Front: {self.data_ff[-1]:.2f}, Middle: {self.data_mf[-1]:.2f}, Back: {self.data_bf[-1]:.2f}")
-            
-            
 
             # For offline analysis, store the data in numpy arrays
             self.data_ff_offline = np.append(self.data_ff_offline, np.array([sample[0] for sample in samples]))
@@ -357,19 +376,17 @@ class FSRGaitFSM_2(QObject):
         # (changing this parameter would not affect the phase counters result but only the plots' starting point)
         if len(self.data_ff) <= 100:
             return
-        
-        
 
         ff=np.asarray(self.data_ff)
         mf=np.asarray(self.data_mf)
         bf=np.asarray(self.data_bf)
-        
-        data_mean = (ff + mf + bf) / 3 
+
+        data_mean = (ff + mf + bf) / 3
 
         # Detect swing if phase is unknown
         if (
             self.active_phase == Phase.UNKNOWN
-            and data_mean[-1] <  self.threshold  
+            and data_mean[-1] <  self.threshold
         ):
             self.__transition_to(Phase.SWING)
 
@@ -382,48 +399,46 @@ class FSRGaitFSM_2(QObject):
                             QTimer.singleShot(100, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
                             QTimer.singleShot(300, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
                             QTimer.singleShot(500, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-            else: 
+            else:
                 # compute loading response duration as 1/6 of stance, convert seconds -> milliseconds
-                LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms 
+                LR_time_ms = max(100, int((self.stance_time / 6.0) * 1000.0)) # always stimulate at least for 100 ms
                 self.FSR2_loading_response_durations = np.append(self.FSR2_loading_response_durations, LR_time_ms)
                 QTimer.singleShot(LR_time_ms, Qt.TimerType.PreciseTimer, self, SLOT("_mid_stance_transition()"))
-                
+
                 # compute mid stance duration as 1/3 of stance, convert seconds -> milliseconds
-                MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 100 ms 
+                MST_time_ms = max(200, int((self.stance_time / 3.0) * 1000.0)) # always stimulate at least for 100 ms
                 self.FSR2_mid_stance_durations = np.append(self.FSR2_mid_stance_durations, MST_time_ms)
                 delay_MST= LR_time_ms + MST_time_ms
                 QTimer.singleShot(delay_MST, Qt.TimerType.PreciseTimer, self, SLOT("_terminal_stance_transition()"))
 
                 # compute terminal stance duration , convert seconds -> milliseconds
-                TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms 
+                TST_time_ms = max(200, int((self.stance_time / self.terminal_stance_divider) * 1000.0)) # always stimulate at least for 300 ms
                 delay_TST= delay_MST + TST_time_ms
                 print(f"DEBUG: Terminal stance duration = {TST_time_ms} ms, divider = {self.terminal_stance_divider}")
                 QTimer.singleShot(delay_TST, Qt.TimerType.PreciseTimer, self, SLOT("_pre_swing_transition()"))
-    
-
 
         # Detect toe off
         elif data_mean[-1] < abs(self.threshold - self.hysteresis) and self.active_phase == Phase.MID_STANCE:
             self.__record_toe_off(self.timestamps[-1])
             self.__transition_to(Phase.SWING)
-            
+
             if self.heel_strike_timestamps.size == 0 or self.toe_off_timestamps.size == 0:
                 # not enough data yet to compute stance_time
                 pass
-            
+
             else:
                 dt = float(self.toe_off_timestamps[-1] - self.heel_strike_timestamps[-1])
                 self.FSR2_stance_durations = np.append(self.FSR2_stance_durations, dt)
                 if self.stance_time == 0:
                     self.stance_time = dt
                 else:
-                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new 
+                   # smoother update (alpha controls responsiveness), if we averaged the mean and new, 50% of the value will depend on the new
                     alpha = 0.2
                     self.stance_time = alpha * dt + (1.0 - alpha) * self.stance_time
 
         # Separate case to detect the first step
         if self.first_step_detected is not FirstStep.DETECTED:
-            
+
             # TODO Detect first step from fsr values
             pass
 
@@ -471,21 +486,21 @@ class FSRGaitFSM_2(QObject):
             # Emit on heel-strike phase if applicable
             if next_phase == Phase.LOADING_RESPONSE:
                 self.steps_changed.emit(self.get_step_count())
-                
+
     @Slot()
     def _mid_stance_transition(self) -> None:
         """Transition to the mid stance phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.MID_STANCE)
-        
+
     @Slot()
     def _terminal_stance_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         self.__transition_to(Phase.TERMINAL_STANCE)
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -560,11 +575,12 @@ class FSRGaitFSM_2(QObject):
         """Record the time of the detected and classified mid stance."""
         self.mid_stance_timestamps = np.append(self.mid_stance_timestamps, timestamp)
         self.mid_stance = np.append(self.mid_stance, self.data_mf[-1])
-        
-        
-        
-        
+
 class FSRGaitFSM_DUMMY(QObject):
+    """No-op FSR gait FSM used when FSR detection is disabled.
+
+    Same interface as the real FSMs but never changes phase or counts steps.
+    """
     # initialize the class and phase counters
     steps_changed = Signal(int)
     # emit when active phase changes (value is Phase enum value -> int)
@@ -607,7 +623,7 @@ class FSRGaitFSM_DUMMY(QObject):
         self.data_ff = deque(maxlen=1000)  # Data for the front foot sensor
         self.data_mf = deque(maxlen=1000)  # Data for the middle foot sensor
         self.data_bf = deque(maxlen=1000)  # Data for the back foot sensor
-        
+
         self.timestamps = deque(maxlen=1000)
 
         # Data for the offline analysis
@@ -617,13 +633,13 @@ class FSRGaitFSM_DUMMY(QObject):
         self.data_cop_x_offline = np.array([])
         self.data_cop_y_offline = np.array([])
         self.timestamps_offline = np.array([])
-        
+
         #Loading phase info
         self.stance_time=0
         self.FSR2_loading_response_durations = np.array([])
         self.FSR2_mid_stance_durations = np.array([])
         self.FSR2_stance_durations = np.array([])
-        
+
         self.timestamps_fsr = deque(maxlen=1000)
 
         # Data for the offline analysis
@@ -633,7 +649,7 @@ class FSRGaitFSM_DUMMY(QObject):
         self.data_cop_x_offline = np.array([])
         self.data_cop_y_offline = np.array([])
         self.timestamps_fsr_offline = np.array([])
-        
+
         # IMU DATA
         self.data_gy = deque(maxlen=1000)
         self.data_gy_rom = []
@@ -649,15 +665,12 @@ class FSRGaitFSM_DUMMY(QObject):
         # optionally make window/threshold configurable
         self.valley_search_window_s = 0.6
         self._midswing_start_imu_ts = None
-        
 
-        
         #Loading phase info
         self.stance_time=0
         self.FSR2_loading_response_durations = np.array([])
         self.FSR2_mid_stance_durations = np.array([])
         self.FSR2_stance_durations = np.array([])
-
 
     ###############################
     # Public methods
@@ -679,12 +692,12 @@ class FSRGaitFSM_DUMMY(QObject):
         """Update the FSR data by pulling a chunk of samples from the LSL stream."""
         # Pull data from lsl stream
         pass
-    
+
     def update_fsr_imu(self):
         """Update the FSR data by pulling a chunk of samples from the LSL stream."""
         # Pull data from lsl stream
         pass
-    
+
     def fsr_phase_detection(self):
         """Detect the gait phase based on the IMU data."""
         pass
@@ -707,14 +720,14 @@ class FSRGaitFSM_DUMMY(QObject):
 
     def __transition_to(self, next_phase: Phase) -> None:
         pass
-                
+
     @Slot()
     def _mid_stance_transition(self) -> None:
         """Transition to the mid stance phase of the gait cycle and record the timestamp.
         This function is used for QTimer.singleShot as it requires a member function as a string (slot) -> no arguments are passed.
         """
         pass
-        
+
     @Slot()
     def _pre_swing_transition(self) -> None:
         """Transition to the pre swing phase of the gait cycle and record the timestamp.
@@ -726,7 +739,7 @@ class FSRGaitFSM_DUMMY(QObject):
         pass
 
     def __detect_first_step(self, valley_timestamp: float, peak_timestamp: float) -> None:
-       
+
         pass
 
     def __record_heel_strike(self, timestamp: float) -> None:

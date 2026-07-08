@@ -14,6 +14,12 @@
 #
 # ///////////////////////////////////////////////////////////////
 
+"""Application entry point.
+
+Boots the PySide6 GUI: forces LSL onto the IPv4 loopback, loads the radio-button
+resources and launches ``MainWindow``. Run with ``python main.py`` from
+``FES/GUI/``.
+"""
 # IMPORT PACKAGES AND MODULES
 # ///////////////////////////////////////////////////////////////
 from gui.uis.windows.main_window.functions_main_window import *
@@ -36,7 +42,6 @@ from gui.core.json_settings import Settings
 # ///////////////////////////////////////////////////////////////
 # MAIN WINDOW
 from gui.uis.windows.main_window.main_window import MainWindow
-
 
 # IMPORT PY ONE DARK WIDGETS
 # ///////////////////////////////////////////////////////////////
@@ -61,7 +66,7 @@ sys.excepthook = log_uncaught_exceptions
 # Set the initial class and also additional parameters of the "QApplication" class
 # ///////////////////////////////////////////////////////////////
 if __name__ == "__main__":
-    
+
     # APPLICATION
     # ///////////////////////////////////////////////////////////////
     app = QApplication(sys.argv)

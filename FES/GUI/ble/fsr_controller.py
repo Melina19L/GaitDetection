@@ -1,7 +1,14 @@
+"""BLE force-insole (FSR) controller.
+
+``FSRController`` runs one foot's QtBluetooth connection on a dedicated thread:
+scans, connects the ``QLowEnergyController``, subscribes the FSR
+characteristic and decodes the 4-byte payload into front/mid/back-foot forces.
+MainWindow wraps each sample with the centre-of-pressure and pushes it to the
+``FSR_Left`` / ``FSR_Right`` LSL outlet.
+"""
 from qt_core import *
 import struct
 from typing import Optional
-
 
 class FSRController(QObject):
     """Manages BLE connection to an FSR peripheral on a dedicated thread."""
@@ -97,7 +104,7 @@ class FSRController(QObject):
             pass
         self.updateStatus.emit(f"Scanning for '{device_name}'...")
         self.agent.start(QBluetoothDeviceDiscoveryAgent.DiscoveryMethod.LowEnergyMethod)
-    
+
     # Adapter to match MainWindow signal signature (name, devices)
     @Slot(str, list)
     def connect_to_peripheral(self, device_name: str, _discovered_devices: list):

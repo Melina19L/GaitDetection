@@ -1,3 +1,11 @@
+"""Main window controller (runtime wiring, not page layout).
+
+``MainWindow`` holds the ``ExperimentHandler`` in its own ``QThread``, the two
+per-side ``FSRController`` BLE workers, the ``BLEScanner`` and the
+``AngleCalibrator``. It wires the step/phase signals to the Test page, runs the
+stopwatch and manages pause/resume (with the post-pause lockout). Page layout
+and business logic live in ``SetupMainWindow`` (``setup_main_window.py``).
+"""
 from qt_core import *
 from gui.core.json_settings import Settings
 from gui.core.functions import Functions
@@ -11,10 +19,16 @@ from stimulator.gait_phases import Phase
 
 DEVICE_ADDRESS_LEFT = "92:51:51:57:E3:30"
 
-DEVICE_ADDRESS_RIGHT = "34:7A:39:AA:CA:A7" 
+DEVICE_ADDRESS_RIGHT = "34:7A:39:AA:CA:A7"
 
 # MAIN WINDOW
 class MainWindow(QMainWindow):
+    """Top-level window: owns the worker threads and wires runtime signals.
+
+    Builds the UI via ``SetupMainWindow``, launches the experiment/BLE/angle
+    workers on their threads and connects their signals to the Test-page widgets
+    (steps, phase, active time, stopwatch, pause/resume).
+    """
     # Signals
     start_experiment = Signal(dict)
     stop_experiment = Signal()
@@ -73,7 +87,6 @@ class MainWindow(QMainWindow):
         self._pause_enable_delay.setSingleShot(True)
         self._pause_enable_delay.timeout.connect(self._enable_page10_pause_btn)
 
-
         # NEW: connect active run seconds from backend to UI
         try:
             self.experiment_handler.active_run_seconds_changed.connect(self.on_active_run_seconds_changed)
@@ -85,7 +98,7 @@ class MainWindow(QMainWindow):
             self.experiment_handler.step_count_changed.connect(self.on_step_count_changed)
         except Exception:
             pass
-        
+
         # NEW: connect per-leg signals from ExperimentHandler
         try:
             self.experiment_handler.imu_left_step_count_changed.connect(self.on_left_step_count_changed)
@@ -257,7 +270,7 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait()
                 thread.deleteLater()
-    
+
     # -------------------- STEP COUNTER SLOTS -----------------
     @Slot(int)
     def on_step_count_changed(self, count: int):
@@ -280,7 +293,7 @@ class MainWindow(QMainWindow):
                 self.page10_step_right_value.setText(str(int(count)))
         except Exception:
             pass
-    
+
     # Keep backward-compat slots by forwarding to the unified ones
     @Slot(int)
     def on_imu_left_step_count_changed(self, count: int):
@@ -354,7 +367,7 @@ class MainWindow(QMainWindow):
         self.ui.load_pages.ff_value_left.setText(str(data[0]))
         self.ui.load_pages.mf_value_left.setText(str(data[1]))
         self.ui.load_pages.bf_value_left.setText(str(data[2]))
-        
+
         yff, ymf, ybf = self.get_cop_coordinates()
         ff, mf, bf = data[0], data[1], data[2]
         total_force = ff + mf + bf
@@ -369,7 +382,7 @@ class MainWindow(QMainWindow):
         self.ui.load_pages.ff_value_right.setText(str(data[0]))
         self.ui.load_pages.mf_value_right.setText(str(data[1]))
         self.ui.load_pages.bf_value_right.setText(str(data[2]))
-        
+
         yff, ymf, ybf = self.get_cop_coordinates()
         ff, mf, bf = data[0], data[1], data[2]
         total_force = ff + mf + bf
@@ -514,7 +527,7 @@ class MainWindow(QMainWindow):
         # Update both the page label and Page 10 timer cell
         if hasattr(self, "page10_timer_value") and self.page10_timer_value is not None:
             self.page10_timer_value.setText(time_text)
-    
+
     @staticmethod
     def _fmt_live_angle(val) -> str:
         """Format a calibrator angle (numpy scalar / array / float) as ``+12.3°`` or ``--``."""
