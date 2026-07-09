@@ -1,6 +1,7 @@
-# CLAUDE.md
+# INSTRUCTIONS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Developer reference for this repository: architecture, conventions and how the
+pieces fit together.
 
 ## What this is
 
@@ -79,6 +80,155 @@ Standalone post-processing of recorded trials (the GUI saves `<base>.pkl` + `<ba
 - `testsorosh/trial2/compare_gui_vs_mocap.py` — validates GUI IMU angles vs Vicon inverse-kinematics gold standard: one normalized gait cycle, per-joint ROM + RMSE.
 
 Saved-file schema: `rom_data[<side>_<placement>_fsm{1,2}]` (raw acc/gyro/quat + timestamps), `imu_<side>_<joint>_angles/timestamps`, `fsr_*` raw + events, `imu_<side>_<placement>_fsm2_{heel_strike,toe_off}_peaks`.
+
+Each run writes four files (see `FES/GUI/README.md` for the user-level version):
+- `<base>.pkl` — the master record (the schema above).
+- `<base>.xlsx` — the same, as an Excel workbook. Sheets written by
+  `export_xlsx_log` (in `stimulation_classes.py`): `Joint_Angles`,
+  `Raw_<sensor>` (one per IMU), `FSR_Left` / `FSR_Right`, `Gait_Events_FSR`,
+  `Gait_Events_IMU`, `Stim_Events`, `All_Synchronized_Data`.
+- `<base>_plot.pkl` — the `AngleCalibrator` angle buffers (dense, plain dict).
+- `<base>_plot.xlsx` — sheets: `Joint_Angles_Native`, `Joint_Angles_Resampled`
+  (uniform 60 Hz grid + `is_walking`), `Calibration` (SVD/CARD per joint),
+  `Walk_Window`, `Raw_*`.
+
+The IMU angles inside the master `.xlsx`/`.pkl` are sparse (updated only when the
+stimulation logic queries them); for continuous per-joint angles use the
+`_plot.xlsx` `Joint_Angles_Resampled` sheet.
+
+## How the joint angles are computed
+
+**The maths lives in `stimulator/closed_loop.py`.** It works from per-segment IMU
+quaternions (Movella DOT orientation, [w,x,y,z]) and produces one angle per joint:
+
+- **Knee** — Segment Axis Angle: `angle_between_quaternions(q_thigh, q_shank)`,
+  the angle between the two segments' long axes. This is the path that actually
+  runs for the knee.
+- **Hip** — functional hinge: the pelvis↔thigh rotation projected onto the hip
+  hinge axis found at calibration (`identify_hinge_axis` → SVD), extracted with
+  `extract_functional_angle` (swing-twist). Yaw-invariant.
+- **Ankle** — `signed_ankle_angle` (gravity-constrained sagittal projection) or
+  the functional hinge, decoupled from knee flexion, with a ±50° clamp and a
+  spike-rejection guard against foot-IMU heading glitches.
+
+Calibration is what makes these meaningful: it stores each joint's neutral
+reference and hinge axis. `ROM` (also in `closed_loop.py`) holds those references
+and the running angle series.
+
+**Real-time (during a session):** `angle_calibrator.py` is the engine. Its 20 ms
+`record_data` timer pulls the latest paired quaternions per side, calls the
+`ROM`/`closed_loop` functions above, and stores knee/ankle/hip in per-joint
+buffers. Those buffers feed the live plots and, at the end of the run, are written
+to `<base>_plot.pkl` / `<base>_plot.xlsx`. Calibration itself is also here:
+`global_calibration_10s` (standing neutral offset + knee/hip hinge from the
+sit-down) and `ankle_functional_calibration` (seated flex → ankle hinge). The box
+that reports **SVD vs CARD** per joint comes from `get_method_per_joint`.
+
+**Offline (to look at the angles later):** the angles are already computed and
+saved, so the simplest path is to just open `<base>_plot.xlsx`
+(`Joint_Angles_Resampled` sheet — all joints on one time grid). If instead you
+need to *recompute* angles from scratch (a different method, a validation), the
+raw quaternions/acc/gyro are in the main `<base>.pkl` under
+`rom_data[<side>_<placement>_fsm{1,2}]`, and you call the same
+`closed_loop.py` functions on them in a script.
+
+### Which code to analyse them offline
+
+Offline post-processing lives in `FES/subjects/` (all scripts hardcode their
+input paths — edit the path at the top):
+
+- **`gait_pattern_analyzer.py`** — FSR: detects heel strikes, segments and
+  normalises cycles to 100 points, plots raw + mean±SD.
+- **`testsorosh/trial2/compare_gui_vs_mocap.py`** — validates the GUI IMU angles
+  against a Vicon inverse-kinematics gold standard (one normalised gait cycle,
+  per-joint ROM + RMSE). This is the template for angle validation: read the
+  `_plot` data, segment into gait cycles, compare.
+
+The general recipe for any offline angle analysis: read `<base>_plot.pkl`
+(dense angles, plain dict, no custom classes needed) or the raw quaternions from
+`<base>.pkl`, then segment/normalise/plot.
+
+## Gait detection
+
+The detectors are finite-state machines that all expose the same interface and
+emit `Phase` values; you pick IMU-only, FSR-only or fused at runtime.
+
+### FSR (force insoles) — `stimulator/gait_detection_fsr.py`
+
+The insole reports force under three foot zones (front / mid / back), streamed per
+side over LSL (`FSR_Left` / `FSR_Right`). Logic is straightforward: **foot loaded
+= stance, foot unloaded = swing**; the load onset is heel-strike, the release is
+toe-off. `FSRGaitFSM` (Method 1) uses a fixed force threshold; `FSRGaitFSM_2`
+(Method 2) uses a mean threshold with hysteresis to reject chatter and splits the
+stance subphases via `terminal_stance_divider`. `_DUMMY` is the no-op fallback.
+Because it measures ground contact directly, FSR is simple and robust for
+stance/swing, but gives less information about what the leg is doing mid-swing.
+
+### IMU — `stimulator/gait_detection_imu.py`
+
+The detection sensor is the **shank (shin) IMU gyroscope**, one per side — the
+shank angular velocity has clear, repeatable peaks and valleys across the gait
+cycle. (The other IMUs are for angles, not detection: foot for the ankle and the
+fusion swing-trigger, thigh for knee/hip, pelvis as the hip reference.) Two
+methods, selectable at runtime:
+
+- **Method 1 — `IMUGaitFSM`** (peaks/valleys on shank gyro-Y): finds the peaks
+  and valleys of the shank angular velocity and classifies heel-strike vs toe-off
+  by distance to the neighbouring valley/peak.
+  - *Pros:* annotation-free, no fixed thresholds to tune, and the most robust in
+    validation — it holds up well in straight walking and even through turns.
+  - *Cons:* relies on the signal having clear peaks; very slow, shuffling or
+    irregular gait with low gyro amplitude can make peaks harder to pick.
+- **Method 2 — `IMUGaitFSM_2`** (gyro-norm threshold gating + static Aminian
+  pipeline): gates toe-off/heel-strike on the gyro *norm* crossing a threshold.
+  - *Pros:* uses the full 3-axis magnitude, can be more sensitive to onset.
+  - *Cons:* the norm threshold is less robust in **turns** (the norm behaves
+    differently when the leg is also rotating in the transverse plane), where it
+    tends to mis-fire. Threshold-based, so more sensitive to tuning.
+
+Both auto-tune from the measured cadence and peak heights and scale with the
+walking `speed` you set. `_DUMMY` is the no-op fallback.
+
+In short: **Method 1 (shank peaks/valleys) is the default, annotation-free and
+turn-robust choice; Method 2 (norm) can be more sensitive but degrades in turns.**
+
+### Fused — `stimulator/gait_detection_imu_fsr.py`
+
+`FSRIMUGaitFSM`: the FSR insole drives the stance/swing split (direct ground
+contact), while an IMU gyro valley after toe-off triggers the
+MID_SWING → TERMINAL_SWING transition. Combines FSR's reliable contact timing with
+the IMU's mid-swing information.
+
+## What each GUI file contains
+
+Quick map of the source (ignore `venv/`; files headed `BY: WANDERSON M.PIMENTA`
+are stock PyDracula template — the project work is the page content and wiring):
+
+- **`main.py`** — entry point; sets up LSL loopback, launches `MainWindow`.
+- **`angle_calibrator.py`** — the live joint-angle engine + calibration (see the
+  angle section above).
+- **`modify_svg.py`** — parses/labels/recolours the electrode SVG.
+- **`stimulator/`** — the real-time core (the thesis IP):
+  - `gait_phases.py` — the `Phase` enum (shared vocabulary).
+  - `gait_detection_imu.py` / `gait_detection_fsr.py` / `gait_detection_imu_fsr.py`
+    — the gait FSMs (see the detection section above).
+  - `closed_loop.py` — the joint-angle maths + `PIController`.
+  - `stimulation_classes.py` — the 10 ms real-time loop and data saving.
+  - `gait_model_stimulation_functions.py` — phase→muscle mapping and channel control.
+  - `stimulator_parameters.py` — the 8-channel configuration.
+  - `ComPortFunc.py` — the low-level serial protocol to the stimulator.
+  - `experiment_handler.py` — picks the stimulation mode and wires it to the GUI.
+- **`gui/`** — the interface:
+  - `uis/windows/main_window/setup_main_window.py` — builds every page's content
+    and logic (the biggest file).
+  - `uis/windows/main_window/main_window.py` — the controller: owns the worker
+    threads and connects their signals to the pages.
+  - `uis/windows/main_window/functions_main_window.py`, `ui_main*.py` — PyDracula
+    navigation/shell and the generated page layouts.
+  - `widgets/py_angle_plot/` — the live knee/ankle/hip plot widgets and their
+    pop-out dialog.
+- **`ble/`** — Bluetooth I/O: `fsr_controller.py` (one insole per side) and
+  `ble_scanner.py` (device scan).
 
 ## Conventions & gotchas
 
